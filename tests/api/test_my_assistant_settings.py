@@ -42,6 +42,8 @@ async def test_the_owner_reads_the_defaults(
         "focus_chats": [],
         "focus_people": [],
         "ignored_chats": [],
+        "managed_chats": [],
+        "chat_scope": "all",
         "shift_override": None,
         "shift_override_until": None,
         "cold_start": "pending",
@@ -52,8 +54,14 @@ async def test_the_owner_reads_the_defaults(
         "daily_turn_budget": None,
         "platform_daily_turn_budget": 2000,
         "effective_daily_turn_budget": 2000,
-        "limits": {"focus_chats": 5, "ignored_chats": 50, "budget_min": 10},
+        "limits": {
+            "focus_chats": 5,
+            "ignored_chats": 200,
+            "managed_chats": 200,
+            "budget_min": 10,
+        },
         "locked": False,
+        "authorization": {"message_range": "all", "status": "revoked", "enforced": None},
     }
     assert [
         (entry["action"], entry["actor_id"])
@@ -119,7 +127,8 @@ async def test_the_owner_changes_everything_and_chat_lists_are_stored_encrypted(
         ({"workdays": [1, 1]}, "invalid_workdays"),
         ({"focus_chats": ["ou_person"]}, "invalid_chats"),
         ({"focus_chats": [f"oc_{n}" for n in range(6)]}, "too_many_chats"),
-        ({"ignored_chats": [f"oc_{n}" for n in range(51)]}, "too_many_chats"),
+        ({"ignored_chats": [f"oc_{n}" for n in range(201)]}, "too_many_chats"),
+        ({"focus_chats": ["oc_a"], "chat_scope": "listed"}, "focus_not_managed"),
         ({"focus_chats": ["oc_a"], "ignored_chats": ["oc_a"]}, "chat_in_both_lists"),
         ({"daily_turn_budget": 2001}, "budget_over_platform"),
         # 一项不过，整次请求都不落库（时区没有被改掉，见下面的断言）。

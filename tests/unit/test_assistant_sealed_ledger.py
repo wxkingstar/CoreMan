@@ -177,8 +177,8 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/transcripts.py": 2,
     # 盯消息：登记缺行的助理、意外失败后往后推，都只写调度用的列
     "coreman/core/assistants/watch.py": 2,
-    # 收件箱：入箱经 seal_values 封存摘要；压着与两种作废只改级别、状态与时间
-    "coreman/core/assistants/watch_inbox.py": 4,
+    # 收件箱：入箱经 seal_values 封存摘要；压着与三种作废只改级别、状态与时间
+    "coreman/core/assistants/watch_inbox.py": 5,
     "coreman/core/bus/outbox.py": 8,  # add 封存载荷；其余只写状态与 last_error
     "coreman/core/bus/streams.py": 6,  # update_state / complete 封存；其余只写元数据
     "coreman/core/bus/tasks.py": 6,  # enqueue / finish 封存；其余只写状态

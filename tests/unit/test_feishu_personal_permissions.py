@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from coreman.core.feishu_personal import permissions
 from coreman.core.feishu_personal.permissions import (
     MESSAGE_SCOPES,
     PermissionsError,
@@ -128,3 +129,22 @@ async def test_discovery_reports_missing_app_introspection_permission_without_le
         await app_user_scopes("cli_app", "secret", http=http)
     assert error.value.code == "app_scope_discovery_permission_missing"
     assert str(error.value) == "app_scope_discovery_permission_missing"
+
+
+def test_message_range_drops_the_other_kind_of_chat() -> None:
+    scopes = sorted(permissions.MESSAGE_SCOPES)
+    group = permissions.narrow(scopes, "group")
+    assert permissions.GROUP_READ in group and permissions.P2P_READ not in group
+    assert "im:message:readonly" in group
+    p2p = permissions.narrow(scopes, "p2p")
+    assert permissions.P2P_READ in p2p and permissions.GROUP_READ not in p2p
+    assert permissions.narrow(scopes, "all") == scopes
+    with pytest.raises(ValueError):
+        permissions.narrow(scopes, "some")
+
+
+def test_range_is_enforced_only_when_feishu_left_the_other_kind_out() -> None:
+    assert permissions.range_enforced("group", ["im:message:readonly", permissions.GROUP_READ])
+    # 本人以前同意过单聊那一项：飞书照样发下来，只靠平台拦。
+    assert not permissions.range_enforced("group", [permissions.GROUP_READ, permissions.P2P_READ])
+    assert permissions.range_enforced("all", [permissions.P2P_READ])

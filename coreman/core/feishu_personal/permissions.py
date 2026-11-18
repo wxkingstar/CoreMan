@@ -18,6 +18,13 @@ MESSAGE_SCOPES = frozenset(
         "im:chat:read",
     }
 )
+# 以本人身份读消息时，飞书除了基础的读消息权限，还要按会话类型各开一项补充权限（单聊、群聊）。
+# 少申请一项，那一类会话的消息飞书自己就不给读：这是飞书侧唯一能按会话细分的地方。
+P2P_READ = "im:message.p2p_msg:get_as_user"
+GROUP_READ = "im:message.group_msg:get_as_user"
+# 消息范围：all 单聊与群聊都读，group 只读群聊，p2p 只读单聊。
+MESSAGE_RANGES = ("all", "group", "p2p")
+_RANGE_DROPS = {"all": frozenset(), "group": frozenset({P2P_READ}), "p2p": frozenset({GROUP_READ})}
 BASE = "https://open.feishu.cn/open-apis"
 _SCOPE = re.compile(r"[a-z0-9_.]+(?::[a-z0-9_.]+)+\Z")
 _SEND = re.compile(r"(?:^|[.:_])(send|reply|forward)(?:$|[.:_])")
@@ -65,6 +72,22 @@ def select_scopes(level: str, available: list[str]) -> list[str]:
         if level == "no_messages":
             scopes = {s for s in scopes if not is_message_scope(s)}
     return sorted(scopes)
+
+
+def narrow(scopes: list[str], message_range: str) -> list[str]:
+    """按消息范围去掉另一类会话的补充读权限。"""
+    if message_range not in _RANGE_DROPS:
+        raise ValueError("invalid_message_range")
+    return [scope for scope in scopes if scope not in _RANGE_DROPS[message_range]]
+
+
+def range_enforced(message_range: str, granted: list[str]) -> bool:
+    """飞书实际发下来的权限里没有被去掉的那一项：另一类会话飞书自己就不给读。
+
+    飞书会把本人以前同意过的权限一并发下来；以前授过「全部会话」的人改成只群聊，令牌里可能
+    仍有单聊那一项，这时只靠平台拦，要本人先在飞书里撤掉对应用的授权再重新授权。
+    """
+    return not (_RANGE_DROPS.get(message_range, frozenset()) & set(granted))
 
 
 async def app_user_scopes(

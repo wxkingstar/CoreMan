@@ -2,8 +2,9 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { myAssistant, type AssistantPrefs } from '@/api/myAssistant'
+import { myAssistant, type AssistantPrefs, type MessageRange } from '@/api/myAssistant'
 import AssistantAccessLog from '@/components/assistant/AssistantAccessLog.vue'
+import AssistantChatPicker from '@/components/assistant/AssistantChatPicker.vue'
 import LoadState from '@/components/LoadState.vue'
 import { MAX_DIGEST_TIMES, toForm, toPatch, validate, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
 import { errorMessage } from '@/utils/errors'
@@ -14,14 +15,17 @@ const { t } = useI18n()
 
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
 const prefs = ref<AssistantPrefs | null>(null)
-const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: '', ignored_chats: '', digest_times: '', quiet_enabled: true, quiet_start: '', quiet_end: '', follow_platform: true, daily_turn_budget: 0 })
+const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: '', chat_scope: 'all', ignored_chats: [], managed_chats: [], digest_times: '', quiet_enabled: true, quiet_start: '', quiet_end: '', follow_platform: true, daily_turn_budget: 0 })
 const errors = ref<Partial<Record<PrefsField, string>>>({})
 const error = ref(''), loading = ref(false), saving = ref(false)
+const RANGES: MessageRange[] = ['all', 'group', 'p2p']
+const range = ref<MessageRange>('all'), rangeSaving = ref(false), rangeLink = ref('')
 
 /** 这一项的错误提示；没有错误是空串（el-form-item 不显示）。 */
 const fieldError = (field: PrefsField) => (errors.value[field] ? t('assistant.settings.errors.' + errors.value[field]) : '')
 function apply(data: AssistantPrefs) {
   prefs.value = data
+  range.value = data.authorization?.message_range ?? 'all'
   Object.assign(form, toForm(data))
   errors.value = {}
 }
@@ -42,6 +46,21 @@ async function save() {
   catch (e) { ElMessage.error(errorMessage(e)) }
   finally { saving.value = false }
 }
+/** 改消息范围要重新授权：旧授权当场作废，先确认。 */
+async function changeRange() {
+  if (!prefs.value || rangeSaving.value || range.value === prefs.value.authorization.message_range) return
+  try {
+    await ElMessageBox.confirm(t('assistant.settings.rangeConfirm'), t('assistant.settings.messageRange'), { type: 'warning' })
+  } catch { return }
+  rangeSaving.value = true
+  try {
+    const { authorization_url } = await myAssistant.changeMessageRange(range.value)
+    rangeLink.value = authorization_url
+    prefs.value = { ...prefs.value, authorization: { message_range: range.value, status: 'pending', enforced: null } }
+    ElMessage.success(t('assistant.settings.rangeStarted'))
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+  finally { rangeSaving.value = false }
+}
 /** 停用不可撤销：要所有者原样输入助理的名字才发请求；取消确认框不算失败。 */
 async function deprovision() {
   try {
@@ -55,7 +74,7 @@ async function deprovision() {
   } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
 }
 onMounted(load)
-defineExpose({ form, save, load })
+defineExpose({ form, save, load, range })
 </script>
 <template>
   <section class="assistant-section">
@@ -259,27 +278,99 @@ defineExpose({ form, save, load })
         </div>
       </el-form-item>
       <el-form-item
-        :label="t('assistant.settings.ignoredChats')"
-        :error="fieldError('ignored_chats')"
+        :label="t('assistant.settings.chatScope')"
+        :error="fieldError(form.chat_scope === 'all' ? 'ignored_chats' : 'managed_chats')"
         :show-message="false"
       >
-        <el-input
+        <el-radio-group
+          v-model="form.chat_scope"
+          :disabled="prefs.locked"
+          data-test="chat-scope"
+        >
+          <el-radio value="all">
+            {{ t('assistant.settings.chatScopeAll') }}
+          </el-radio>
+          <el-radio value="listed">
+            {{ t('assistant.settings.chatScopeListed') }}
+          </el-radio>
+        </el-radio-group>
+        <!-- 两份名单各自保留：切换范围不丢另一份。 -->
+        <AssistantChatPicker
+          v-if="form.chat_scope === 'all'"
           v-model="form.ignored_chats"
-          type="textarea"
-          :rows="3"
+          :disabled="prefs.locked"
+        />
+        <AssistantChatPicker
+          v-else
+          v-model="form.managed_chats"
           :disabled="prefs.locked"
         />
         <div class="hint">
-          {{ t('assistant.settings.ignoredChatsHint', { count: prefs.limits.ignored_chats }) }}
+          {{ form.chat_scope === 'all'
+            ? t('assistant.settings.ignoredChatsHint', { count: prefs.limits.ignored_chats })
+            : t('assistant.settings.managedChatsHint', { count: prefs.limits.managed_chats }) }}
+        </div>
+        <div class="hint">
+          {{ t('assistant.settings.chatScopeHint') }}
         </div>
         <!-- 错误原因自己渲染：el-form-item 的提示走过渡动画，这里要它立刻、稳定地出现。 -->
         <div
-          v-if="fieldError('ignored_chats')"
+          v-if="fieldError(form.chat_scope === 'all' ? 'ignored_chats' : 'managed_chats')"
           class="field-error"
           role="alert"
-          data-test="error-ignored_chats"
+          data-test="error-chat_scope"
         >
-          {{ fieldError('ignored_chats') }}
+          {{ fieldError(form.chat_scope === 'all' ? 'ignored_chats' : 'managed_chats') }}
+        </div>
+      </el-form-item>
+      <el-form-item
+        :label="t('assistant.settings.messageRange')"
+        data-test="message-range"
+      >
+        <el-radio-group
+          v-model="range"
+          :disabled="rangeSaving"
+        >
+          <el-radio
+            v-for="item in RANGES"
+            :key="item"
+            :value="item"
+          >
+            {{ t('assistant.settings.ranges.' + item) }}
+          </el-radio>
+        </el-radio-group>
+        <el-button
+          v-if="range !== prefs.authorization.message_range"
+          type="primary"
+          plain
+          class="range-button"
+          :loading="rangeSaving"
+          data-test="change-range"
+          @click="changeRange"
+        >
+          {{ t('assistant.settings.rangeApply') }}
+        </el-button>
+        <div class="hint">
+          {{ t('assistant.settings.rangeHint') }}
+        </div>
+        <div
+          v-if="prefs.authorization.enforced === false"
+          class="field-error"
+          role="alert"
+          data-test="range-not-enforced"
+        >
+          {{ t('assistant.settings.rangeNotEnforced') }}
+        </div>
+        <div
+          v-if="rangeLink"
+          class="hint"
+        >
+          <a
+            :href="rangeLink"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-test="range-link"
+          >{{ t('assistant.settings.rangeLink') }}</a>
         </div>
       </el-form-item>
       <el-form-item
@@ -363,6 +454,7 @@ defineExpose({ form, save, load })
 .field-error { flex-basis: 100%; color: var(--el-color-danger); font-size: 12px; line-height: 1.6; }
 .budget-input { margin-left: 16px; }
 .quiet-input { margin-left: 16px; }
+.range-button { margin-left: 16px; }
 .quiet-dash { margin: 0 8px; color: var(--el-text-color-secondary); }
 .danger-zone { margin-top: 24px; max-width: 760px; }
 </style>

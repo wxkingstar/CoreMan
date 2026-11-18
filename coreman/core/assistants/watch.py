@@ -27,7 +27,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coreman.core.assistants import followups, runtime, sealed, sent
+from coreman.core.assistants import chat_guard, followups, runtime, sealed, sent
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants import watch_feed as feed
 from coreman.core.assistants import watch_inbox as inbox
@@ -67,6 +67,7 @@ __all__ = [
     "grade",
     "owner_scope",
     "restart_chats",
+    "restart_except",
     "stop",
     "tick",
 ]
@@ -539,6 +540,8 @@ async def _round(
     row: AssistantWatch,
     prefs: AssistantSettings,
     now: datetime,
+    *,
+    message_range: str = "all",
 ) -> int:
     """轮询一轮，返回新入箱的条数。做法见 spec 第五节与实现计划「设计选择」1–11。"""
     stored = dict(row.cursor_enc or {})
@@ -549,8 +552,15 @@ async def _round(
         row.head_enc = listed.order
         return 0
     cursor = feed.load(stored)
-    # 所有者与助理自己的私聊、他设为忽略的会话：不读，也不打断下面的逐个探测。
-    skip = {prefs.chat_id, *(prefs.ignored_chats_enc or [])}
+    # 所有者与助理自己的私聊、他设为不托管的会话：不读，也不打断下面的逐个探测。不托管的会话
+    # 个人令牌的入口也会拦（`chat_guard`），这里先排除，免得被当成读不了的会话记次数。
+    rules = chat_guard.rules_of(prefs, message_range)
+    seen = {*listed.order, *cursor["todo"], *cursor["p"], *cursor["chats"]}
+    seen |= set(prefs.focus_chats_enc or [])
+    skip = {prefs.chat_id, *(chat for chat in seen if rules.denies(chat))}
+    # 只群聊或只单聊：另一类会话不读（类型已知的才在这里排除，未知的由入口拦）。
+    kinds = {chat: entry.get("k") for chat, entry in cursor["chats"].items()} | listed.kinds
+    skip |= {chat for chat in seen if kinds.get(chat) and rules.denies_kind(kinds[chat])}
     # 连续读不了、先放下的会话，到点之前同样对待。
     now_ms = int(now.timestamp() * 1000)
     skip |= {chat for chat, entry in cursor["chats"].items() if int(entry.get("x") or 0) > now_ms}
@@ -625,6 +635,50 @@ async def _round(
     return state.items
 
 
+async def _grant(session: AsyncSession, bot: Bot) -> FeishuPersonalGrant | None:
+    if bot.owner_id is None:
+        return None
+    return await session.get(FeishuPersonalGrant, (bot.id, bot.owner_id), populate_existing=True)
+
+
+async def _finish_grant(
+    session: AsyncSession,
+    cipher: Cipher,
+    bot: Bot,
+    prefs: AssistantSettings,
+    grant: FeishuPersonalGrant,
+    now: datetime,
+) -> bool:
+    """授权还在进行中（链接没过期）：到点就查一次飞书的结果。返回真表示仍在等所有者。
+
+    开通时由开通流程自己查；之后所有者改消息范围重新授权，没有别的流程替他查，由这里查。
+    """
+    if (
+        grant.status != "pending"
+        or grant.pending_expires_at is None
+        or grant.pending_expires_at <= now
+    ):
+        return False
+    if grant.next_poll_at is None or grant.next_poll_at <= now:
+        scope = Scope(
+            cast(Task, None),
+            bot,
+            grant.user_id,
+            prefs.tenant_key,
+            grant.app_id,
+            prefs.open_id,
+            prefs.platform_user_id,
+            prefs.chat_id,
+            None,
+        )
+        try:
+            await personal.authorization_status(session, cipher, scope)
+        except PersonalError:
+            # 被拒、身份对不上：授权行已清空，下一轮按没有授权处理。
+            return False
+    return grant.status == "pending"
+
+
 async def _step(
     session: AsyncSession, cipher: Cipher, row: AssistantWatch, now: datetime
 ) -> Outcome:
@@ -635,9 +689,14 @@ async def _step(
     prefs = await assistant_settings.get(session, bot.id)
     if not assistant_settings.identified(prefs):
         return _rest(row, now, "idle", "identity_missing")
+    grant = await _grant(session, bot)
+    if grant is not None and await _finish_grant(session, cipher, bot, prefs, grant, now):
+        # 所有者改了消息范围、正在重新授权：替他查结果，查到之前不算失败、不退避。
+        return _rest(row, now, "idle", "authorization_pending")
     scope, code = await owner_scope(session, bot, prefs)
     if scope is None:
         return _failed(row, now, code)
+    message_range = grant.message_range if grant is not None else "all"
     resting = await _resting(session, bot, prefs, now)
     if resting is not None:
         # 下班、冷启动没做完、运行时暂停：不轮询，但授权不能因此过期。
@@ -655,7 +714,9 @@ async def _step(
         _schedule(row, now, BASE_INTERVAL)
         return Outcome("backoff", app_id=scope.app_id, load=load)
     try:
-        items = await _round(session, Call(session, cipher, scope), row, prefs, now)
+        items = await _round(
+            session, Call(session, cipher, scope), row, prefs, now, message_range=message_range
+        )
     except ratelimit.RateLimited as exc:
         if exc.category is not None:
             # 记一笔占满额度、等待结束才滑出窗口的用量：同一应用的人这段时间都不调。
@@ -851,6 +912,29 @@ async def restart_chats(
         entry = cursor["chats"].setdefault(chat_id, {})
         entry["t"], entry["m"], entry["th"] = at, [], {}
     row.cursor_enc = feed.dump(cursor, cursor["todo"])
+    row.updated_at = utcnow()
+
+
+async def restart_except(
+    session: AsyncSession, bot_id: uuid.UUID, keep: set[str], now: datetime
+) -> None:
+    """除 `keep` 之外的会话都从现在起重新盯。调用方提交。
+
+    所有者从「只托管名单」改回「托管全部」时调用：名单之外的会话说不出是哪些，把开始盯的时刻
+    挪到 `now`（游标里没有的会话不早于它读起），游标里已有的不在 `keep` 里的也置为 `now`。
+    """
+    row = await session.get(AssistantWatch, bot_id, with_for_update=True, populate_existing=True)
+    stored = row.cursor_enc if row is not None else None
+    if row is None or not isinstance(stored, dict) or not isinstance(stored.get("since"), int):
+        return
+    cursor = feed.load(stored)
+    at = int(aware_utc(now).timestamp() * 1000)
+    cursor["since"] = max(cursor["since"], at)
+    for chat_id, entry in cursor["chats"].items():
+        if chat_id not in keep:
+            entry["t"], entry["m"], entry["th"] = at, [], {}
+    cursor["p"] = [chat for chat in cursor["p"] if chat in keep]
+    row.cursor_enc = feed.dump(cursor, [chat for chat in cursor["todo"] if chat in keep])
     row.updated_at = utcnow()
 
 

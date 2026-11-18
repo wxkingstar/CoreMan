@@ -213,10 +213,11 @@ COLUMNS: dict[type, dict[str, Kind]] = {
         "result_enc": Text(),
         "blocked_enc": Text(),
     },
-    # 所有者标记的重点群与忽略的会话：会话 id 的列表整值封存，读不出来按空列表。
+    # 所有者标记的重点群、不托管与只托管的会话：会话 id 的列表整值封存，读不出来按空列表。
     AssistantSettings: {
         "focus_chats_enc": Whole([]),
         "ignored_chats_enc": Whole([]),
+        "managed_chats_enc": Whole([]),
         "focus_people_enc": Whole([]),
     },
     # 盯消息：上一轮的会话顺序（会话 id 的列表）、各会话读到的位置（游标，整值封存，读不出来

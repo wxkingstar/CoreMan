@@ -1,6 +1,6 @@
 import type { AssistantPrefs, AssistantPrefsPatch } from '@/api/myAssistant'
 
-/** 「我的助理」设置表单的值：两个会话列表在表单里是多行文本，一行一个 chat_id。 */
+/** 「我的助理」设置表单的值：重点群在表单里是多行文本，一行一个 chat_id；托管名单由会话选择器给出 chat_id 列表。 */
 export interface PrefsForm {
   timezone: string
   /** 全天候：开着时工作时段与工作日不生效，表单里保留原值。 */
@@ -9,7 +9,10 @@ export interface PrefsForm {
   work_end: string
   workdays: number[]
   focus_chats: string
-  ignored_chats: string
+  /** 托管范围：all 托管全部（ignored_chats 除外），listed 只托管 managed_chats。 */
+  chat_scope: 'all' | 'listed'
+  ignored_chats: string[]
+  managed_chats: string[]
   /** 摘要时点：表单里是一行文本，逗号或空格隔开。 */
   digest_times: string
   quiet_enabled: boolean
@@ -19,7 +22,7 @@ export interface PrefsForm {
   follow_platform: boolean
   daily_turn_budget: number
 }
-export type PrefsField = 'timezone' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'digest_times' | 'quiet_hours' | 'daily_turn_budget'
+export type PrefsField = 'timezone' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats' | 'managed_chats' | 'digest_times' | 'quiet_hours' | 'daily_turn_budget'
 
 const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/
 /** 与后端 `settings.MAX_DIGEST_TIMES` 一致。 */
@@ -39,7 +42,9 @@ export function toForm(prefs: AssistantPrefs): PrefsForm {
     work_end: prefs.work_end,
     workdays: [...prefs.workdays],
     focus_chats: prefs.focus_chats.join('\n'),
-    ignored_chats: prefs.ignored_chats.join('\n'),
+    chat_scope: prefs.chat_scope,
+    ignored_chats: [...prefs.ignored_chats],
+    managed_chats: [...prefs.managed_chats],
     digest_times: prefs.digest_times.join(', '),
     quiet_enabled: prefs.quiet_enabled,
     quiet_start: prefs.quiet_start,
@@ -80,12 +85,15 @@ export function validate(form: PrefsForm, prefs: AssistantPrefs): Partial<Record
     if (!errors.work_start && !errors.work_end && form.work_start >= form.work_end) errors.work_end = 'hours'
     if (!form.workdays.length) errors.workdays = 'workdays'
   }
-  const focus = lines(form.focus_chats), ignored = lines(form.ignored_chats)
+  const focus = lines(form.focus_chats), ignored = form.ignored_chats, managed = form.managed_chats
   if (focus.some((id) => !CHAT.test(id))) errors.focus_chats = 'chatId'
   else if (focus.length > prefs.limits.focus_chats) errors.focus_chats = 'focusTooMany'
-  if (ignored.some((id) => !CHAT.test(id))) errors.ignored_chats = 'chatId'
-  else if (ignored.length > prefs.limits.ignored_chats) errors.ignored_chats = 'ignoredTooMany'
-  else if (!errors.focus_chats && ignored.some((id) => focus.includes(id))) errors.ignored_chats = 'chatInBoth'
+  // 托管范围只校验当前生效的那份名单；另一份原样保留，切回去时还在。
+  if (form.chat_scope === 'all') {
+    if (ignored.length > prefs.limits.ignored_chats) errors.ignored_chats = 'ignoredTooMany'
+    else if (!errors.focus_chats && ignored.some((id) => focus.includes(id))) errors.ignored_chats = 'chatInBoth'
+  } else if (managed.length > prefs.limits.managed_chats) errors.managed_chats = 'managedTooMany'
+  else if (!errors.focus_chats && focus.some((id) => !managed.includes(id))) errors.managed_chats = 'focusNotManaged'
   const times = clocks(form.digest_times)
   if (!times.length || times.length > MAX_DIGEST_TIMES || new Set(times).size !== times.length || times.some((time) => !CLOCK.test(time))) {
     errors.digest_times = 'digestTimes'
@@ -112,7 +120,9 @@ export function toPatch(form: PrefsForm, prefs: AssistantPrefs): AssistantPrefsP
     work_end: form.work_end,
     workdays: [...form.workdays].sort((a, b) => a - b),
     focus_chats: lines(form.focus_chats),
-    ignored_chats: lines(form.ignored_chats),
+    chat_scope: form.chat_scope,
+    ignored_chats: [...new Set(form.ignored_chats)],
+    managed_chats: [...new Set(form.managed_chats)],
     digest_times: clocks(form.digest_times),
     quiet_enabled: form.quiet_enabled,
     quiet_start: form.quiet_start,

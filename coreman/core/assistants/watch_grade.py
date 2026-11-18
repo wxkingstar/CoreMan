@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from coreman.core.assistants import chat_guard
 from coreman.core.db.models import AssistantSettings
 from coreman.core.timeutils import aware_utc
 
@@ -69,7 +70,7 @@ def grade(item: Item, settings: AssistantSettings, context: Context) -> Level:
     if item.kind == "approval_todo":
         return Level.BATCH
     owner = settings.open_id
-    if item.chat_id in (settings.ignored_chats_enc or []):
+    if chat_guard.rules_of(settings).denies(item.chat_id):
         return Level.IGNORE
     if item.deleted or item.msg_type == "system":
         return Level.IGNORE
