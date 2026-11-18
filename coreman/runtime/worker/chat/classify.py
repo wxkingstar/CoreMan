@@ -8,7 +8,9 @@ from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import (
     IncompleteResultError,
     RelayBusyError,
+    RelayConnectionError,
     RelayInterruptedError,
+    RelayRequestError,
 )
 from coreman.core.wecom.cards import question_brief
 from coreman.runtime.worker.chat.base import ChatStageBase
@@ -68,6 +70,16 @@ class ClassifyStage(ChatStageBase):
                 "runtime_busy",
                 f"RelayBusyError: {out.error}",
                 msg("runtime_busy", locale, relay=pre.relay_label or pre.relay.name),
+            )
+        if isinstance(out.error, RelayRequestError):
+            return Verdict("error", "failed", out.error.code, str(out.error), str(out.error))
+        if isinstance(out.error, RelayConnectionError):
+            return Verdict(
+                "error",
+                "failed",
+                out.error.code,
+                str(out.error),
+                msg("runtime_connection_failed", locale, relay=pre.relay_label or pre.relay.name),
             )
         if isinstance(out.error, RelayInterruptedError):
             detail = msg("runtime_control_lost", locale) if out.error.code == "control_lost" else ""

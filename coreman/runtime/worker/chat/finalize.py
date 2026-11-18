@@ -28,8 +28,10 @@ from coreman.core.db.models import (
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import (
     RelayBusyError,
+    RelayConnectionError,
     RelayError,
     RelayInterruptedError,
+    RelayRequestError,
     UnsandboxedPoolRequest,
 )
 from coreman.core.relay.labels import load_nodes, relay_label, signed_in
@@ -51,6 +53,8 @@ from coreman.runtime.worker.context import TaskContext
 
 def never_reached_node(error: BaseException | None) -> bool:
     """这一轮的请求确定没有到过节点：排队超时，且撤销时调用仍在排队（节点从没领到）。"""
+    if isinstance(error, RelayRequestError):
+        return True
     cause = error.__cause__ if isinstance(error, RelayBusyError) else None
     return isinstance(cause, RuntimeQueueTimeout) and cause.unclaimed
 
@@ -291,6 +295,35 @@ class FinalizeStage(ChatStageBase):
             # Actual provider output proves inference; cancellations, queue
             # waits and business/tool failures do not prove a model failure.
             observation = None
+            # Local rejection never changes health. A failed runtime link is
+            # independent of the last provider result and cannot overwrite it.
+            connection_error = isinstance(out.error, RelayConnectionError) or (
+                isinstance(out.error, RelayInterruptedError)
+                and out.error.code in {"connection_lost", "control_lost"}
+            )
+            if owned and not sandboxed and not out.cancelled:
+                if connection_error:
+                    await save_health(
+                        session,
+                        pre.relay.id,
+                        HealthObservation(
+                            status="down",
+                            check_kind="connection",
+                            error_code=getattr(out.error, "code", "runtime_connection_failed"),
+                            detail="运行时连接失败；模型调用结果未确认",
+                            seat_id=out.runtime_seat_id,
+                        ),
+                    )
+                elif out.saw_event:
+                    await save_health(
+                        session,
+                        pre.relay.id,
+                        HealthObservation(
+                            status="healthy",
+                            check_kind="connection",
+                            seat_id=out.runtime_seat_id,
+                        ),
+                    )
             if sandboxed:
                 pass
             elif (
@@ -314,7 +347,14 @@ class FinalizeStage(ChatStageBase):
                 owned
                 and not out.cancelled
                 and not isinstance(
-                    out.error, (RelayBusyError, RelayInterruptedError, UnsandboxedPoolRequest)
+                    out.error,
+                    (
+                        RelayBusyError,
+                        RelayInterruptedError,
+                        RelayConnectionError,
+                        RelayRequestError,
+                        UnsandboxedPoolRequest,
+                    ),
                 )
                 and (
                     out.relay_error

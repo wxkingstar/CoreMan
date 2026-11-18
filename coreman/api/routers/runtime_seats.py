@@ -143,6 +143,7 @@ def dump_quota(relay: RelayServer) -> dict[str, Any]:
 def load_quota(relay: RelayServer, saved: dict[str, Any]) -> None:
     relay.quota_observation = saved.get("quota_observation")
     relay.model_health, relay.last_model_failure, relay.driver_health = None, None, None
+    relay.connection_health = None
     relay.health_status, relay.health_detail, relay.health_checked_at = "unknown", None, None
     relay.health_fail_count, relay.health_latency_ms = 0, None
     for column in QUOTA_COLUMNS:

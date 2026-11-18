@@ -152,6 +152,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_switch_detail": "模型：{model}",
         "relay_error": "抱歉，AI 连接出现错误（运行时 {relay}），请稍后再试。",
         "runtime_busy": "抱歉，运行时 {relay} 正忙，排队等待超时仍未开始处理，请稍后再试。",
+        "runtime_connection_failed": "运行时 {relay} 的连接中断，本轮未确认完成。请稍后重试。",
         "runtime_control_lost": (
             "原因：本机运行时已放弃本轮请求（control_lost）。"
             "请检查节点的控制轮询超时、控制租约失效或运行时停止日志。"
@@ -488,6 +489,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "relay_error": (
             "申し訳ありません。AI 接続でエラーが発生しました（インスタンス {relay}）。"
             "しばらくしてから再試行してください。"
+        ),
+        "runtime_connection_failed": (
+            "The connection to runtime {relay} failed. This turn has not been confirmed complete. "
+            "Please try again later."
         ),
         "runtime_busy": (
             "申し訳ありません。インスタンス {relay} が混み合っており、待機時間内に処理を"

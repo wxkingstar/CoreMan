@@ -8,6 +8,55 @@ from coreman.core.relay.quota import Quota, QuotaWindow, save_quota
 from tests.fakes.runtime_node import add_node, add_node_relay
 
 
+async def test_connection_observation_does_not_repaint_model_or_legacy_health(db_session):
+    relay = await add_node_relay(db_session)
+    at = datetime.now(UTC)
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(
+            status="auth_fail",
+            check_kind="model",
+            observed_at=at - timedelta(minutes=1),
+            error_code="session_expired",
+        ),
+    )
+    await db_session.refresh(relay)
+    model, failure, legacy = relay.model_health, relay.last_model_failure, relay.health_status
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(
+            status="down",
+            check_kind="connection",
+            observed_at=at,
+            error_code="runtime_connection_failed",
+        ),
+    )
+    await db_session.refresh(relay)
+    assert relay.connection_health["status"] == "down"
+    assert (relay.model_health, relay.last_model_failure, relay.health_status) == (
+        model,
+        failure,
+        legacy,
+    )
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(status="healthy", check_kind="driver", observed_at=at),
+    )
+    await db_session.refresh(relay)
+    assert relay.connection_health["status"] == "down"
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(status="healthy", check_kind="connection", observed_at=at),
+    )
+    await db_session.refresh(relay)
+    assert relay.connection_health["status"] == "healthy"
+    assert relay.model_health == model
+
+
 async def test_driver_success_cannot_overwrite_model_failure(db_session: AsyncSession):
     relay = await add_node_relay(db_session)
     now = datetime.now(UTC)

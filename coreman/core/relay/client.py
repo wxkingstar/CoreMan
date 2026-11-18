@@ -17,7 +17,10 @@ from typing import Any
 import httpx
 
 from coreman.core.db.models import RelayServer
+from coreman.core.logging import get_logger
+from coreman.core.relay.diagnostics import exception_details
 from coreman.core.relay.sse import SseEvent, SseParser
+from coreman.core.runtime_nodes.errors import RuntimeRequestRejected
 from coreman.core.runtime_nodes.transport import (
     NODE_ERRORS,
     SANDBOX_EXTENSION,
@@ -27,10 +30,27 @@ from coreman.core.runtime_nodes.transport import (
 )
 
 _AUTH_MARKERS = ("not logged in", "/login", "401")
+log = get_logger(__name__)
 
 
 class RelayError(Exception):
     """访问 relay 接口失败。"""
+
+
+class RelayRequestError(RelayError):
+    """The request was rejected locally and never reached a runtime."""
+
+    def __init__(self, error: RuntimeRequestRejected) -> None:
+        super().__init__(str(error))
+        self.code = error.code
+
+
+class RelayConnectionError(RelayError):
+    """Runtime transport failed; this says nothing about model health."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
 
 
 class UnsandboxedPoolRequest(RelayError):
@@ -66,6 +86,7 @@ class RelayHealth:
     backend: str | None = None
     version: str | None = None
     mode: str | None = None
+    connection_error: str | None = None
 
 
 @dataclass
@@ -213,10 +234,22 @@ class RelayClient:
         started = time.monotonic()
         try:
             r = await self._http.get("/health")
-        except httpx.TimeoutException:
-            return RelayHealth("timeout", "健康检查超时", _ms(started))
+        except httpx.TimeoutException as exc:
+            log.warning("runtime_transport_failed", operation="health", **exception_details(exc))
+            return RelayHealth(
+                "timeout",
+                "运行时连接检查超时",
+                _ms(started),
+                connection_error="runtime_connection_timeout",
+            )
         except httpx.HTTPError as exc:
-            return RelayHealth("down", f"连接失败: {type(exc).__name__}", _ms(started))
+            log.warning("runtime_transport_failed", operation="health", **exception_details(exc))
+            return RelayHealth(
+                "down",
+                f"运行时连接失败: {type(exc).__name__}",
+                _ms(started),
+                connection_error="runtime_connection_failed",
+            )
         latency = _ms(started)
         text = r.text[:200]
         if r.status_code >= 300:
@@ -255,6 +288,7 @@ class RelayClient:
                 raise RelayError(f"HTTP {r.status_code}")
             data: Any = r.json().get("data", [])
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            log.warning("runtime_models_failed", operation="models", **exception_details(exc))
             raise RelayError(f"获取模型列表失败: {type(exc).__name__}") from exc
         if not isinstance(data, list):
             return []
@@ -317,15 +351,23 @@ class RelayClient:
                     for event in parser.feed_line(line):
                         yield event
         except TimeoutError as exc:
-            raise RelayError(f"SSE timeout: 总时长超过 {total_timeout:.0f} 秒") from exc
+            raise RelayConnectionError(
+                "runtime_stream_timeout", f"SSE timeout: 总时长超过 {total_timeout:.0f} 秒"
+            ) from exc
         except httpx.ReadTimeout as exc:
-            raise RelayError(f"SSE timeout: {read_timeout:.0f} 秒无字节") from exc
+            raise RelayConnectionError(
+                "runtime_stream_timeout", f"SSE timeout: {read_timeout:.0f} 秒无字节"
+            ) from exc
         except RuntimeQueueTimeout as exc:
             raise RelayBusyError(str(exc)) from exc
+        except RuntimeRequestRejected as exc:
+            raise RelayRequestError(exc) from exc
         except httpx.HTTPError as exc:
             if str(exc) in NODE_ERRORS:
                 raise RelayInterruptedError(f"运行时中断: {exc}", code=str(exc)) from exc
-            raise RelayError(f"连接失败: {type(exc).__name__}") from exc
+            raise RelayConnectionError(
+                "runtime_connection_failed", f"运行时连接失败: {type(exc).__name__}"
+            ) from exc
         for event in parser.flush():
             yield event
         # relay 已经以 x_relay_error 交代了失败原因（有的驱动失败时不补 finish chunk）：原因已经
