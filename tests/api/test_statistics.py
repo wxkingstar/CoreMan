@@ -193,13 +193,17 @@ async def test_builtin_prices_match_aliases_and_custom_overrides(client, db_sess
     ]
 
 
-async def test_backfill_fills_only_finished_complete_records(client, db_session):
+async def test_backfill_fills_only_finished_complete_records(app, client, db_session):
+    import asyncio
     import uuid
 
     from sqlalchemy import select
 
     from coreman.core.db.models import CronRun
     from coreman.core.pricing import backfill_costs
+
+    # API 启动时在后台补算一次成本：先等它跑完，免得它抢先补掉下面插入的记录。
+    await asyncio.gather(*list(app.state.background_tasks))
 
     def log(task_id: int, **values):
         base = {
