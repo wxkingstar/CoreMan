@@ -34,6 +34,7 @@ FOLLOWUP_TOOLS = [
     "followup_update",
     "followup_snooze",
     "followup_close",
+    "followup_progress",
     "followup_list",
 ]
 JOB_TOOLS = [

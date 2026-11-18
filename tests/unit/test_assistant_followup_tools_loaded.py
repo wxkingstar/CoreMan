@@ -7,7 +7,14 @@ import sys
 
 from coreman.core.assistants import followup_tools, tools
 
-NAMES = ["followup_add", "followup_close", "followup_list", "followup_snooze", "followup_update"]
+NAMES = [
+    "followup_add",
+    "followup_close",
+    "followup_list",
+    "followup_progress",
+    "followup_snooze",
+    "followup_update",
+]
 
 
 def _names(group: str) -> set[str]:
@@ -33,6 +40,9 @@ def test_definitions_describe_ids_dates_and_scopes() -> None:
         "due_on",
         "origin_message_id",
         "needs_owner",
+        "handler",
+        "handler_name",
+        "job",
     }
     snooze = by_name["followup_snooze"]["inputSchema"]
     assert snooze["properties"]["until"]["description"] == "YYYY-MM-DD"

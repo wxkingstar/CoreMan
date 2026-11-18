@@ -43,6 +43,21 @@ Title = Annotated[
     Field(description="One sentence that makes sense on its own"),
 ]
 Notes = Annotated[str, StringConstraints(max_length=followups.MAX_NOTES)]
+Handler = Literal["assistant", "job", "person", "owner"]
+HandlerName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=followups.MAX_HANDLER_NAME),
+    Field(description="With handler=person: how the owner calls that colleague"),
+]
+JobRef = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=64),
+    Field(description="With handler=job: the job id from assistant_spawn or assistant_job_list"),
+]
+HANDLER = (
+    "Who is moving it forward now: assistant (you), job (a sub-task or a public employee you"
+    " asked; give `job`), person (a colleague; give `handler_name`), owner (the owner himself)"
+)
 NEEDS_OWNER = (
     "true when only the owner in person can get it done (his decision on the spot, personal"
     " credentials, authorization, pinned pages, a write refused with owner_turn_required): the"
@@ -60,6 +75,9 @@ class Add(Arguments):
         default=None, description="The Feishu message that caused it, if any"
     )
     needs_owner: bool = Field(default=False, description=NEEDS_OWNER)
+    handler: Handler | None = Field(default=None, description=HANDLER)
+    handler_name: HandlerName | None = None
+    job: JobRef | None = None
 
     _days = valid_days("review_on", "due_on")
 
@@ -72,6 +90,9 @@ class Update(Arguments):
     review_on: Day | None = None
     due_on: Day | None = None
     needs_owner: bool | None = Field(default=None, description=NEEDS_OWNER)
+    handler: Handler | None = Field(default=None, description=HANDLER)
+    handler_name: HandlerName | None = None
+    job: JobRef | None = None
     clear: list[Literal["notes", "review_on", "due_on"]] = Field(
         default_factory=list, max_length=3, description="Fields to empty"
     )
@@ -84,6 +105,15 @@ class Snooze(Arguments):
     until: Day
 
     _days = valid_days("until")
+
+
+class Progress(Arguments):
+    id: Label
+    note: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=followups.MAX_PROGRESS),
+        Field(description="One or two sentences: what moved forward, found out or changed"),
+    ]
 
 
 class Close(Arguments):
@@ -124,6 +154,12 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
         Close,
         "Close a follow-up: done, or dropped when it is no longer needed.",
     ),
+    "followup_progress": (
+        Progress,
+        "Log progress on an open follow-up: appends a dated line to its notes and marks it as"
+        " moving. Use it whenever you found something out or pushed it forward; the owner's"
+        " board flags items with no progress for days.",
+    ),
     "followup_list": (
         Listing,
         "List the owner's follow-ups by scope. Items carry the title and whether notes"
@@ -138,6 +174,12 @@ HINTS = {
     "too_many_followups": "未结的条目已到上限，先关闭办完的。",
     "invalid_scope": "scope 只能是 today、open、all、四个分类名之一，或一个编号。",
     "nothing_to_update": "没有给出要改的项。",
+    "invalid_handler_name": "handler=person 时要给 handler_name（同事的称呼，50 字以内）。",
+    "job_not_found": (
+        "handler=job 时要给 job：用 assistant_job_list 查到的、你自己派出的子任务编号。"
+    ),
+    "notes_full": "备注里开头的说明已经太长，进展写不进去：先用 followup_update 把 notes 精简。",
+    "invalid_progress": "note 写一两句话，不超过 300 字。",
     "content_locked": "所有者的数据密钥不可用，标题与备注现在写不了；不要重试，如实告诉所有者。",
 }
 
@@ -147,6 +189,15 @@ def definitions() -> list[dict[str, Any]]:
         {"name": name, "description": text, "inputSchema": input_schema(args)}
         for name, (args, text) in OWN.items()
     ]
+
+
+def _job(value: str | None) -> uuid.UUID | None:
+    if value is None:
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise followups.FollowupError("job_not_found") from None
 
 
 def _day(value: str | None) -> date | None:
@@ -186,9 +237,15 @@ async def _run(
             due_on=_day(args.due_on),
             origin_message_id=args.origin_message_id,
             needs_owner=args.needs_owner,
+            handler=args.handler or "assistant",
+            handler_name=args.handler_name,
+            job_id=_job(args.job),
         )
         return {"followup": followups.view(row)}
     seq = followups.parse_label(args.id)
+    if name == "followup_progress":
+        row = await followups.progress(session, bot_id, seq, args.note, today=today)
+        return {"followup": followups.view(row)}
     if name == "followup_snooze":
         row = await followups.snooze(
             session, bot_id, seq, date.fromisoformat(args.until), today=today
@@ -205,6 +262,10 @@ async def _run(
         for field in ("review_on", "due_on"):
             if getattr(args, field) is not None:
                 changes[field] = date.fromisoformat(getattr(args, field))
+        if args.handler is not None:
+            changes.update(
+                handler=args.handler, handler_name=args.handler_name, job_id=_job(args.job)
+            )
         for field in args.clear:
             changes[field] = None
         if not changes:
