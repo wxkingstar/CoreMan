@@ -116,6 +116,10 @@ class AssistantApproval(Base):
     # 无人在场的一轮里提交的多个飞书写合成的一张单：各项共用它，取值是第一项的编号（第一项
     # 带着向 Tower 提交的外部编号与令牌）。单独成单的为空。
     batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 引出这张单的待跟进：总表把在途的单列在那一条下面；条目删掉时置空。
+    followup_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_followups.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     # 最近一次改稿的时刻（没改过为空）：改稿时平台重新读过会话，「之后会话动没动过」从它算起。
     revised_at: Mapped[datetime | None] = _ts()

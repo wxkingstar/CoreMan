@@ -106,6 +106,7 @@ from coreman.core.db.models.feishu_personal import (
     FeishuRateUsage,
 )
 from coreman.core.db.models.infrastructure import (
+    ACCESS_REQUEST_STATUSES,
     BATCH_ITEM_STATUSES,
     CATALOG_STATUSES,
     TOKEN_DELIVERIES,
@@ -115,6 +116,7 @@ from coreman.core.db.models.infrastructure import (
     BusinessSystem,
     BusinessTokenIssue,
     JwtKey,
+    SystemAccessRequest,
     SystemBatchItem,
     SystemCall,
     SystemCatalog,
@@ -201,6 +203,8 @@ __all__ = [
     "Escalation",
     "ApiClient",
     "BotSystemGrant",
+    "SystemAccessRequest",
+    "ACCESS_REQUEST_STATUSES",
     "BusinessSystem",
     "BusinessTokenIssue",
     "TOKEN_ISSUE_PURPOSES",

@@ -73,6 +73,7 @@ BUSINESS_TABLES = [
     "cloud_calls",
     "bot_approvers",
     "system_calls",
+    "system_access_requests",
     "bot_system_grants",
     "system_grant_audit",
     "systems",
