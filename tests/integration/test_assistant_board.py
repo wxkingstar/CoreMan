@@ -86,3 +86,29 @@ async def test_pending_approvals_are_listed_separately(
     assert result.approvals_total == 1 and len(result.approvals) == 1
     # 审批单不算进待跟进的任何一组。
     assert sum(result.counts().values()) == 0
+
+
+async def test_a_woken_item_does_not_count_its_snoozed_days_as_idle(
+    db_session: AsyncSession,
+) -> None:
+    bot, _ = await ready(db_session)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    woken = await followups.add(db_session, bot.id, category="promised", title="整理合同")
+    parked = await followups.add(db_session, bot.id, category="promised", title="对账")
+    # 上周五起就没动；一条推后到昨天（周二），今天（周三）醒来，另一条一直开着。
+    await db_session.execute(
+        update(AssistantFollowup)
+        .where(AssistantFollowup.id.in_([woken.id, parked.id]))
+        .values(progress_at=LAST_FRI)
+    )
+    await db_session.execute(
+        update(AssistantFollowup)
+        .where(AssistantFollowup.id == woken.id)
+        .values(status="snoozed", review_on=WED_NOON.date() - timedelta(days=1))
+    )
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    [awake] = [i for i in result.groups["working"] if i.row.seq == woken.seq]
+    assert awake.idle_days == 1 and not awake.stalled
+    [stalled] = result.groups["stalled"]
+    assert stalled.row.seq == parked.seq and stalled.idle_days == 3

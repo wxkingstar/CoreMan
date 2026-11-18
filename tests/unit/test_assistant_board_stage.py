@@ -66,3 +66,13 @@ def test_suggestion_line() -> None:
     assert board.suggestion(row(notes_enc="没有建议")) is None
     assert board.suggestion(row(notes_enc=None)) is None
     assert len(board.suggestion(row(notes_enc="建议：" + "长" * 300)) or "") == board.MAX_SUGGESTION
+
+
+def test_idle_counts_from_the_review_day_once_it_has_come() -> None:
+    # 推后到周二、周三醒来：从周二算起，推后的那几天不算没动。
+    assert board.idle_from(FRI - timedelta(days=7), row(review_on=TUE), WED) == TUE
+    # 回看日之后又有进展：取较晚的那天。
+    assert board.idle_from(WED, row(review_on=MON), WED) == WED
+    # 回看日还没到、或没有回看日：照最后一次进展。
+    assert board.idle_from(MON, row(review_on=THU), WED) == MON
+    assert board.idle_from(MON, row(), WED) == MON
