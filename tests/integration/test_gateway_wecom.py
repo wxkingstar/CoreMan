@@ -956,28 +956,33 @@ async def test_confirmed_length_only_counts_frames_older_than_the_errcode_budget
         task_id = await _seed_stream(db_engine, bot.id, service, req)
         await _wait(lambda: bool(fake.stream_contents(req)))
         pusher = service.runners[bot.id].pusher
-        base = time.monotonic() + 100.0
-        clock = [base]
-        pusher.clock = lambda: clock[0]
-        pusher.errcode_budget = 3.0
-        probe = TaskStream(
-            task_id=task_id, stream_id="s1", reply_context={"req_id": req}, pending_text=""
-        )
-        for tick, size in ((0.0, 3), (2.0, 5), (2.5, 7)):
-            clock[0] = base + tick
-            probe.pending_text = "甲" * size
-            assert await pusher.send_stream(probe, probe.pending_text, finish=False)
-        clock[0] = base + 3.0  # 错误码到达：预算之内的后两帧不算数，只认 t=base 那一帧
-        await pusher.note_stream_dead("s1", task_id)
-        row = await _stream_row(db_engine, task_id)
-        assert row and row.delivery_mode == "proactive"
-        assert row.background_state["offset"] == 3
-        # 另一条流：所有帧都在预算之内，一个字都不敢算送达
-        other = TaskStream(
-            task_id=task_id, stream_id="s2", reply_context={"req_id": req}, pending_text="乙乙乙乙"
-        )
-        assert await pusher.send_stream(other, other.pending_text, finish=False)
-        assert pusher.delivered_len("s2") == 0
+        # 拿住推送锁：后台那一轮会按种子正文（2 个字）给 s1 再推一帧，插进下面手排的帧序列里。
+        async with pusher.runner.lock:
+            base = time.monotonic() + 100.0
+            clock = [base]
+            pusher.clock = lambda: clock[0]
+            pusher.errcode_budget = 3.0
+            probe = TaskStream(
+                task_id=task_id, stream_id="s1", reply_context={"req_id": req}, pending_text=""
+            )
+            for tick, size in ((0.0, 3), (2.0, 5), (2.5, 7)):
+                clock[0] = base + tick
+                probe.pending_text = "甲" * size
+                assert await pusher.send_stream(probe, probe.pending_text, finish=False)
+            clock[0] = base + 3.0  # 错误码到达：预算之内的后两帧不算数，只认 t=base 那一帧
+            await pusher.note_stream_dead("s1", task_id)
+            row = await _stream_row(db_engine, task_id)
+            assert row and row.delivery_mode == "proactive"
+            assert row.background_state["offset"] == 3
+            # 另一条流：所有帧都在预算之内，一个字都不敢算送达
+            other = TaskStream(
+                task_id=task_id,
+                stream_id="s2",
+                reply_context={"req_id": req},
+                pending_text="乙乙乙乙",
+            )
+            assert await pusher.send_stream(other, other.pending_text, finish=False)
+            assert pusher.delivered_len("s2") == 0
     finally:
         service.request_stop("test")
         await asyncio.wait_for(runner, 15)
