@@ -395,3 +395,19 @@ def view(row: AssistantGap, fix: str, seqs: list[int]) -> dict[str, Any]:
 
 async def view_of(session: AsyncSession, bot_id: uuid.UUID, row: AssistantGap) -> dict[str, Any]:
     return view(row, await fix_for(session, bot_id, row), await stuck(session, bot_id, row.id))
+
+
+NEEDS = ("general", "read_messages", "send_messages")
+
+
+def feishu_keys(grant: Any) -> set[str]:
+    """本人飞书授权现在满足的：档位名，加上应用申请过、本人也授予了的权限名。"""
+    if grant is None:
+        return set()
+    # 函数内引入：飞书个人工具的模块依赖面大。
+    from coreman.core.feishu_personal import inflow
+
+    found = {need for need in NEEDS if inflow.satisfied(grant, need)}
+    if grant.status == "connected":
+        found |= set(grant.scopes or []) & set(grant.requested_scopes or [])
+    return found

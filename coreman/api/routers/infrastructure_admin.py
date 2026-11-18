@@ -708,6 +708,16 @@ async def put_grants(
     bot.version += 1
     await persist(session)
     await notify_bot_changed(session, bot.id)
+    # 个人助理被缺口卡住的系统现在授权了：级别升上去的记为已解决，被卡住的事交回续接
+    # （没有缺口时是空查询）。只读授权不会解决报在「能读」级别的缺口。
+    from coreman.core.assistants import capabilities, gaps
+
+    await gaps.resolve(
+        session,
+        bot.id,
+        "business_system",
+        {s.key: capabilities.grant_rank(s, s.key in writes) for s in systems},
+    )
     # 申请说明原先只落在已弃用的 system_grant_audit 表，现与授权前后对比一起进审计日志。
     diff = diff_dict(
         {"system_keys": sorted(before), "write_keys": writes_before},

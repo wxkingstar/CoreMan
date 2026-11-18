@@ -323,6 +323,11 @@ async def submit(
         keys = await store.save(
             session, cipher, bot_id=bot.id, user_id=user.id, fields=row.fields, values=cleaned
         )
+        # 个人助理卡在这个凭证上的缺口：值已保存，记为已解决（没有缺口时是空查询）。
+        # 凭证缺口报时记级别 0，保存即升到 1。
+        from coreman.core.assistants import gaps
+
+        await gaps.resolve(session, bot.id, "credential", dict.fromkeys(keys, 1))
     else:
         keys = sorted(cleaned)
     await record_audit(
