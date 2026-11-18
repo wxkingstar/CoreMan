@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from collections.abc import Iterable
@@ -46,6 +47,7 @@ from coreman.core.db.models import (
     OutboxItem,
     Task,
 )
+from coreman.core.feishu_cards.compile import MAX_CARD_BYTES
 from coreman.core.feishu_cards.reply_buttons import UsedRow, reply_value
 from coreman.core.feishu_personal.policy import Scope
 from coreman.core.logging import get_logger
@@ -60,6 +62,8 @@ MAX_UNSENT = 100
 # 摘要里每一节最多列这么多条，多的只说个数。
 LIST_MAX = 10
 REPORTS_MAX = 20
+# 摘要与看板卡片的字节预算：条目、审批单、汇报加到这里为止；余下的给截断提示、标题与页脚。
+CARD_BUDGET = MAX_CARD_BYTES - 2_000
 # 出站去重键与卡片上的元素编号。
 DIGEST_KEY = "assistant-digest"
 URGENT_KEY = "assistant-urgent"
@@ -274,16 +278,56 @@ GROUP_TITLES = {
     "scheduled": "排期",
 }
 MORE_HINT = "另有 {n} 件，发「看板」或在「我的助理」页看全部"
+EMPTY_BOARD = "现在没有要跟进的事。"
+
+
+def _bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode())
+
+
+class _Room:
+    """边拼卡片边记字节数。条目、审批单、汇报行先问 `fits`，放不下就停，之后的一律不放；
+    标题、截断提示、页脚这类小元素直接 `add`，用的是预算之外留出的余量。"""
+
+    def __init__(self, title: str) -> None:
+        self.used = _bytes(_card(title, "blue", []))
+        self.full = False
+
+    def fits(self, size: int) -> bool:
+        if self.full or self.used + size > CARD_BUDGET:
+            self.full = True
+            return False
+        self.used += size
+        return True
+
+    def add(self, elements: list[dict[str, Any]], node: dict[str, Any]) -> None:
+        elements.append(node)
+        self.used += _bytes(node) + 1
+
+    def bullets(self, elements: list[dict[str, Any]], lines: list[str]) -> int:
+        """放得下的几行合成一个「· 」列表元素，返回放下了几行。"""
+        taken: list[str] = []
+        for line in lines:
+            # 一行在 JSON 里的字节数：转义后的正文加换行（去掉两侧引号）。
+            if not self.fits(_bytes(f"· {line}\n") - 2):
+                break
+            taken.append(line)
+        if taken:
+            node = _plain("\n".join(f"· {line}" for line in taken))
+            elements.append(node)
+            self.used += _bytes(_plain("")) + 1
+        return len(taken)
 
 
 def _who(item: board.Item) -> str:
     row = item.row
     if row.handler == "person":
-        return f"{_clean(row.handler_name_enc or '同事')} 在办"
+        name = _clean(row.handler_name_enc or "")
+        return f"{name} 在办" if name else "同事在办"
     if row.handler == "job":
-        return (
-            "公共员工在办" if item.job is not None and item.job.kind == "bot_help" else "子任务在办"
-        )
+        if item.job is None:
+            return "助理在办"
+        return "公共员工在办" if item.job.kind == "bot_help" else "子任务在办"
     return "你在办" if row.handler == "owner" else "助理在办"
 
 
@@ -297,21 +341,33 @@ def _line(item: board.Item) -> str:
 
 
 def _items(
-    elements: list[dict[str, Any]], items: list[board.Item], requester: str, buttons: list[int]
+    elements: list[dict[str, Any]],
+    items: list[board.Item],
+    requester: str,
+    buttons: list[int],
+    room: _Room,
 ) -> None:
-    """一组待跟进：每条一行，有建议的下一行灰字；等你的条目带「现在处理」按钮。读不出来的跳过。"""
+    """一组待跟进：每条一行，有建议的下一行灰字；等你的条目带「现在处理」按钮。读不出来的跳过。
+    每组最多 `LIST_MAX` 条，卡片放不下了也停；没列出的只说个数。"""
+    done = 0
     for item in items[:LIST_MAX]:
         if sealed.is_locked(item.row):
+            done += 1
             continue
-        elements.append(_plain(_line(item)))
+        nodes = [_plain(_line(item))]
         tip = board.suggestion(item.row)
         if tip:
-            elements.append(_plain(f"建议：{tip}", "notation"))
+            nodes.append(_plain(f"建议：{tip}", "notation"))
         if item.stage == "owner":
-            elements.append(_now_button(item.row.seq, requester))
+            nodes.append(_now_button(item.row.seq, requester))
+        if not room.fits(sum(_bytes(node) + 1 for node in nodes)):
+            break
+        elements.extend(nodes)
+        if item.stage == "owner":
             buttons.append(item.row.seq)
-    if len(items) > LIST_MAX:
-        elements.append(_plain(MORE_HINT.format(n=len(items) - LIST_MAX), "notation"))
+        done += 1
+    if len(items) > done:
+        room.add(elements, _plain(MORE_HINT.format(n=len(items) - done), "notation"))
 
 
 def board_card(
@@ -326,42 +382,43 @@ def board_card(
     """总表卡片，连同卡片上「现在处理」按钮对应的编号。
 
     `full` 是「看板」指令：五组全列（排期只列 `SCHEDULE_DAYS` 天以内的）；摘要只展开等你与停滞，
-    其余只进计数行。
+    其余只进计数行。拼到 `CARD_BUDGET` 字节为止，放不下的只说个数。
     """
+    title = "事项看板" if full else "助理摘要"
+    room = _Room(title)
     counts = result.counts()
-    elements: list[dict[str, Any]] = [
+    elements: list[dict[str, Any]] = []
+    room.add(
+        elements,
         _plain(
             "总表："
             + " · ".join(f"{GROUP_TITLES[g]} {counts[g]}" for g in board.GROUPS)
             + (f" · 待批 {result.approvals_total}" if result.approvals_total else ""),
             "notation",
-        )
-    ]
+        ),
+    )
     buttons: list[int] = []
     owner = result.groups["owner"]
     if result.approvals or owner:
-        elements.append(_heading(f"等你（{result.approvals_total + len(owner)}）"))
+        room.add(elements, _heading(f"等你（{result.approvals_total + len(owner)}）"))
     if result.approvals:
-        elements.append(_heading(f"待批的写操作（{result.approvals_total}）"))
+        room.add(elements, _heading(f"待批的写操作（{result.approvals_total}）"))
         sizes = result.approval_items
-        elements.append(
-            _plain(
-                "\n".join(f"· {_approval_summary(r, sizes.get(r.id, 1))}" for r in result.approvals)
-            )
+        taken = room.bullets(
+            elements, [_approval_summary(r, sizes.get(r.id, 1)) for r in result.approvals]
         )
-        if result.approvals_total > len(result.approvals):
-            elements.append(
-                _plain(f"另有 {result.approvals_total - len(result.approvals)} 张", "notation")
-            )
+        if result.approvals_total > taken:
+            room.add(elements, _plain(f"另有 {result.approvals_total - taken} 张", "notation"))
         name = system or "审批系统"
-        elements.append(
+        room.add(
+            elements,
             {"tag": "markdown", "content": f"[去{name}处理]({link})"}
             if link
-            else _plain(f"请到{name}里处理", "notation")
+            else _plain(f"请到{name}里处理", "notation"),
         )
     if owner:
-        elements.append(_heading(f"等你拍板或当面处理（{len(owner)}）"))
-        _items(elements, owner, requester, buttons)
+        room.add(elements, _heading(f"等你拍板或当面处理（{len(owner)}）"))
+        _items(elements, owner, requester, buttons, room)
     shown = ["stalled", "working", "others", "scheduled"] if full else ["stalled"]
     horizon = result.today + timedelta(days=board.SCHEDULE_DAYS)
     for group in shown:
@@ -370,16 +427,18 @@ def board_card(
             items = [i for i in items if i.row.review_on is None or i.row.review_on <= horizon]
         if not items:
             continue
-        elements.append(_heading(f"{GROUP_TITLES[group]}（{len(items)}）"))
-        _items(elements, items, requester, buttons)
+        room.add(elements, _heading(f"{GROUP_TITLES[group]}（{len(items)}）"))
+        _items(elements, items, requester, buttons, room)
+    if full and not result.approvals_total and not any(counts.values()):
+        room.add(elements, _plain(EMPTY_BOARD))
     if reports:
-        elements.append(_heading("我处理了这些"))
-        shown_reports = reports[:REPORTS_MAX]
-        elements.append(_plain("\n".join(f"· {line}" for line in shown_reports)))
-        if len(reports) > len(shown_reports):
-            elements.append(_plain(f"另有 {len(reports) - len(shown_reports)} 条", "notation"))
+        room.add(elements, _heading("我处理了这些"))
+        taken = room.bullets(elements, reports[:REPORTS_MAX])
+        if len(reports) > taken:
+            room.add(elements, _plain(f"另有 {len(reports) - taken} 条", "notation"))
     if not full:
-        elements.append(
+        room.add(
+            elements,
             {
                 "tag": "markdown",
                 "content": (
@@ -387,9 +446,8 @@ def board_card(
                     "摘要时点与免打扰时段可以在「我的助理」页或这里改。</font>"
                 ),
                 "text_size": "notation",
-            }
+            },
         )
-    title = "事项看板" if full else "助理摘要"
     return _card(title, "blue", elements), buttons
 
 
@@ -445,13 +503,12 @@ async def send_digest(
     """
     reports = await _reports(session, bot.id, urgent_only=False)
     result = await board.build(session, bot.id, prefs, now)
-    _, _, newest, _ = await board.pending_approvals(session, bot.id)
     lines = _lines(reports)
     since = prefs.digest_sent_at
-    owner = result.groups["owner"] + [i for i in result.groups["stalled"] if i.stage == "owner"]
+    owner = result.groups["owner"]
     fresh = (
         bool(lines)
-        or _newer(newest, since)
+        or _newer(result.approvals_newest, since)
         or any(_newer(item.row.updated_at, since) for item in owner)
     )
     if not fresh:

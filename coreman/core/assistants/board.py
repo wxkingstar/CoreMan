@@ -3,8 +3,8 @@
 阶段只在读取时算，不落库，免得与分类、子任务状态两份状态互相打架。优先级从上到下：
 等你（needs_owner 或 decide）→ 等别人（waiting 或同事在办）→ 排期（回看日在今天之后）→ 在推进。
 停滞只对「在推进」「等别人」判断：在推进的 2 个工作日没有进展；等别人的过了期限，或 5 个工作日
-没有进展。进展时间取待跟进的 `progress_at` 与挂着的子任务最后一次变化中较晚的那个；子任务还在跑
-就不算停滞。
+没有进展。进展时间取待跟进的 `progress_at` 与挂着的子任务最后一次变化中较晚的那个；推后过、已到
+回看日的从回看日起算（推后的那几天不算没动）；子任务还在跑就不算停滞。
 
 在途审批单（写操作）单独列在「等你」里，第一期不挂到待跟进上。只在平台自己的代码里以元数据挑行，
 内容由 `followups.list_` 还原。
@@ -73,6 +73,13 @@ def is_stalled(
     return False
 
 
+def idle_from(last_day: date, row: AssistantFollowup, today: date) -> date:
+    """从哪天起算没动：最后一次进展那天；到了回看日的取回看日与它较晚的，推后的日子不算没动。"""
+    if row.review_on is not None and row.review_on <= today:
+        return max(last_day, row.review_on)
+    return last_day
+
+
 def suggestion(row: AssistantFollowup) -> str | None:
     """备注里第一行以「建议：」开头的内容（助理给所有者拍板用的建议）。"""
     for line in (row.notes_enc or "").split("\n"):
@@ -99,6 +106,7 @@ class Board:
     approvals: list[AssistantApproval]
     approvals_total: int
     approval_items: dict[uuid.UUID, int]
+    approvals_newest: datetime | None
 
     def counts(self) -> dict[str, int]:
         return {name: len(items) for name, items in self.groups.items()}
@@ -175,12 +183,12 @@ async def build(
         job = linked.get(row.job_id) if row.job_id else None
         stage_ = stage(row, today)
         last_day = assistant_settings.local_today(prefs, _last(row, job))
-        idle = workdays_between(last_day, today, prefs.workdays)
+        idle = workdays_between(idle_from(last_day, row, today), today, prefs.workdays)
         stalled = is_stalled(stage_, row, job, idle, today)
         groups["stalled" if stalled else stage_].append(Item(row, stage_, stalled, idle, job))
     far = date.max
     groups["owner"].sort(key=lambda i: (i.row.due_on or far, i.row.seq))
     groups["stalled"].sort(key=lambda i: (-i.idle_days, i.row.seq))
     groups["scheduled"].sort(key=lambda i: (i.row.review_on or far, i.row.seq))
-    approvals, total, _, sizes = await pending_approvals(session, bot_id)
-    return Board(today, groups, approvals, total, sizes)
+    approvals, total, newest, sizes = await pending_approvals(session, bot_id)
+    return Board(today, groups, approvals, total, sizes, newest)
