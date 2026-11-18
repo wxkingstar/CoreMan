@@ -61,7 +61,12 @@ defineExpose({ load })
         v-for="g in GROUPS"
         :key="g"
       >
-        <h3>{{ t('assistant.board.groups.' + g) }}（{{ data.counts[g] + (g === 'owner' ? data.approvals_total : 0) }}）</h3>
+        <h3 v-if="g === 'gap'">
+          {{ t('assistant.board.gap.heading', { count: data.counts.gap, n: data.gaps.length }) }}
+        </h3>
+        <h3 v-else>
+          {{ t('assistant.board.groups.' + g) }}（{{ data.counts[g] + (g === 'owner' ? data.approvals_total : 0) }}）
+        </h3>
         <template v-if="g === 'owner' && data.approvals.length">
           <h4>{{ t('assistant.board.approvals', { n: data.approvals_total }) }}</h4>
           <ul>
@@ -156,7 +161,7 @@ defineExpose({ load })
         >
           {{ t('assistant.board.empty.' + g) }}
         </p>
-        <ul v-else-if="g !== 'gap' && data.groups[g].length">
+        <ul v-else-if="data.groups[g].length">
           <li
             v-for="item in data.groups[g]"
             :key="item.id"

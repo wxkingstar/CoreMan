@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Component } from 'vue'
 
@@ -79,6 +79,30 @@ describe('board', () => {
     expect(confirm).toHaveBeenCalled()
     expect(myAssistant.declineGap).toHaveBeenCalledWith('G003')
     expect(myAssistant.board).toHaveBeenCalledTimes(2)
+    // 卡住的事项用同一行样式渲染，标题里两个数都在。
+    expect(wrapper.get('[data-test="board-F001"]').text()).toContain('选供应商')
+    expect(wrapper.text()).toContain(t('assistant.board.gap.heading', { count: 1, n: 2 }))
+    wrapper.unmount()
+  })
+
+  it('shows the error and reloads when the gap was resolved meanwhile', async () => {
+    const gap = { id: 'G003', kind: 'other' as const, key: 'repo', need: '读仓库', status: 'open' as const, fix: 'none' as const, hint: '', followups: [] }
+    vi.mocked(myAssistant.board).mockResolvedValue({ ...boardData, gaps: [gap] })
+    vi.mocked(myAssistant.declineGap).mockRejectedValue(new Error('这个缺口已经可以用了'))
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation((() => undefined) as never)
+    const wrapper = render(AssistantBoard); await flushPromises()
+    await wrapper.get('[data-test="gap-decline"]').trigger('click'); await flushPromises()
+    expect(error).toHaveBeenCalled()
+    expect(wrapper.find('[data-test="gap-G003"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('hides the need text of a locked gap', async () => {
+    const gap = { id: 'G005', kind: 'other' as const, key: 'repo', need: null, status: 'open' as const, fix: 'none' as const, hint: '', followups: [], locked: true }
+    vi.mocked(myAssistant.board).mockResolvedValue({ ...boardData, gaps: [gap] })
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="gap-G005"]').text()).toContain(t('assistant.page.lockedText'))
     wrapper.unmount()
   })
 
