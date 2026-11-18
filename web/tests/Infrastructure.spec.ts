@@ -279,6 +279,26 @@ describe('Infrastructure management', () => {
     expect(systems.update).toHaveBeenCalledWith(expect.objectContaining({ key: 'erp' }), expect.objectContaining({ token_delivery: 'proxy' }))
     wrapper.unmount()
   })
+  it('edits batch and call limits only for proxied systems', async () => {
+    const proxied = { ...erp, token_delivery: 'proxy' as const, batch_write_max: 1000, batch_destructive_max: 50, proxy_calls_per_turn: 3000, batch_interval_ms: 0 }
+    vi.mocked(systems.list).mockResolvedValue({ ...page, items: [proxied] })
+    vi.mocked(systems.update).mockResolvedValue(proxied)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.findAll('button').find(b => b.text() === i18n.global.t('common.edit'))!.trigger('click'); await flushPromises()
+    expect(document.querySelector('[data-test="limit-batch_write_max"]')).not.toBeNull()
+    const vm = wrapper.vm as unknown as { form: { token_delivery: string; batch_write_max: number; batch_interval_ms: number } }
+    // 清空数字框不留空值：回到默认值，保存时不会被后端拒绝。
+    const input = document.querySelector<HTMLInputElement>('[data-test="limit-proxy_calls_per_turn"] input')!
+    input.value = ''; input.dispatchEvent(new Event('input')); input.dispatchEvent(new Event('change')); await flushPromises()
+    expect((vm.form as unknown as Record<string, unknown>).proxy_calls_per_turn).toBe(3000)
+    vm.form.batch_write_max = 50000; vm.form.batch_interval_ms = 200; await flushPromises()
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ batch_write_max: 50000, batch_interval_ms: 200, proxy_calls_per_turn: 3000 }))
+    vm.form.token_delivery = 'env'; await flushPromises()
+    expect(document.querySelector('[data-test="limit-batch_write_max"]')).toBeNull()
+    wrapper.unmount()
+  })
   it('creates an MCP system with a companion skill and drops the hidden OpenAPI URL', async () => {
     vi.mocked(allSkills).mockResolvedValue([guide, { ...guide, id: 'sk2', name: 'needs-input', user_env_vars: { API_KEY: { label: 'Key', placeholder: '', required: true } } }] as never)
     vi.mocked(systems.create).mockResolvedValue(erp)

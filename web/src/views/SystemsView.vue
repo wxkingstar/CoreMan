@@ -32,7 +32,15 @@ async function testAccess(row: BusinessSystem) {
   } catch (e) { fail(e) }
   finally { testing.value = null }
 }
-const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', mcp_url: '', companion_skill_id: null, token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [] })
+// 平台代理的批量与调用上限：默认值与范围同后端 PROXY_LIMITS
+const PROXY_DEFAULTS = { batch_write_max: 1000, batch_destructive_max: 50, proxy_calls_per_turn: 3000, batch_interval_ms: 0 }
+const PROXY_LIMITS = [
+  { field: 'batch_write_max', label: 'infra.batchWriteMax', min: 1, max: 50000 },
+  { field: 'batch_destructive_max', label: 'infra.batchDestructiveMax', min: 1, max: 500 },
+  { field: 'proxy_calls_per_turn', label: 'infra.proxyCallsPerTurn', min: 1, max: 20000 },
+  { field: 'batch_interval_ms', label: 'infra.batchIntervalMs', min: 0, max: 60000 },
+] as const
+const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', mcp_url: '', companion_skill_id: null, token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [], ...PROXY_DEFAULTS })
 const form = reactive(empty())
 const deliveryHints = { env: 'infra.tokenDeliveryEnvHint', proxy: 'infra.tokenDeliveryProxyHint', mcp: 'infra.tokenDeliveryMcpHint' } as const
 // 配套技能要能在授权时直接装上：已启用、免审批、没有必填参数（后端同样校验）
@@ -109,7 +117,7 @@ async function save() {
   try {
     // MCP 系统不用操作目录，其他方式不用 MCP 地址：隐藏的字段不提交旧值
     const mcp = form.token_delivery === 'mcp'
-    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: mcp ? '' : form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, mcp_url: mcp ? form.mcp_url : '', companion_skill_id: form.companion_skill_id || null, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null }
+    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: mcp ? '' : form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, mcp_url: mcp ? form.mcp_url : '', companion_skill_id: form.companion_skill_id || null, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null, batch_write_max: form.batch_write_max, batch_destructive_max: form.batch_destructive_max, proxy_calls_per_turn: form.proxy_calls_per_turn, batch_interval_ms: form.batch_interval_ms }
     let saved: BusinessSystem
     if (editing.value) {
       if (restricted.value) await ElMessageBox.confirm(t('infra.reclaimWarning'), t('common.confirm'))
@@ -351,6 +359,26 @@ onMounted(load)
           </el-radio-group>
           <small>{{ t(deliveryHints[form.token_delivery ?? 'env']) }}</small>
         </el-form-item>
+        <template v-if="form.token_delivery === 'proxy'">
+          <el-form-item
+            v-for="limit in PROXY_LIMITS"
+            :key="limit.field"
+            :label="t(limit.label)"
+          >
+            <el-input-number
+              v-model="form[limit.field]"
+              :data-test="`limit-${limit.field}`"
+              :min="limit.min"
+              :max="limit.max"
+              :step="1"
+              :value-on-clear="PROXY_DEFAULTS[limit.field]"
+              step-strictly
+            /><small class="switch-hint">{{ t('infra.limitRange', { min: limit.min, max: limit.max }) }}</small>
+          </el-form-item>
+          <el-form-item>
+            <small>{{ t('infra.proxyLimitsHint') }}</small>
+          </el-form-item>
+        </template>
         <el-form-item
           v-if="form.token_delivery === 'mcp'"
           :label="t('infra.mcpUrl')"

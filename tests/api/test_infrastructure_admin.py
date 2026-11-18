@@ -275,3 +275,54 @@ async def test_external_signing_key_is_published_and_listed(
         listed = (await client.get("/api/admin/jwt-keys")).json()["data"]
         assert listed[0]["kid"] == "legacy-2024" and listed[0]["external"] is True
         assert all(k["external"] is False for k in listed[1:])
+
+
+async def test_proxy_limits_default_bounded_kept_when_omitted_and_audited(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """代理的批量与调用上限：有默认值、只能在平台规定的范围内调，旧客户端不传时沿用库里的值。"""
+    await login_as(client, db_session, role="ai_committee")
+    r = await client.post("/api/admin/systems", json={"key": "shop", "name": "Shop"})
+    assert r.status_code == 201
+    data = r.json()["data"]
+    assert (
+        data["batch_write_max"],
+        data["batch_destructive_max"],
+        data["proxy_calls_per_turn"],
+        data["batch_interval_ms"],
+    ) == (1000, 50, 3000, 0)
+    for field, value in (
+        ("batch_write_max", 50001),
+        ("batch_write_max", 0),
+        ("batch_destructive_max", 501),
+        ("proxy_calls_per_turn", 20001),
+        ("batch_interval_ms", -1),
+        ("batch_interval_ms", 60001),
+    ):
+        r = await client.post(
+            "/api/admin/systems", json={"key": "bad", "name": "Bad", field: value}
+        )
+        assert r.status_code == 422, (field, value)
+    path = "/api/admin/systems/shop"
+    limits = {
+        "batch_write_max": 50000,
+        "batch_destructive_max": 500,
+        "proxy_calls_per_turn": 20000,
+        "batch_interval_ms": 250,
+    }
+    r = await client.put(
+        path, json={"name": "Shop", **limits}, headers={"If-Match": str(data["version"])}
+    )
+    assert r.status_code == 200, r.text
+    saved = r.json()["data"]
+    assert {key: saved[key] for key in limits} == limits
+    # 不认识这几项的旧管理台只传原有字段：沿用库里的值。
+    r = await client.put(path, json={"name": "Shop 2"}, headers={"If-Match": str(saved["version"])})
+    assert r.status_code == 200 and {key: r.json()["data"][key] for key in limits} == limits
+    audit = await db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == "system.update", AuditLog.target_id == "shop")
+        .order_by(AuditLog.id)
+        .limit(1)
+    )
+    assert audit is not None and audit.diff["batch_write_max"] == [1000, 50000]
