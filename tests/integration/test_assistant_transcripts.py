@@ -156,10 +156,11 @@ async def test_destroyed_key_or_tampered_blob_starts_fresh(
     )
     await db_session.commit()
     _, plan2 = await start(db_session, bot, node.id)
+    # 末字节按位翻转：直接写成 0x00 的话，密文末字节本来就是 0 时（约 1/256）等于没改。
     await db_session.execute(
         text(
-            "UPDATE assistant_transcripts SET blob_enc = overlay(blob_enc placing '\\x00'::bytea"
-            " from length(blob_enc)) WHERE bot_id = :b"
+            "UPDATE assistant_transcripts SET blob_enc = set_byte(blob_enc, length(blob_enc) - 1,"
+            " get_byte(blob_enc, length(blob_enc) - 1) # 1) WHERE bot_id = :b"
         ),
         {"b": bot.id},
     )

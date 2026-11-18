@@ -307,3 +307,32 @@ def _isolate_network_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
         monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv(key.lower(), raising=False)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--shard",
+        default=None,
+        metavar="K/N",
+        help="只跑 N 份里的第 K 份（按收集顺序轮流分配），CI 拆成并行 job 用",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """`--shard K/N`：按收集顺序轮流分，同一文件的用例摊到各份，慢文件不会扎堆。
+
+    xdist 的每个 worker 各自收集、各自筛，收集顺序一致所以筛出来的也一致。
+    """
+    spec = config.getoption("--shard")
+    if not spec:
+        return
+    try:
+        k, n = (int(part) for part in spec.split("/"))
+    except ValueError:
+        raise pytest.UsageError(f"--shard 要写成 K/N，收到 {spec!r}") from None
+    if not 1 <= k <= n:
+        raise pytest.UsageError(f"--shard 的 K 要在 1..N 之间，收到 {spec!r}")
+    keep = [item for i, item in enumerate(items) if i % n == k - 1]
+    dropped = [item for i, item in enumerate(items) if i % n != k - 1]
+    config.hook.pytest_deselected(items=dropped)
+    items[:] = keep
