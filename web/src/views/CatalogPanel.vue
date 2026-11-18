@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { catalog } from '@/api/admin'
-import type { CatalogIn, CatalogOut, CatalogPatch } from '@/api/types'
+import type { CatalogIn, CatalogOut, CatalogPatch, CatalogReplacePlan } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const { t } = useI18n()
@@ -121,6 +121,71 @@ async function submitForm() {
   } finally {
     saving.value = false
   }
+}
+
+// 换新版本：先预览（dry_run）看会改哪些 AI 员工与运行时，再确认执行。
+const replaceVisible = ref(false)
+const replaceFrom = ref<CatalogOut | null>(null)
+const replaceForm = reactive({ new: '', old: [] as string[], display_name: '', make_default: false, supports_xhigh: false, supports_max: false })
+const replacePlan = ref<CatalogReplacePlan | null>(null)
+const replacing = ref(false)
+const replaceCandidates = computed(() =>
+  rows.value.filter((r) => r.provider === replaceFrom.value?.provider && !r.retired),
+)
+
+function openReplace(row: CatalogOut) {
+  replaceFrom.value = row
+  Object.assign(replaceForm, {
+    new: '',
+    old: [row.model],
+    display_name: '',
+    make_default: false,
+    supports_xhigh: row.supports_xhigh,
+    supports_max: row.supports_max,
+  })
+  replacePlan.value = null
+  replaceVisible.value = true
+}
+
+function replaceBody(dryRun: boolean) {
+  return {
+    provider: replaceFrom.value!.provider,
+    new: replaceForm.new.trim(),
+    old: replaceForm.old,
+    display_name: replaceForm.display_name.trim() || null,
+    make_default: replaceForm.make_default,
+    supports_xhigh: replaceForm.supports_xhigh,
+    supports_max: replaceForm.supports_max,
+    dry_run: dryRun,
+  }
+}
+
+async function submitReplace(dryRun: boolean) {
+  if (replacing.value || !replaceFrom.value) return
+  if (!replaceForm.new.trim() || !replaceForm.old.length) {
+    ElMessage.error(t('login.required', { field: t('catalog.replaceNew') }))
+    return
+  }
+  replacing.value = true
+  try {
+    const plan = await catalog.replace(replaceBody(dryRun))
+    if (dryRun) {
+      replacePlan.value = plan
+      return
+    }
+    ElMessage.success(t('catalog.replaceDone', { bots: plan.bots.length, relays: plan.relays.length }))
+    replaceVisible.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    replacing.value = false
+  }
+}
+
+// 改了表单就作废旧预览，确认按钮只对看过的预览生效。
+function onReplaceEdit() {
+  replacePlan.value = null
 }
 
 onMounted(load)
@@ -249,9 +314,17 @@ onMounted(load)
         <el-table-column
           v-if="canManage"
           :label="t('common.actions')"
-          width="100"
+          width="190"
         >
           <template #default="{ row }: { row: CatalogOut }">
+            <el-button
+              v-if="!row.retired"
+              size="small"
+              :data-test="'replace-model-' + row.model"
+              @click="openReplace(row)"
+            >
+              {{ t('catalog.replace') }}
+            </el-button>
             <el-button
               size="small"
               type="danger"
@@ -319,6 +392,129 @@ onMounted(load)
         </el-button>
       </template>
     </el-dialog>
+    <el-dialog
+      v-model="replaceVisible"
+      :close-on-click-modal="false"
+      :title="t('catalog.replaceTitle', { model: replaceFrom?.model ?? '' })"
+      width="560px"
+      destroy-on-close
+    >
+      <p class="replace-hint">
+        {{ t('catalog.replaceHint') }}
+      </p>
+      <el-form
+        :model="replaceForm"
+        label-width="120px"
+      >
+        <el-form-item :label="t('catalog.replaceOld')">
+          <el-select
+            v-model="replaceForm.old"
+            multiple
+            data-test="replace-old"
+            @change="onReplaceEdit"
+          >
+            <el-option
+              v-for="r in replaceCandidates"
+              :key="r.model"
+              :label="r.model"
+              :value="r.model"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('catalog.replaceNew')">
+          <el-input
+            v-model="replaceForm.new"
+            data-test="replace-new"
+            @input="onReplaceEdit"
+          />
+        </el-form-item>
+        <el-form-item :label="t('catalog.displayName')">
+          <el-input
+            v-model="replaceForm.display_name"
+            @input="onReplaceEdit"
+          />
+        </el-form-item>
+        <el-form-item :label="t('catalog.replaceDefault')">
+          <el-switch
+            v-model="replaceForm.make_default"
+            @change="onReplaceEdit"
+          />
+          <span class="replace-note">{{ t('catalog.replaceDefaultHint') }}</span>
+        </el-form-item>
+        <el-form-item :label="t('catalog.xhigh')">
+          <el-switch
+            v-model="replaceForm.supports_xhigh"
+            @change="onReplaceEdit"
+          />
+        </el-form-item>
+        <el-form-item :label="t('catalog.max')">
+          <el-switch
+            v-model="replaceForm.supports_max"
+            @change="onReplaceEdit"
+          />
+        </el-form-item>
+      </el-form>
+      <div
+        v-if="replacePlan"
+        class="replace-plan"
+        data-test="replace-plan"
+      >
+        <p v-if="replacePlan.created">
+          {{ t('catalog.replaceCreated') }}
+        </p>
+        <p v-if="replacePlan.default_before !== replacePlan.default_after">
+          {{ t('catalog.replaceDefaultChange', { from: replacePlan.default_before ?? '—', to: replacePlan.default_after ?? '—' }) }}
+        </p>
+        <h5>{{ t('catalog.replaceBots', { n: replacePlan.bots.length }) }}</h5>
+        <ul v-if="replacePlan.bots.length">
+          <li
+            v-for="b in replacePlan.bots"
+            :key="b.id"
+          >
+            {{ b.name }}: {{ b.model }}
+            <span v-if="b.effort_level !== b.new_effort_level">
+              ({{ t('catalog.replaceEffort', { from: b.effort_level, to: b.new_effort_level }) }})
+            </span>
+          </li>
+        </ul>
+        <p v-else>
+          {{ t('catalog.replaceNone') }}
+        </p>
+        <h5>{{ t('catalog.replaceRelays', { n: replacePlan.relays.length }) }}</h5>
+        <ul v-if="replacePlan.relays.length">
+          <li
+            v-for="r in replacePlan.relays"
+            :key="r.id"
+          >
+            {{ r.name }}: {{ r.after.join(', ') }}
+          </li>
+        </ul>
+        <p v-else>
+          {{ t('catalog.replaceNone') }}
+        </p>
+      </div>
+      <template #footer>
+        <el-button @click="replaceVisible = false">
+          {{ t('common.cancel') }}
+        </el-button>
+        <el-button
+          data-test="replace-preview"
+          :loading="replacing && !replacePlan"
+          @click="submitReplace(true)"
+        >
+          {{ t('catalog.replacePreview') }}
+        </el-button>
+        <el-button
+          type="primary"
+          data-test="replace-apply"
+          :disabled="!replacePlan"
+          :loading="replacing && !!replacePlan"
+          @click="submitReplace(false)"
+        >
+          {{ t('catalog.replaceApply') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -326,4 +522,9 @@ onMounted(load)
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .provider-group { margin-bottom: 16px; }
 .provider-group h4 { margin: 8px 0; color: var(--el-text-color-secondary); }
+.replace-hint { margin: 0 0 12px; color: var(--el-text-color-secondary); }
+.replace-note { margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary); }
+.replace-plan { padding: 8px 12px; border-radius: 4px; background: var(--el-fill-color-light); }
+.replace-plan h5 { margin: 8px 0 4px; }
+.replace-plan ul { margin: 0; padding-left: 20px; }
 </style>

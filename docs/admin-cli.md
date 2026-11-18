@@ -543,12 +543,19 @@ coreman models list [--provider claude]
 coreman models add claude demo-model --display-name 演示 [--default] [--xhigh] [--max] [--sort 10]
 coreman models set claude demo-model --default on --retired off --display-name ""   # 空串清除显示名称
 coreman models delete claude demo-model --yes
+coreman models replace codex codex/gpt-6.2-sol --from codex/gpt-6.1-sol             # 预览
+coreman models replace codex codex/gpt-6.2-sol --from codex/gpt-6.1-sol --display-name "GPT-6.2 Sol (Codex)" --yes
+coreman models replace opencode opencode/opencode-go/deepseek-v4.1-flash --from opencode/opencode-go/kimi-k3 --from opencode/opencode-go/glm-5.3 --yes
 coreman models prices [--model demo-model]
 coreman models price-set demo-model --from 2026-01-01 --input 3 --output 15 --cache-read 0.3 --cache-write 3.75
 coreman models price-set demo-model --from 2026-01-01 --input 4        # 改已有生效日只给要改的项
 ```
 
-所有成员都能查看；增删改需要 AI 委员会或平台管理员角色。同一提供方只有一个默认模型，退役或删除默认模型时由排序最靠前的未退役模型接任；仍有 AI 员工在用的模型不能删除。价格单位是美元 / 百万 Token，`--provider` 缺省时按模型名判断后端。
+所有成员都能查看；增删改需要 AI 委员会或平台管理员角色。同一提供方只有一个默认模型，退役或删除默认模型时由排序最靠前的未退役模型接任；仍有 AI 员工在用的模型不能删除。
+
+模型出新版本时用 `replace`：新模型不在目录里会自动新增（排在被替换模型的位置，思考档位按内置资料预填，可用 `--xhigh`、`--max` 指定），被替换的模型全部退役，用它们的 AI 员工和白名单运行时一起换到新模型，新模型不支持原来的思考档位时降到它支持的最高档。被替换的模型里有默认模型时新模型自动成为默认，也可用 `--default` 指定。不加 `--yes` 只预览会改动的 AI 员工、运行时和默认模型。管理台「模型目录」每行的「换新版本」做同样的事。
+
+价格单位是美元 / 百万 Token，`--provider` 缺省时按模型名判断后端。
 
 ## 平台应用
 

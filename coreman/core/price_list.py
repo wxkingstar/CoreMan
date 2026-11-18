@@ -81,6 +81,8 @@ BUILTIN_PRICES: tuple[BuiltinPrice, ...] = (
     _row("claude-haiku-5-5", "0.10", "0.50", "0.01", "0.125"),
     _row("claude-haiku-4-5", "1", "5", "0.10", "1.25"),
     # Codex（OpenAI）
+    _row("codex/gpt-6.2-astra", "8", "40", "0.40", "0"),
+    _row("codex/gpt-6.2-sol", "2", "10", "0.10", "0"),
     _row("codex/gpt-6-astra", "10", "50", "1", "0"),
     _row("codex/gpt-6.1-sol", "2", "10", "0.10", "0"),
     _row("codex/gpt-6.1-terra", "1", "5", "0.05", "0"),

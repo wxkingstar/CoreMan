@@ -17,6 +17,7 @@ from coreman.core.audit import diff_dict, record_audit
 from coreman.core.db.models import Bot, ModelCatalog, RelayServer, User
 from coreman.core.relay.models import backend_of, default_model
 from coreman.core.relay.models import load_catalog as load_catalog  # 再导出
+from coreman.core.relay.replace import ReplaceError, replace_models
 
 router = APIRouter(
     prefix="/api/admin/model-catalog",
@@ -50,6 +51,19 @@ class CatalogPatch(BaseModel):
         """只取请求体里真正出现过的字段：None 是合法取值（display_name 可以清空），
         不能用「值为 None」来判断「没传」。"""
         return self.model_dump(include=self.model_fields_set)
+
+
+class ReplaceIn(BaseModel):
+    """新版本顶替旧版本；dry_run 只返回会改什么。"""
+
+    provider: str = Field(min_length=1, max_length=50, pattern=r"^[a-z0-9_-]+$")
+    new: str = Field(min_length=1, max_length=100)
+    old: list[str] = Field(min_length=1, max_length=20)
+    display_name: str | None = Field(default=None, max_length=100)
+    supports_xhigh: bool | None = None
+    supports_max: bool | None = None
+    make_default: bool = False
+    dry_run: bool = False
 
 
 def catalog_out(row: ModelCatalog) -> dict[str, Any]:
@@ -152,6 +166,46 @@ async def create_entry(
     await session.commit()
     await session.refresh(row)
     return {"code": 0, "data": catalog_out(row)}
+
+
+@router.post("/replace")
+async def replace_entries(
+    body: ReplaceIn,
+    request: Request,
+    actor: User = Depends(_MANAGERS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        plan = await replace_models(
+            session,
+            **body.model_dump(exclude={"provider", "dry_run"}),
+            provider=body.provider,
+            dry_run=body.dry_run,
+        )
+    except ReplaceError as e:
+        raise ApiError(e.status, e.status, str(e)) from e
+    if body.dry_run:
+        return {"code": 0, "data": plan.out()}
+    diff: dict[str, list[Any]] = {
+        "retired": [[], plan.old],
+        "bots": [[], [f"{b['name']}（{b['model']}）" for b in plan.bots]],
+        "relays": [[], [r["name"] for r in plan.relays]],
+    }
+    if plan.created:
+        diff["created"] = [None, plan.new]
+    _note_default_change(diff, plan.default_before, plan.default_after)
+    await record_audit(
+        session,
+        action="catalog.replace",
+        actor_id=actor.id,
+        actor_login=actor.login_name,
+        target_type="model_catalog",
+        target_id=f"{plan.provider}/{plan.new}",
+        diff=diff,
+        ip=client_ip(request),
+    )
+    await session.commit()
+    return {"code": 0, "data": plan.out()}
 
 
 @router.patch("/{provider}/{model:path}")

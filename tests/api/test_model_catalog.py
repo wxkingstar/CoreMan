@@ -145,3 +145,115 @@ async def test_default_handoff_is_audited(
     assert audit is not None and audit.diff is not None
     assert audit.diff["retired"] == [False, True]
     assert audit.diff["default_model"] == ["codex/gpt-6.1-sol", "codex/gpt-6-astra"]
+
+
+async def test_replace_moves_bots_relays_and_default(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import Bot, ModelCatalog, RelayServer
+
+    admin = await login_as(client, db_session, role="ai_committee")
+    relay = RelayServer(
+        name="codex-r",
+        host="h",
+        clawrelay_port=1,
+        model_provider="codex",
+        supported_models_mode="restricted",
+        supported_models=["codex/gpt-6-astra", "codex/gpt-6.1-sol"],
+    )
+    db_session.add(relay)
+    await db_session.flush()
+    for key, model, effort in (
+        ("sol", "codex/gpt-6.1-sol", "max"),
+        ("astra", "codex/gpt-6-astra", "high"),
+    ):
+        db_session.add(
+            Bot(
+                bot_key=key,
+                platform="wecom",
+                name=key,
+                created_by=admin.id,
+                relay_server_id=relay.id,
+                model=model,
+                effort_level=effort,
+                working_dir="/d",
+                credentials_enc="enc",
+            )
+        )
+    await db_session.commit()
+    body = {
+        "provider": "codex",
+        "new": "codex/gpt-6.2-sol",
+        "old": ["codex/gpt-6.1-sol"],
+        "display_name": "GPT-6.2 Sol (Codex)",
+        "supports_max": False,
+    }
+
+    preview = await client.post("/api/admin/model-catalog/replace", json={**body, "dry_run": True})
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()["data"]
+    assert plan["created"] is True
+    assert plan["default_before"] == "codex/gpt-6.1-sol"
+    assert plan["default_after"] == "codex/gpt-6.2-sol"
+    assert [(b["name"], b["new_effort_level"]) for b in plan["bots"]] == [("sol", "xhigh")]
+    assert plan["relays"][0]["after"] == ["codex/gpt-6-astra", "codex/gpt-6.2-sol"]
+    db_session.expire_all()
+    assert await db_session.get(ModelCatalog, ("codex", "codex/gpt-6.2-sol")) is None
+    sol = (await db_session.execute(select(Bot).where(Bot.bot_key == "sol"))).scalar_one()
+    assert sol.model == "codex/gpt-6.1-sol"
+
+    applied = await client.post("/api/admin/model-catalog/replace", json=body)
+    assert applied.status_code == 200, applied.text
+    db_session.expire_all()
+    new = await db_session.get(ModelCatalog, ("codex", "codex/gpt-6.2-sol"))
+    old = await db_session.get(ModelCatalog, ("codex", "codex/gpt-6.1-sol"))
+    assert new is not None and old is not None
+    assert (new.is_default, new.retired, new.supports_xhigh, new.supports_max) == (
+        True,
+        False,
+        True,
+        False,
+    )
+    assert new.display_name == "GPT-6.2 Sol (Codex)" and new.sort_order == old.sort_order
+    assert (old.is_default, old.retired) == (False, True)
+    bots = {
+        b.bot_key: (b.model, b.effort_level, b.version)
+        for b in (await db_session.execute(select(Bot))).scalars()
+    }
+    assert bots == {
+        "sol": ("codex/gpt-6.2-sol", "xhigh", 2),
+        "astra": ("codex/gpt-6-astra", "high", 1),
+    }
+    await db_session.refresh(relay)
+    assert relay.supported_models == ["codex/gpt-6-astra", "codex/gpt-6.2-sol"]
+    audit = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == "catalog.replace"))
+    ).scalar_one()
+    assert audit.diff is not None
+    assert audit.diff["default_model"] == ["codex/gpt-6.1-sol", "codex/gpt-6.2-sol"]
+
+    # 已在目录里的新模型：取消退役、沿用原有标记；不是默认的旧模型被替代时默认不变。
+    again = await client.post(
+        "/api/admin/model-catalog/replace",
+        json={"provider": "codex", "new": "codex/gpt-6.1-sol", "old": ["codex/gpt-6-astra"]},
+    )
+    assert again.status_code == 200, again.text
+    data = again.json()["data"]
+    assert data["created"] is False and data["default_after"] == "codex/gpt-6.2-sol"
+    db_session.expire_all()
+    revived = await db_session.get(ModelCatalog, ("codex", "codex/gpt-6.1-sol"))
+    assert revived is not None and not revived.retired and not revived.is_default
+
+
+async def test_replace_rejects_bad_requests(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    url = "/api/admin/model-catalog/replace"
+    await login_as(client, db_session, role="member")
+    body = {"provider": "codex", "new": "codex/x", "old": ["codex/gpt-6.1-sol"]}
+    assert (await client.post(url, json=body)).status_code == 403
+    await login_as(client, db_session, role="platform_admin")
+    missing = await client.post(url, json={**body, "old": ["codex/nope"]})
+    assert missing.status_code == 404 and "codex/nope" in missing.text
+    same = await client.post(url, json={**body, "new": "codex/gpt-6.1-sol"})
+    assert same.status_code == 422
