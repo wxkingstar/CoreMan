@@ -14,6 +14,7 @@ from coreman.core.assistants import followups, keys, sealed
 from coreman.core.crypto import DecryptError
 from coreman.core.db.session import make_session_factory
 from tests.integration.assistant_helpers import SECRET, raw, seed_assistant
+from tests.integration.job_helpers import owner_with_key, spawned
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
 TODAY = date(2026, 11, 13)
@@ -73,6 +74,10 @@ async def test_add_numbers_items_and_stores_ciphertext(db_session: AsyncSession)
         "due_on": "2026-11-19",
         "origin_message_id": "om_1",
         "needs_owner": False,
+        "handler": "assistant",
+        "handler_name": None,
+        "job_id": None,
+        "progress_at": first.progress_at.isoformat(),
         "created_at": first.created_at.isoformat(),
         "notes": f"他周一问的。{SECRET}",
     }
@@ -267,3 +272,128 @@ async def test_after_the_key_is_destroyed_only_metadata_changes(
         assert row.status == "done"
     # 库里的密文没有被空串盖掉。
     assert str(await raw(db_session, STORED, bot=bot.id)).count("enc:v2:d1:") == 3
+
+
+async def test_handler_person_needs_a_name_and_is_sealed(db_session: AsyncSession) -> None:
+    bot_id = await _assistant(db_session)
+    assert (
+        await _code(
+            followups.add(db_session, bot_id, category="waiting", title="等报价", handler="person")
+        )
+        == "invalid_handler_name"
+    )
+    assert (
+        await _code(
+            followups.add(db_session, bot_id, category="waiting", title="等报价", handler="robot")
+        )
+        == "invalid_handler"
+    )
+    row = await followups.add(
+        db_session,
+        bot_id,
+        category="waiting",
+        title="等报价",
+        handler="person",
+        handler_name=f" 李四 {SECRET} ",
+    )
+    await db_session.commit()
+    assert row.handler == "person" and row.handler_name_enc == f"李四 {SECRET}"
+    view = followups.view(row)
+    assert view["handler"] == "person" and view["handler_name"] == f"李四 {SECRET}"
+    assert view["job_id"] is None and view["progress_at"]
+
+
+async def test_handler_job_must_point_at_own_job(db_session: AsyncSession) -> None:
+    bot, _ = await owner_with_key(db_session)
+    other, _ = await owner_with_key(
+        db_session, chat_id="oc_other", platform_user_id="other_pid", open_id="ou_other"
+    )
+    bot_id = bot.id
+    mine = await spawned(db_session, bot)
+    theirs = await spawned(db_session, other)
+    assert (
+        await _code(
+            followups.add(db_session, bot_id, category="decide", title="查退货", handler="job")
+        )
+        == "job_not_found"
+    )
+    assert (
+        await _code(
+            followups.add(
+                db_session,
+                bot_id,
+                category="decide",
+                title="查退货",
+                handler="job",
+                job_id=theirs.id,
+            )
+        )
+        == "job_not_found"
+    )
+    row = await followups.add(
+        db_session, bot_id, category="promised", title="查退货", handler="job", job_id=mine.id
+    )
+    # 改回助理自己办：子任务关联与同事称呼一起清掉。
+    row = await followups.update(db_session, bot_id, row.seq, handler="assistant")
+    assert row.handler == "assistant" and row.job_id is None and row.handler_name_enc is None
+
+
+async def test_progress_appends_dated_lines_and_refreshes_progress_at(
+    db_session: AsyncSession,
+) -> None:
+    bot_id = await _assistant(db_session)
+    row = await followups.add(
+        db_session, bot_id, category="promised", title="报价", notes="来龙去脉"
+    )
+    before = row.progress_at
+    row = await followups.progress(db_session, bot_id, row.seq, " 已问过王五 ", today=TODAY)
+    assert row.notes_enc == "来龙去脉\n[2026-11-13] 已问过王五"
+    assert row.progress_at > before
+    assert (
+        await _code(followups.progress(db_session, bot_id, row.seq, "  ", today=TODAY))
+        == "invalid_progress"
+    )
+    assert (
+        await _code(
+            followups.progress(
+                db_session, bot_id, row.seq, "长" * (followups.MAX_PROGRESS + 1), today=TODAY
+            )
+        )
+        == "invalid_progress"
+    )
+
+
+async def test_progress_drops_oldest_progress_lines_but_keeps_the_intro(
+    db_session: AsyncSession,
+) -> None:
+    bot_id = await _assistant(db_session)
+    intro = "来龙去脉" * 100  # 400 字
+    row = await followups.add(db_session, bot_id, category="promised", title="报价", notes=intro)
+    for i in range(20):
+        row = await followups.progress(
+            db_session, bot_id, row.seq, f"第{i}次" + "进" * 280, today=TODAY
+        )
+    assert row.notes_enc is not None and len(row.notes_enc) <= followups.MAX_NOTES
+    assert row.notes_enc.startswith(intro)
+    assert "第19次" in row.notes_enc and "第0次" not in row.notes_enc
+
+
+async def test_progress_refuses_when_the_intro_leaves_no_room(db_session: AsyncSession) -> None:
+    bot_id = await _assistant(db_session)
+    row = await followups.add(
+        db_session, bot_id, category="promised", title="报价", notes="长" * followups.MAX_NOTES
+    )
+    assert (
+        await _code(followups.progress(db_session, bot_id, row.seq, "新进展", today=TODAY))
+        == "notes_full"
+    )
+
+
+async def test_update_refreshes_progress_but_snooze_does_not(db_session: AsyncSession) -> None:
+    bot_id = await _assistant(db_session)
+    row = await followups.add(db_session, bot_id, category="promised", title="报价")
+    first = row.progress_at
+    row = await followups.snooze(db_session, bot_id, row.seq, date(2026, 11, 20), today=TODAY)
+    assert row.progress_at == first
+    row = await followups.update(db_session, bot_id, row.seq, title="报价（改）")
+    assert row.progress_at > first

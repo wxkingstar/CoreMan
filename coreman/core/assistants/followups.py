@@ -21,7 +21,12 @@ from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
-from coreman.core.db.models import FOLLOWUP_CATEGORIES, AssistantFollowup
+from coreman.core.db.models import (
+    FOLLOWUP_CATEGORIES,
+    FOLLOWUP_HANDLERS,
+    AssistantFollowup,
+    AssistantJob,
+)
 from coreman.core.timeutils import utcnow
 
 # 每位助理未结（open + snoozed）条目的上限。
@@ -33,6 +38,11 @@ SCOPES = ("today", "open", "all", *FOLLOWUP_CATEGORIES)
 # 平台自动关闭的原因：起因消息被撤回。
 RECALLED = "origin_recalled"
 _LABEL = re.compile(r"^[Ff]?(\d{1,9})$")
+HANDLERS = FOLLOWUP_HANDLERS
+MAX_HANDLER_NAME = 50
+MAX_PROGRESS = 300
+# 进展行：日期开头。备注超长时从最早的进展行丢起，开头的来龙去脉不动。
+_PROGRESS_LINE = re.compile(r"^\[\d{4}-\d{2}-\d{2}\] ")
 
 
 class Keep(enum.Enum):
@@ -73,6 +83,10 @@ def view(row: AssistantFollowup, *, notes: bool = True) -> dict[str, Any]:
         "due_on": row.due_on.isoformat() if row.due_on else None,
         "origin_message_id": row.origin_message_id,
         "needs_owner": row.needs_owner,
+        "handler": row.handler,
+        "handler_name": row.handler_name_enc,
+        "job_id": str(row.job_id) if row.job_id else None,
+        "progress_at": row.progress_at.isoformat(),
         "created_at": row.created_at.isoformat(),
     }
     if notes:
@@ -105,6 +119,39 @@ def _category(value: str) -> str:
     return value
 
 
+async def _handler(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    handler: str,
+    name: str | None,
+    job_id: uuid.UUID | None,
+) -> tuple[str, str | None, uuid.UUID | None]:
+    """谁在办：返回要写入的 (handler, 同事称呼, 子任务编号)。不相干的两项一律清空。
+
+    Raises:
+        FollowupError: invalid_handler / invalid_handler_name / job_not_found
+    """
+    if handler not in HANDLERS:
+        raise FollowupError("invalid_handler")
+    if handler == "person":
+        clean = (name or "").strip()
+        if not clean or len(clean) > MAX_HANDLER_NAME:
+            raise FollowupError("invalid_handler_name")
+        return handler, clean, None
+    if handler == "job":
+        found = None
+        if job_id is not None:
+            found = await session.scalar(
+                select(AssistantJob.id).where(
+                    AssistantJob.id == job_id, AssistantJob.bot_id == bot_id
+                )
+            )
+        if found is None:
+            raise FollowupError("job_not_found")
+        return handler, None, job_id
+    return handler, None, None
+
+
 async def _lock(session: AsyncSession, bot_id: uuid.UUID) -> None:
     """这位助理的编号与上限在本事务内独占；不锁 bots 的行，那一行别处一直在更新。"""
     await session.execute(
@@ -135,6 +182,8 @@ async def add(
     origin_message_id: str | None = None,
     job_id: uuid.UUID | None = None,
     needs_owner: bool = False,
+    handler: str = "assistant",
+    handler_name: str | None = None,
 ) -> AssistantFollowup:
     """记一条，编号取这位助理的下一个。
 
@@ -142,10 +191,14 @@ async def add(
         needs_owner: 要所有者在场才办得了：摘要里逐条列出，带「现在处理」按钮
 
     Raises:
-        FollowupError: invalid_category / invalid_title / invalid_notes / too_many_followups /
-            content_locked
+        FollowupError: invalid_category / invalid_title / invalid_notes / invalid_handler /
+            invalid_handler_name / job_not_found / too_many_followups / content_locked
     """
     category, title, notes = _category(category), _title(title), _notes(notes)
+    if job_id is not None and handler == "assistant":
+        # 旧调用方只给 job_id：视为子任务在办。
+        handler = "job"
+    handler, handler_name, job_id = await _handler(session, bot_id, handler, handler_name, job_id)
     await _writable(session, bot_id)
     await _lock(session, bot_id)
     live = await session.scalar(
@@ -170,6 +223,9 @@ async def add(
         origin_message_id=origin_message_id,
         job_id=job_id,
         needs_owner=needs_owner,
+        handler=handler,
+        handler_name_enc=handler_name,
+        progress_at=utcnow(),
     )
     session.add(row)
     await session.flush()
@@ -214,6 +270,9 @@ async def update(
     review_on: date | None | Keep = KEEP,
     due_on: date | None | Keep = KEEP,
     needs_owner: bool | None = None,
+    handler: str | None = None,
+    handler_name: str | None = None,
+    job_id: uuid.UUID | None = None,
 ) -> AssistantFollowup:
     """改一条未结的；没给的项不动，`notes` / `review_on` / `due_on` 给 None 是清空。
 
@@ -233,12 +292,47 @@ async def update(
         row.due_on = due_on
     if needs_owner is not None:
         row.needs_owner = needs_owner
+    if handler is not None:
+        if handler == "person":
+            await _writable(session, bot_id)
+        row.handler, row.handler_name_enc, row.job_id = await _handler(
+            session, bot_id, handler, handler_name, job_id
+        )
     if not isinstance(review_on, Keep):
         row.review_on = review_on
         if review_on is None and row.status == "snoozed":
             # 没有回看日期的推后条目永远不会醒。
             row.status = "open"
-    row.updated_at = utcnow()
+    row.updated_at = row.progress_at = utcnow()
+    await session.flush()
+    return row
+
+
+async def progress(
+    session: AsyncSession, bot_id: uuid.UUID, seq: int, note: str, *, today: date
+) -> AssistantFollowup:
+    """记一行进展：备注末尾追加「[日期] 内容」，刷新进展时间。
+
+    备注超长时从最早的进展行丢起；开头的来龙去脉（不以日期开头的行）不丢，丢完还放不下就拒绝。
+
+    Raises:
+        FollowupError: invalid_progress / notes_full / followup_not_found / followup_closed /
+            content_locked
+    """
+    note_text = " ".join(note.split())
+    if not note_text or len(note_text) > MAX_PROGRESS:
+        raise FollowupError("invalid_progress")
+    row = await _live(session, bot_id, seq)
+    await _writable(session, bot_id)
+    lines = (row.notes_enc or "").split("\n") if row.notes_enc else []
+    lines.append(f"[{today.isoformat()}] {note_text}")
+    while len("\n".join(lines)) > MAX_NOTES:
+        oldest = next((i for i, line in enumerate(lines[:-1]) if _PROGRESS_LINE.match(line)), None)
+        if oldest is None:
+            raise FollowupError("notes_full")
+        del lines[oldest]
+    row.notes_enc = "\n".join(lines)
+    row.updated_at = row.progress_at = utcnow()
     await session.flush()
     return row
 
