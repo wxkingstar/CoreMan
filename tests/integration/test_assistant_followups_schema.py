@@ -105,7 +105,9 @@ async def test_handler_defaults_and_name_is_sealed(db_session: AsyncSession) -> 
     assert plain.handler == "assistant" and plain.handler_name_enc is None
     assert plain.progress_at is not None
     stored = str(
-        await raw(db_session, "SELECT handler_name_enc FROM assistant_followups WHERE id = :id", id=row.id)
+        await raw(
+            db_session, "SELECT handler_name_enc FROM assistant_followups WHERE id = :id", id=row.id
+        )
     )
     assert SECRET not in stored and "李四" not in stored and stored.startswith("enc:v2:d1:")
 
