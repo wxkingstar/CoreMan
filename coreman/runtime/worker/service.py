@@ -83,6 +83,7 @@ class WorkerService(Service):
         settings = get_settings()
         self._public_base_url = settings.public_base_url
         self._cloud_proxy_ready = settings.cloud_proxy_ready
+        self._cloud_proxy_policy = settings.cloud_proxy_policy
         self._external_jwt_key = settings.external_jwt_key
         self._business_token_providers = settings.business_token_providers
         self._engine = make_engine(settings.database_url)
@@ -247,6 +248,7 @@ class WorkerService(Service):
             chat_logs=self._chat_logs,
             public_base_url=self._public_base_url,
             cloud_proxy_ready=self._cloud_proxy_ready,
+            cloud_proxy_policy=self._cloud_proxy_policy,
             external_jwt_key=self._external_jwt_key,
             business_token_providers=self._business_token_providers,
             openuserid=self._openuserid,

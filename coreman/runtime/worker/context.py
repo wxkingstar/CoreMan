@@ -24,6 +24,7 @@ from coreman.core.settings_store import SettingsStore
 
 if TYPE_CHECKING:  # 只用于类型标注，避免 worker 启动时连带拉起企微与解析器模块。
     from coreman.core.chat.openuserid import OpenUseridResolver
+    from coreman.core.cloud_proxy.risk_policy import CloudProxyPolicy
     from coreman.core.wecom.media import MediaFetcher
 
 
@@ -42,6 +43,8 @@ class TaskContext:
     public_base_url: str = ""
     # 云服务代理的部署配置齐全；不齐则不下发代理地址与令牌。
     cloud_proxy_ready: bool = False
+    # 云服务代理的放行策略（地域服务的 endpoint 等）；个人助理的能力清单按它列放行的产品。
+    cloud_proxy_policy: CloudProxyPolicy | None = None
     # 部署配置的外部签发方密钥（BOT_JWT_*）；有则业务系统令牌用它签。
     external_jwt_key: ExternalKey | None = None
     business_token_providers: dict[str, HTTPTokenProviderConfig] = field(
