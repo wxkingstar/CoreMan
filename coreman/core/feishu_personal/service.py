@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import write_fuse
+from coreman.core.assistants import chat_guard, write_fuse
 from coreman.core.assistants.records import is_assistant
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, FeishuPersonalGrant
@@ -242,6 +242,7 @@ def _state(row: FeishuPersonalGrant, cipher: Cipher) -> dict[str, Any]:
         "status": row.status,
         "scopes": row.scopes,
         "authorization_level": row.authorization_level,
+        "message_range": row.message_range,
         "requested_scopes": row.requested_scopes,
         "missing_scopes": sorted(set(row.requested_scopes or []) - set(row.scopes or [])),
         "checked_at": now.isoformat(),
@@ -291,6 +292,7 @@ async def _scopes_for_level(row: FeishuPersonalGrant, secret: str, level: str) -
     if level != "messages_readonly":
         # Not everything the app enabled: Feishu refuses requests with too many permissions.
         selected = endpoints.request_scopes(level, set(selected))
+    selected = permissions.narrow(selected, row.message_range or "all")
     if not selected:
         raise PersonalError("authorization_unavailable")
     return selected
@@ -310,6 +312,25 @@ async def begin_in_flow(
     ):
         pending = jsonlib.loads(cipher.decrypt(row.pending_enc, _aad(row, "pending_enc")))
         return {"status": "pending", "authorization_url": pending["url"], "reused": True}
+    selected = await _scopes_for_level(row, secret, level)
+    row.remote_revoked = await _revoke_remote(cipher, row, secret) if row.token_enc else True
+    row.authorization_level, row.requested_scopes = level, selected
+    return await _start_authorization(row, secret, cipher)
+
+
+async def change_message_range(
+    session: AsyncSession, cipher: Cipher, scope: Scope, message_range: str
+) -> dict[str, Any]:
+    """改消息范围并按原档位重新授权：旧令牌当场作废，新授权只申请这个范围要的读权限。
+
+    进行中的授权链接不复用（它申请的是旧范围）。档位沿用现有的；从没授权过的按 `all`。
+    """
+    if message_range not in permissions.MESSAGE_RANGES:
+        raise PersonalError("invalid_message_range")
+    row, secret = await _row(session, cipher, scope)
+    await _require_live(session, scope)
+    level = row.authorization_level if row.authorization_level in permissions.LEVELS else "all"
+    row.message_range = message_range
     selected = await _scopes_for_level(row, secret, level)
     row.remote_revoked = await _revoke_remote(cipher, row, secret) if row.token_enc else True
     row.authorization_level, row.requested_scopes = level, selected
@@ -525,6 +546,66 @@ async def _authorize(
     return endpoint, row, secret, tokens
 
 
+class _Guard:
+    """一次请求里给 `chat_guard` 用的查询：以所有者身份查消息在哪个会话、会话是什么类型。"""
+
+    def __init__(
+        self, session: AsyncSession, row: FeishuPersonalGrant, tokens: dict[str, Any]
+    ) -> None:
+        self.session, self.row, self.tokens = session, row, tokens
+        self.kinds: dict[str, str | None] = {}
+
+    async def _get(self, key: str, **path: str) -> dict[str, Any] | None:
+        endpoint = endpoints.ENDPOINTS[key]
+        try:
+            built = endpoints.build(endpoint, **path)
+        except ValueError:
+            return None
+        category = ratelimit.category(endpoint)
+        if category is not None:
+            await ratelimit.Budget(self.row.app_id).record(self.session, category)
+        response = await _http(
+            "GET",
+            BASE + built,
+            headers={"Authorization": "Bearer " + self.tokens["access_token"]},
+            params={"user_id_type": "open_id"} if key == "im.chat" else None,
+        )
+        data = response.get("data") if response.get("code") == 0 else None
+        return data if isinstance(data, dict) else None
+
+    async def chat_of(self, message_id: str) -> Any:
+        data = await self._get("im.get", message_id=message_id)
+        items = data.get("items") if data else None
+        first = items[0] if isinstance(items, list) and items else None
+        return first.get("chat_id") if isinstance(first, dict) else None
+
+    async def kind_of(self, chat_id: str) -> str | None:
+        if chat_id not in self.kinds:
+            data = await self._get("im.chat", chat_id=chat_id)
+            mode = data.get("chat_mode") if data else None
+            self.kinds[chat_id] = chat_guard.kind_of_mode(mode) if mode else None
+        return self.kinds[chat_id]
+
+
+async def _guard(
+    session: AsyncSession,
+    scope: Scope,
+    row: FeishuPersonalGrant,
+    endpoint: endpoints.Endpoint,
+    path: str,
+    tokens: dict[str, Any],
+    params: Any,
+    json: Any,
+) -> tuple[chat_guard.Rules, _Guard] | None:
+    """个人助理不托管的会话：请求碰到就拒绝（见 `chat_guard`）。返回筛应答要用的名单与查询。"""
+    rules = await chat_guard.rules(session, scope.bot, row.message_range or "all")
+    if rules is None:
+        return None
+    lookup = _Guard(session, row, tokens)
+    await chat_guard.check(endpoint, path, rules, params, json, lookup.chat_of, lookup.kind_of)
+    return rules, lookup
+
+
 async def _tokens(
     session: AsyncSession,
     cipher: Cipher,
@@ -598,6 +679,7 @@ async def api_request(
 ) -> dict[str, Any]:
     """Call a registered endpoint as the owner. `data`/`files` send a multipart upload."""
     endpoint, row, secret, tokens = await _authorize(session, cipher, scope, method, path)
+    guarded = await _guard(session, scope, row, endpoint, path, tokens, params, json)
     # 助理共用一个应用，飞书按应用限频：列会话与读历史各记一笔用量，盯消息的循环据此拉长
     # 间隔。这里只记不拦；普通员工不记。
     category = ratelimit.category(endpoint) if is_assistant(scope.bot) else None
@@ -632,7 +714,12 @@ async def api_request(
             return {key: redact(item) for key, item in value.items()}
         return value
 
-    return cast(dict[str, Any], redact(response.get("data") or {}))
+    out = cast(dict[str, Any], redact(response.get("data") or {}))
+    key = chat_guard.key_of(endpoint)
+    if guarded is not None and key is not None and endpoint.kind == "read":
+        rules, lookup = guarded
+        out = await chat_guard.screen(key, rules, out, lookup.kind_of)
+    return out
 
 
 # Pre-signed download links (mail attachments) must point at Feishu, never elsewhere.
@@ -758,6 +845,7 @@ async def api_download(
 ) -> Download:
     """Download a file from a registered endpoint as the owner."""
     endpoint, row, _, tokens = await _authorize(session, cipher, scope, method, path)
+    await _guard(session, scope, row, endpoint, path, tokens, params, None)
     opened = await _open(
         method,
         BASE + path,

@@ -181,7 +181,10 @@ export interface AssistantPrefs {
   work_end: string
   workdays: number[]
   focus_chats: string[]
+  /** 托管范围：all 托管全部会话（ignored_chats 里的不托管），listed 只托管 managed_chats 里的。 */
+  chat_scope: 'all' | 'listed'
   ignored_chats: string[]
+  managed_chats: string[]
   /** 摘要时点（所有者时区的 HH:MM，升序，1–6 个）：不急的事攒到这些时点合并成一条。 */
   digest_times: string[]
   /** 免打扰时段：开着时这段时间里平台不主动发任何消息；可以跨午夜。 */
@@ -193,8 +196,10 @@ export interface AssistantPrefs {
   platform_daily_turn_budget: number
   /** 实际生效的：个人值与平台默认里较小的那个。 */
   effective_daily_turn_budget: number
-  limits: { focus_chats: number; ignored_chats: number; budget_min: number }
+  limits: { focus_chats: number; ignored_chats: number; managed_chats: number; budget_min: number }
   locked: boolean
+  /** 授权的消息范围；`enforced` 为 false 表示飞书仍发下了另一类会话的读权限（只靠平台拦），未授权时为 null。 */
+  authorization: { message_range: MessageRange; status: string; enforced: boolean | null }
   /** 以下几项来自后端的 `settings.view`，表单不改它们。 */
   on_shift: boolean
   shift_override: 'on' | 'off' | null
@@ -205,8 +210,13 @@ export interface AssistantPrefs {
   quiet_now: boolean
 }
 export type AssistantPrefsPatch = Partial<Pick<AssistantPrefs,
-  'timezone' | 'always_on' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'ignored_chats'
+  'timezone' | 'always_on' | 'work_start' | 'work_end' | 'workdays' | 'focus_chats' | 'chat_scope' | 'ignored_chats' | 'managed_chats'
   | 'digest_times' | 'quiet_enabled' | 'quiet_start' | 'quiet_end' | 'daily_turn_budget'>>
+
+export type MessageRange = 'all' | 'group' | 'p2p'
+
+/** 挑托管范围用的一个会话：编号、名字（单聊是对方的名字，可能为空）与类型。 */
+export interface ChatChoice { chat_id: string; name: string; kind: 'p2p' | 'group' }
 
 /** 访问记录的一行：谁、什么时候、做了什么；没有任何内容。 */
 export interface AccessEntry {
@@ -270,6 +280,8 @@ export const myAssistant = {
   savePage: (body: NoteIn) => call<NoteEntry>(http.put(`${root}/notes/page`, body)),
   deletePage: (path: string) => call<{ deleted: boolean }>(http.post(`${root}/notes/delete`, { path })),
   settings: () => call<AssistantPrefs>(http.get(`${root}/settings`)),
+  changeMessageRange: (message_range: MessageRange) => call<{ authorization_url: string; message_range: MessageRange }>(http.post(`${root}/message-range`, { message_range }, SLOW)),
+  chatChoices: (query = '') => call<{ items: ChatChoice[] }>(http.get(`${root}/settings/chats`, { params: query ? { query } : {}, ...SLOW })),
   saveSettings: (body: AssistantPrefsPatch) => call<AssistantPrefs>(http.patch(`${root}/settings`, body, SLOW)),
   /** 即时上班、下班，或回到按工作时段；与私聊里说「上班」「下班」同一个效果。 */
   shift: (state: 'on' | 'off' | 'auto') => call<AssistantPrefs>(http.post(`${root}/shift`, { state })),

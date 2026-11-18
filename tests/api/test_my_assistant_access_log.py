@@ -42,6 +42,8 @@ READS: dict[str, list[tuple[str, str]]] = {
     # 导出把全部知识页与未结的待跟进解了出来：对象只有两个数。
     "/export": [("export", "pages=1,followups=1")],
 }
+# 现查飞书、不读库里任何密文的 GET 路由：挑托管范围用的会话名单（编号、名字、类型）。
+LIVE = {"/settings/chats"}
 # 不是 GET 却把解密后的内容带回来的：知识页的路径只放请求体；改设置、即时上下班的响应里
 # 带着解密后的重点群与忽略名单。键是（方法, 路径）。
 ECHOES: dict[tuple[str, str], tuple[dict[str, str], list[tuple[str, str]]]] = {
@@ -92,7 +94,7 @@ def test_every_get_route_under_the_prefix_is_in_the_table(app: FastAPI) -> None:
         for route in _api_routes(app.routes)
         if route.path.startswith(URL) and "GET" in route.methods
     }
-    assert found == set(READS)
+    assert found == set(READS) | LIVE
 
 
 async def test_each_read_leaves_exactly_its_records(

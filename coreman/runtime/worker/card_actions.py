@@ -132,6 +132,8 @@ class CardActionHandler:
                 from coreman.core.systems_catalog import batch as systems_batch
                 from coreman.core.systems_catalog import confirm as systems_confirm
                 from coreman.runtime.worker import (
+                    assistant_range,
+                    assistant_scope,
                     assistant_stop,
                     assistant_write_cards,
                     cloud_write_cards,
@@ -152,6 +154,8 @@ class CardActionHandler:
                     cloud_confirm.CARD_EVENT: cloud_write_cards.handle,
                     assistant_writes.CARD_EVENT: assistant_write_cards.handle,
                     assistant_stop.EVENT_KEY: assistant_stop.handle,
+                    assistant_scope.EVENT_KEY: assistant_scope.handle,
+                    assistant_range.EVENT_KEY: assistant_range.handle,
                     cold_start.EVENT_KEY: cold_start_cards.handle,
                     request_cards.EVENT_KEY: gap_request_cards.handle,
                 }.get(str(action.get("event_key")), handle_selection)

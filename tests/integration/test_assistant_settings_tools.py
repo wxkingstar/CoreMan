@@ -41,6 +41,8 @@ def test_both_tools_are_registered_in_the_knowledge_group() -> None:
         "focus_chats",
         "focus_people",
         "ignored_chats",
+        "managed_chats",
+        "chat_scope",
         "digest_times",
         "quiet_enabled",
         "quiet_start",

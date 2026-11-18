@@ -416,6 +416,40 @@ async def test_missing_reaction_permission_does_not_block_answer(db_session, db_
     assert any(body.get("content") == "hello" for _, _, body in api.calls)
 
 
+@pytest.mark.usefixtures("assistant_master")
+async def test_personal_assistant_gets_no_typing_reaction(db_session, db_engine):
+    from tests.integration.assistant_helpers import into_assistant
+
+    bot, row, generation = await seed(db_session)
+    owner = User(display_name="所有者")
+    db_session.add(owner)
+    await db_session.flush()
+    await into_assistant(db_session, bot, owner)
+    factory = make_session_factory(db_engine)
+
+    class ReactionAPI(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            if path.endswith("/reactions"):
+                self.calls.append((method, path, kwargs.get("json")))
+                return {"data": {"reaction_id": "reaction1"}}
+            return await super().call(method, path, **kwargs)
+
+    api = ReactionAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    async with factory() as session:
+        await streams.complete(session, row.task_id, final_text="done")
+        await session.commit()
+    await transport.round()
+    # 个人助理收到消息不打「打字中」表情；回复照常发出。
+    assert not any("/reactions" in path for _, path, _ in api.calls)
+    async with factory() as session:
+        delivery = await session.get(FeishuDelivery, row.task_id)
+        assert delivery.message_id and delivery.reaction_id is None
+
+
 async def test_card_only_answer_waits_for_outbox_delivery(db_session, db_engine):
     bot, row, generation = await seed(db_session)
     factory = make_session_factory(db_engine)

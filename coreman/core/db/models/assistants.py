@@ -306,6 +306,8 @@ class AssistantRetiredDir(Base):
 SHIFT_OVERRIDES = ("on", "off")
 COLD_START_STEPS = ("voice", "people", "duties", "focus", "hours")
 COLD_START_OUTCOMES = ("completed", "skipped", "timeout")
+# 托管范围：all 托管全部会话（ignored_chats_enc 除外），listed 只托管 managed_chats_enc 里的。
+CHAT_SCOPES = ("all", "listed")
 _HHMM = "'^([01][0-9]|2[0-3]):[0-5][0-9]$'"
 
 
@@ -317,9 +319,12 @@ class AssistantSettings(Base):
     （没有入站事件）凭它们拿个人工具，见 `coreman/core/assistants/platform_turns.py`。空串表示
     没记下，这样的助理跑不了平台来源的轮次。
 
-    `focus_chats_enc` / `ignored_chats_enc` / `focus_people_enc` 登记在 `sealed.COLUMNS`：库里是
-    密文，经会话取出的行上是 id 的列表（会话 id 或 open_id）；没设置过是 None，
-    密钥销毁后读出来是空列表。
+    `focus_chats_enc` / `ignored_chats_enc` / `managed_chats_enc` / `focus_people_enc` 登记在
+    `sealed.COLUMNS`：库里是密文，经会话取出的行上是 id 的列表（会话 id 或 open_id）；没设置过
+    是 None，密钥销毁后读出来是空列表。
+    `chat_scope` 是托管范围：`all` 托管全部会话、`ignored_chats_enc` 里的不托管；`listed` 只托管
+    `managed_chats_enc` 里的会话。不托管的会话助理与平台都不读不写，见
+    `coreman/core/assistants/chat_guard.py`。
     `always_on` 为真（默认）时全天候在班，不看工作时段；为假时只在工作时段里在班。工作时段是
     所有者时区里的 `HH:MM`，不跨午夜（约束 `work_start < work_end`）；`workdays` 是 ISO 星期
     （1 周一 … 7 周日），全天候时也留着（「下班」按它找下一个上班时刻，改回按工作时段时直接
@@ -353,6 +358,7 @@ class AssistantSettings(Base):
             name="cold_start_step",
         ),
         CheckConstraint("cardinality(digest_times) BETWEEN 1 AND 6", name="digest_times"),
+        CheckConstraint(enum_check("chat_scope", CHAT_SCOPES), name="chat_scope"),
         CheckConstraint(
             f"quiet_start ~ {_HHMM} AND quiet_end ~ {_HHMM} AND quiet_start <> quiet_end",
             name="quiet_hours",
@@ -387,6 +393,8 @@ class AssistantSettings(Base):
     )
     focus_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
     ignored_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
+    managed_chats_enc: Mapped[list[str] | None] = mapped_column(JSONB)
+    chat_scope: Mapped[str] = mapped_column(Text, server_default=text("'all'"))
     # 重点人：这些 open_id 发的消息总是立即交回。
     focus_people_enc: Mapped[list[str] | None] = mapped_column(JSONB)
     # 空则用平台默认（设置项 assistant_daily_turn_budget，2E）。
@@ -596,8 +604,9 @@ class AssistantInbox(Base):
 
     `summary_enc` 登记在 `sealed.COLUMNS`。`level` 是入箱时的分级；`hold_until` 为空表示可以
     立刻交回，否则攒批或压着到那个时刻。`status`：`pending` 待交回，`delivered` 已交回，`void`
-    作废（`void_code`：`recalled` 对方撤回、`stopped` 助理停用）。`delivered_task_id` 由投递层
-    （2E）写入：交回它的那一轮；`pending` 且非空表示正在交回，盯消息不再改这一行。
+    作废（`void_code`：`recalled` 对方撤回、`stopped` 助理停用、`unmanaged` 会话设为不托管）。
+    `delivered_task_id` 由投递层（2E）写入：交回它的那一轮；`pending` 且非空表示正在交回，
+    盯消息不再改这一行。
     """
 
     __tablename__ = "assistant_inbox"
