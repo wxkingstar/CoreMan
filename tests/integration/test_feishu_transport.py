@@ -1852,3 +1852,27 @@ async def test_new_session_in_group_is_a_grey_card_quoting_the_command(db_sessio
     card = json.loads(body["content"])
     assert card["config"]["summary"] == {"content": "新会话"}
     assert "—— 新会话 ——" in card["body"]["elements"][0]["content"]
+
+
+async def test_reply_file_is_sent_as_a_file_message_quoting_the_question(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="7:file:0",
+            target={"chat_id": "oc1", "message_id": "om_q"},
+            payload={"_file": {"file_key": "file_v3_abc", "name": "a.csv", "size": 3}},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    target = f"/open-apis/im/v1/messages/{api_id('om_q')}/reply"
+    (body,) = [b for _, p, b in api.calls if p == target]
+    assert body["msg_type"] == "file"
+    assert json.loads(body["content"]) == {"file_key": "file_v3_abc"}

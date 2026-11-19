@@ -123,3 +123,17 @@ def with_reply_images(extra: str, platform: str, backend: str) -> str:
     if platform != "feishu" or prompt is None:
         return extra
     return f"{extra}\n\n{prompt}" if extra.strip() else prompt
+
+
+# 飞书普通 AI 员工：正文里链接的本地文件由平台读回来发成飞书文件消息，见 worker/chat/reply_files。
+REPLY_FILES_PROMPT = """# Files in Your Reply
+
+To hand the user a file you created or found in your working directory (report, spreadsheet, \
+PDF, archive), link it in your reply as `[file name](path)`, with the path relative to your \
+working directory or absolute. The platform sends each linked file as a Feishu file message \
+right after your reply (at most 5 files, 30 MB each) and replaces the link with a short note. \
+Never paste bare file paths and never say you cannot send files."""
+
+
+def with_reply_files(extra: str) -> str:
+    return f"{extra}\n\n{REPLY_FILES_PROMPT}" if extra.strip() else REPLY_FILES_PROMPT
