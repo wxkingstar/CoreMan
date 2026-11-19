@@ -108,7 +108,7 @@ def _reply_click(
                 "buttons": list(click.buttons),
                 "label": click.text,
                 "requester": click.requester,
-                "expires": click.expires,
+                **({"expires": click.expires} if click.expires is not None else {}),
             },
         },
         raw=raw,
