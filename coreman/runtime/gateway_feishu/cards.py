@@ -85,7 +85,7 @@ STREAMING_CONFIG: dict[str, Any] = {
 }
 
 
-# 「停止」按钮放在卡片最后：正文单元总是插在上一个单元之后，按钮一直留在底部。
+# 「停止」按钮放在思考面板里（「查看完整思考过程」后面），见 thinking_panel。
 STOP_BUTTON_ID = "stop_button"
 # 飞书系统消息分割线的文字上限。
 NEW_SESSION_LABEL_CHARS = 10
@@ -120,19 +120,18 @@ def stream_card(
     heading: str = "🤔 思考过程",
     stop_task: int | None = None,
 ) -> dict[str, Any]:
-    """流式卡片：思考面板 + 一个 answer markdown（+ 给了 `stop_task` 时底部的停止按钮）。
+    """流式卡片：思考面板（给了 `stop_task` 时里面带停止按钮）+ 一个 answer markdown。
 
     正文里的 card: 块先显示成可读的 Markdown、没写完的块显示占位，终稿时整卡换成富卡片；
     外壳与终稿一致（宽度、留白、配色），替换时不会跳动。
     """
     thinking, answer = visible_parts(thinking, answer)
     content = remote_images_as_links(split_utf8(streaming_text(answer))[0]) or "…"
+    stop = stop_button(stop_task) if stop_task is not None and streaming else None
     elements = [
-        thinking_panel(thinking, session_url=session_url, heading=heading),
+        thinking_panel(thinking, session_url=session_url, heading=heading, stop=stop),
         {"tag": "markdown", "element_id": "answer", "content": content},
     ]
-    if stop_task is not None and streaming:
-        elements.append(stop_button(stop_task))
     return card_shell(elements, streaming=streaming, streaming_config=STREAMING_CONFIG)
 
 

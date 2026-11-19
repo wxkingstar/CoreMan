@@ -17,8 +17,13 @@ def thinking_panel(
     *,
     session_url: str | None = None,
     heading: str = "🤔 思考过程",
+    stop: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """折叠的「思考过程」面板：流式卡片和终稿卡片的第一个组件都是它。"""
+    """折叠的「思考过程」面板：流式卡片和终稿卡片的第一个组件都是它。
+
+    `stop` 是流式期间的「停止」按钮：停止很少用，放在面板里「查看完整思考过程」后面，
+    不占正文下方的视线；收尾整卡替换成终稿时它就没了。
+    """
     panel: dict[str, Any] = {
         "tag": "collapsible_panel",
         "element_id": "thinking_panel",
@@ -40,9 +45,10 @@ def thinking_panel(
     if heading.startswith("❌"):
         # 中断了：边框标红，一眼看得出不是正常结束。
         panel["border"]["color"] = "red"
+    buttons = []
     if session_url and urlparse(session_url).scheme in {"http", "https"}:
         # Use a native URL button; do not interpolate the URL into model Markdown.
-        panel["elements"].append(
+        buttons.append(
             {
                 "tag": "button",
                 "element_id": "session_link",
@@ -51,4 +57,19 @@ def thinking_panel(
                 "behaviors": [{"type": "open_url", "default_url": session_url}],
             }
         )
+    if stop is not None:
+        buttons.append(stop)
+    if len(buttons) > 1:
+        panel["elements"].append(
+            {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "columns": [
+                    {"tag": "column", "width": "auto", "elements": [button]} for button in buttons
+                ],
+            }
+        )
+    else:
+        panel["elements"].extend(buttons)
     return panel
