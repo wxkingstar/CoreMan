@@ -29,6 +29,8 @@ QUIET_SECONDS = 5 * 60
 STUCK_SECONDS = 15 * 60
 # 状态行里动作说明的长度上限：面板标题在手机上一行放不下太长的字。
 LABEL_CHARS = 36
+# 消息列表预览里动作说明的长度上限（预览只显示一行）。
+PREVIEW_CHARS = 40
 SUMMARY_CHARS = 80
 COMMAND_CHARS = 400
 # 离现在这么久就带上日期。服务端不知道看的人在哪个时区，判断不了是不是「同一天」，按时间差算。
@@ -230,6 +232,25 @@ def heading(running_since: datetime | None, activity: dict[str, Any], now: datet
         expect = str(activity.get("expect") or "")
         parts.append(f"{expect} · 预计 {clock(until, now)} 前" if expect else "")
     return " · ".join(part for part in parts if part)
+
+
+def preview(activity: dict[str, Any] | None, now: datetime) -> str:
+    """运行中这条回复在消息列表里的预览（纯文本）：最后动作、静默或疑似卡住。
+
+    还没有动作时返回空串，保留飞书流式期间默认的「[生成中...]」。
+    """
+    activity = activity or {}
+    at = parse_time(activity.get("at"))
+    label = clip(str(activity.get("label") or "").strip(), PREVIEW_CHARS)
+    if at is None or not label:
+        return ""
+    if activity.get("stuck"):
+        return f"⚠️ 疑似卡住：{label}"
+    until = parse_time(activity.get("until"))
+    waiting = until is not None and now < until
+    if not waiting and (now - at).total_seconds() >= QUIET_SECONDS:
+        return f"⚠️ 一段时间没有新动作：{label}"
+    return f"⏳ {label}"
 
 
 def final_heading(activity: dict[str, Any]) -> str:

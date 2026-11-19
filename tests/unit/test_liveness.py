@@ -208,3 +208,22 @@ def test_writer_marks_stuck_once_outside_known_waits(monkeypatch: pytest.MonkeyP
     assert not w.check_stuck()  # 只标一次
     w.add_text("回来了")
     assert "stuck" not in w.activity
+
+
+def test_preview_shows_the_last_action_quiet_and_stuck():
+    from datetime import UTC, datetime, timedelta
+
+    from coreman.core.chat import liveness
+
+    now = datetime.now(UTC)
+    assert liveness.preview({}, now) == ""
+    assert liveness.preview({"at": liveness.iso(now)}, now) == ""
+    fresh = {"at": liveness.iso(now), "label": "运行命令：跑测试"}
+    assert liveness.preview(fresh, now) == "⏳ 运行命令：跑测试"
+    old = {**fresh, "at": liveness.iso(now - timedelta(minutes=6))}
+    assert liveness.preview(old, now) == "⚠️ 一段时间没有新动作：运行命令：跑测试"
+    waiting = {**old, "until": liveness.iso(now + timedelta(minutes=5))}
+    assert liveness.preview(waiting, now) == "⏳ 运行命令：跑测试"
+    assert liveness.preview({**fresh, "stuck": True}, now) == "⚠️ 疑似卡住：运行命令：跑测试"
+    long = {"at": liveness.iso(now), "label": "查" * 100}
+    assert len(liveness.preview(long, now)) == len("⏳ ") + liveness.PREVIEW_CHARS

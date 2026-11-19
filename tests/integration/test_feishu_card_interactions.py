@@ -528,3 +528,29 @@ async def test_confirm_card_toast_knows_whether_the_initiator_clicked(db_session
         (await click(factory, bot, confirm("confirm", "e4", task_id="personal:999999")))[0],
     ]
     assert outcomes == ["write_confirm", "write_cancel", "not_initiator", None]
+
+
+async def test_stop_button_toast_knows_whether_the_requester_clicked(db_session, db_engine):
+    bot, _cipher = await feishu_worker_bot(db_session)
+    await add_member(db_session, login="alice", feishu_id=ASKER)
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+    await click(factory, bot, click_event(value_for(), "om_card", chat_id="oc_chat"))
+    origin = (await db_session.scalars(select(Task))).one()
+
+    def stop(event_id, user_id=ASKER, task_id=f"stop@{origin.id}"):
+        value = {"task_id": task_id, "event_key": "stream_stop"}
+        return click_event(value, "om_stream", user_id=user_id, event_id=event_id)
+
+    outcomes = [
+        (await click(factory, bot, stop("s1")))[0],
+        (await click(factory, bot, stop("s2", user_id="someone")))[0],
+        (await click(factory, bot, stop("s3", task_id="stop@999999")))[0],
+    ]
+    await db_session.execute(update(Task).where(Task.id == origin.id).values(status="succeeded"))
+    await db_session.commit()
+    outcomes.append((await click(factory, bot, stop("s4")))[0])
+    assert outcomes == ["stream_stop", "stream_stop_denied", None, "stream_stop_late"]
+    # 每次点击都入队交给 worker 核对（toast 只是提示）。
+    kinds = [t.kind for t in (await db_session.scalars(select(Task))).all()]
+    assert kinds.count("card_action") == 4

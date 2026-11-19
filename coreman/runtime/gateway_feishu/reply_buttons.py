@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.chat import busy_choice
+from coreman.core.bus import tasks
+from coreman.core.chat import busy_choice, stream_stop
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
 from coreman.core.db.models import FeishuDelivery, InboundEvent, OutboxItem, Task, TaskStream
@@ -70,6 +71,10 @@ Outcome = Literal[
     "switch_wait",
     # 确认卡（写操作、定时任务）由发起人以外的人点了。
     "not_initiator",
+    # 流式卡片上的「停止」：已收下、不是提问人、这条已经结束。
+    "stream_stop",
+    "stream_stop_denied",
+    "stream_stop_late",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -208,6 +213,24 @@ async def _initiator_clicked(
     return event.sender_platform_user_id == message.sender.platform_user_id
 
 
+async def _stop_click(
+    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
+) -> Outcome | None:
+    """流式卡片上的「停止」：只为选 toast，真正的核对和停止在 worker。"""
+    action = message.card_action or {}
+    target_id = stream_stop.parse_card_task_id(str(action.get("task_id") or ""))
+    if message.kind != "card_action" or target_id is None:
+        return None
+    target = await session.get(Task, target_id)
+    if target is None or target.bot_id != bot_id:
+        return None
+    if str(target.payload.get("platform_user_id") or "") != message.sender.platform_user_id:
+        return "stream_stop_denied"
+    if target.status not in tasks.OPEN or target.cancel_requested_at is not None:
+        return "stream_stop_late"
+    return "stream_stop"
+
+
 async def admit(
     session: AsyncSession,
     bot: InboundBot,
@@ -222,7 +245,11 @@ async def admit(
         return "not_requester"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
-        outcome = _busy_click(message) or _card_click(message)
+        outcome = (
+            _busy_click(message)
+            or _card_click(message)
+            or await _stop_click(session, bot.id, message)
+        )
         if outcome in _INITIATOR_ONLY:
             initiator = await _initiator_clicked(session, bot.id, message)
             if initiator is None:

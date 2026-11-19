@@ -35,6 +35,8 @@ MESSAGES: dict[str, dict[str, str]] = {
     "zh": {
         "session_reset_ok": "✅ 会话已重置，开始新的对话。",
         "session_reset_failed": "⚠️ 会话重置失败，请稍后重试。",
+        "new_session_divider": "新会话",
+        "new_session_hint": "之前的对话不再作为上下文",
         "stopped": "⏹ 已停止当前任务。",
         "nothing_running": "没有正在运行的任务。",
         "task_stopped_suffix": "\n\n⏹ 任务已被用户停止。",
@@ -365,6 +367,8 @@ MESSAGES: dict[str, dict[str, str]] = {
             "⚠️ セッションのリセットに失敗しました。しばらくしてから再試行してください。"
         ),
         "stopped": "⏹ 現在のタスクを停止しました。",
+        "new_session_divider": "新しい会話",
+        "new_session_hint": "これまでの会話は文脈として使われません",
         "nothing_running": "実行中のタスクはありません。",
         "task_stopped_suffix": "\n\n⏹ タスクはユーザーによって停止されました。",
         "superseded_suffix": "\n\n⏹ 新しいメッセージを受信したため、前のタスクは自動停止しました。",

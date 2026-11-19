@@ -38,7 +38,7 @@ from coreman.runtime.worker.choice_flow import (
     advance_choice,
     record_answer,
 )
-from coreman.runtime.worker.commands import do_reset, do_stop
+from coreman.runtime.worker.commands import do_reset, do_stop, new_session_reply
 from coreman.runtime.worker.context import TaskContext
 from coreman.runtime.worker.replies import load_inbound, reply_once
 
@@ -362,7 +362,15 @@ class IntakeStage(ChatStageBase):
         else:
             text = msg("help", ctx.locale)
         ctx.log.info("builtin_command", command=command)
-        await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=text)
+        if command != "reset" or not await new_session_reply(
+            session,
+            ctx,
+            bot=intake.bot,
+            inbound=intake.inbound,
+            chat_type=intake.chat_type,
+            text=text,
+        ):
+            await reply_once(session, ctx, reply_context=intake.inbound.reply_context, text=text)
         await tasks.finish(
             session,
             ctx.task.id,
