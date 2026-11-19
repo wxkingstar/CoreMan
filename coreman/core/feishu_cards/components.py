@@ -16,6 +16,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 from coreman.core.feishu_cards import reply_buttons, sanitize, style
 from coreman.core.feishu_cards.context import RenderContext
@@ -23,7 +24,9 @@ from coreman.core.feishu_cards.markdown import normalize
 from coreman.core.richtext.schema import (
     ActionsBlock,
     CalloutBlock,
+    DetailsBlock,
     FollowupsBlock,
+    FormBlock,
     HeaderBlock,
     ItemBlock,
     KpiBlock,
@@ -31,6 +34,7 @@ from coreman.core.richtext.schema import (
     NoteBlock,
     PeopleBlock,
     RawBlock,
+    SourcesBlock,
     TableBlock,
     TableColumn,
     Tag,
@@ -498,6 +502,139 @@ def render_actions(block: ActionsBlock, ctx: RenderContext) -> list[dict[str, An
     return out
 
 
+def render_sources(block: SourcesBlock, ctx: RenderContext) -> list[Element]:
+    """引用来源：灰色小标题 + 编号链接（后面灰字写域名），只认 http/https。"""
+    lines: list[str] = []
+    for index, item in enumerate(block.items, 1):
+        title = _inline(item.title).replace("[", "［").replace("]", "］")
+        url = item.url.strip()
+        if sanitize.is_http_url(url):
+            host = urlsplit(url).hostname or ""
+            line = f"{index}. [{title}]({url}) {_font(host, 'grey')}"
+        else:
+            line = f"{index}. {title}"
+        if item.note:
+            line += f" {_font('· ' + _inline(item.note), 'grey')}"
+        lines.append(line)
+    return [
+        _md(
+            ctx,
+            _font(_inline(block.title or SOURCES_TITLE), "grey"),
+            size=style.TEXT_NOTE,
+            icon=style.icon("link-copy_outlined", "grey"),
+        ),
+        _md(ctx, "\n".join(lines), size=style.TEXT_NOTE),
+    ]
+
+
+def render_details(block: DetailsBlock, ctx: RenderContext, body: list[Element]) -> list[Element]:
+    """可折叠的段落：默认收起。`body` 是正文已经渲染好的组件（面板里不能放表格、表单）。"""
+    return [
+        {
+            "tag": "collapsible_panel",
+            "element_id": ctx.new_id("fold"),
+            "expanded": block.expanded,
+            "header": {
+                "title": {"tag": "markdown", "content": f"**{_inline(block.title)}**"},
+            },
+            "background_color": style.PANEL,
+            "border": {"color": "grey", "corner_radius": style.RADIUS},
+            "padding": "8px",
+            "elements": body,
+        }
+    ]
+
+
+def render_form(block: FormBlock, ctx: RenderContext) -> list[Element]:
+    """模型要的几项信息：只在提问人自己的对话回复里渲染成表单，其余出口降级成文字。
+
+    提交按钮的回调 value 带提问人、字段名到标签的映射和表单里全部交互组件的 element_id：
+    网关按它把填的内容拼成「标签：值」作为提问人的下一句话，这一轮开始后整张表单置灰。
+    """
+    requester = ctx.requester
+    if not requester:
+        return []
+    form_id = ctx.new_id("form")
+    items: list[Element] = []
+    ids: list[str] = []
+    if block.title:
+        items.append(_md(ctx, f"**{_inline(block.title)}**", size=style.TEXT_BODY))
+    for field in block.fields:
+        eid = ctx.new_id("fld")
+        ids.append(eid)
+        label = _inline(field.label) + (" *" if field.required else "")
+        placeholder = {"tag": "plain_text", "content": field.placeholder or "请填写"}
+        node: Element
+        if field.type in ("text", "textarea", "number"):
+            node = {
+                "tag": "input",
+                "element_id": eid,
+                "name": field.name,
+                "required": field.required,
+                "width": "fill",
+                "max_length": FORM_TEXT_CHARS,
+                "placeholder": placeholder,
+                "label": {"tag": "plain_text", "content": field.label},
+                "label_position": "top",
+            }
+            if field.type == "textarea":
+                node["input_type"] = "multiline_text"
+                node["rows"] = 3
+            items.append(node)
+            continue
+        items.append(_md(ctx, label, size=style.TEXT_NOTE))
+        if field.type == "date":
+            node = {
+                "tag": "date_picker",
+                "element_id": eid,
+                "name": field.name,
+                "required": field.required,
+                "width": "fill",
+                "placeholder": {"tag": "plain_text", "content": field.placeholder or "选择日期"},
+            }
+        else:
+            node = {
+                "tag": "select_static" if field.type == "select" else "multi_select_static",
+                "element_id": eid,
+                "name": field.name,
+                "required": field.required,
+                "width": "fill",
+                "placeholder": {"tag": "plain_text", "content": field.placeholder or "请选择"},
+                "options": [
+                    {"text": {"tag": "plain_text", "content": o}, "value": o} for o in field.options
+                ],
+            }
+        items.append(node)
+    submit_id = ctx.new_id("btn")
+    ids.append(submit_id)
+    items.append(
+        {
+            "tag": "button",
+            "element_id": submit_id,
+            "name": "submit",
+            "type": "primary_filled",
+            "form_action_type": "submit",
+            "text": {"tag": "plain_text", "content": block.submit},
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": reply_buttons.form_value(
+                        requester=requester,
+                        row=form_id,
+                        buttons=ids,
+                        title=block.title or "",
+                        labels={f.name: f.label for f in block.fields},
+                    ),
+                }
+            ],
+        }
+    )
+    return [{"tag": "form", "element_id": form_id, "name": form_id, "elements": items}]
+
+
+SOURCES_TITLE = "来源"
+# 表单单行、多行输入的字数上限：提交的内容整段作为一句话发给模型，不能太长。
+FORM_TEXT_CHARS = 500
 FOLLOWUPS_TITLE = "你可能还想问"
 
 

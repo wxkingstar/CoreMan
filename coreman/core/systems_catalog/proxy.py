@@ -723,8 +723,6 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
             "stop": True,
             "system": prepared.system.key,
             "operation_id": prepared.operation_id,
-            "message": DENIALS["preapproved_writes_exhausted"].format(
-                limit=PREAPPROVED_WRITES_MAX
-            ),
+            "message": DENIALS["preapproved_writes_exhausted"].format(limit=PREAPPROVED_WRITES_MAX),
         }
     return await send(ctx, prepared)

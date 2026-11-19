@@ -11,7 +11,7 @@ from typing import Any
 from coreman.core.chat import busy_choice, stream_stop, topics
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
+from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_form, parse_reply
 from coreman.core.personal_credentials.policy import parse_card_task_id, sealed_aad
 from coreman.core.wecom.cards import parse_task_id
 from coreman.core.wecom.messages import (
@@ -106,7 +106,7 @@ def _reply_click(
                 "message_id": message_id,
                 "row": click.row,
                 "buttons": list(click.buttons),
-                "label": click.text,
+                "label": click.label or click.text,
                 "requester": click.requester,
                 **({"expires": click.expires} if click.expires is not None else {}),
             },
@@ -160,7 +160,7 @@ def _normalize_event(
         value = action.get("value") or {}
         if not isinstance(value, dict):
             return None
-        click = parse_reply(value)
+        click = parse_reply(value) or parse_form(value, action.get("form_value"))
         if click is not None:
             return _reply_click(raw, click, bot_id=bot_id, context=context)
         task_id = str(value.get("task_id") or "")

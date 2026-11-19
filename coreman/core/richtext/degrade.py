@@ -22,7 +22,9 @@ from coreman.core.richtext.schema import (
     CalloutBlock,
     ChartBlock,
     ColumnsBlock,
+    DetailsBlock,
     FollowupsBlock,
+    FormBlock,
     HeaderBlock,
     ItemBlock,
     KpiBlock,
@@ -31,6 +33,7 @@ from coreman.core.richtext.schema import (
     NumberFormat,
     PeopleBlock,
     RawBlock,
+    SourcesBlock,
     TableBlock,
     Tag,
     TimelineBlock,
@@ -90,6 +93,18 @@ def block_to_markdown(kind: str, model: BaseModel) -> str:
             return f"_注：{_one_line(model.text)}_"
         case ActionsBlock():
             return _actions(model)
+        case SourcesBlock():
+            title = model.title or "来源"
+            items = [
+                f"{i}. [{_link_text(s.title)}]({s.url})" if _is_http(s.url) else f"{i}. {s.title}"
+                for i, s in enumerate(model.items, 1)
+            ]
+            return f"{title}：\n" + "\n".join(items)
+        case DetailsBlock():
+            return f"**{model.title}**\n\n{model.text}"
+        case FormBlock():
+            head = f"请提供「{model.title}」：" if model.title else "请提供以下信息："
+            return head + "\n" + "\n".join(f"- {f.label}" for f in model.fields)
         case FollowupsBlock():
             return ""  # 建议追问只在飞书卡片里能点；别的出口点不了，不显示
         case RawBlock():

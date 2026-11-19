@@ -989,7 +989,58 @@ def render_markdown(md: str, ctx: RenderContext) -> list[dict[str, Any]]:
         else:
             acc.text(tok.map)
     acc.flush()
-    return acc.out
+    return _merge_images(acc.out, ctx)
+
+
+def _merge_images(out: list[dict[str, Any]], ctx: RenderContext) -> list[dict[str, Any]]:
+    """前后相邻、中间没有文字的几段图片（如一次生成的几张图各占一段）合成一组多图排版。"""
+    merged: list[dict[str, Any]] = []
+    run: list[dict[str, Any]] = []
+
+    def close() -> None:
+        keys = [
+            key
+            for node in run
+            for key in (
+                [node.get("img_key")]
+                if node.get("tag") == "img"
+                else [i.get("img_key") for i in node.get("img_list") or []]
+            )
+        ]
+        if len(run) < 2:
+            merged.extend(run)
+        else:
+            for start in range(0, len(keys), _COMBINATION_MAX):
+                chunk = keys[start : start + _COMBINATION_MAX]
+                merged.append(
+                    {
+                        "tag": "img_combination",
+                        "element_id": ctx.new_id("img"),
+                        "combination_mode": _COMBINATION_MODES.get(len(chunk), "trisect"),
+                        "corner_radius": style.RADIUS,
+                        "img_list": [{"img_key": key} for key in chunk],
+                    }
+                    if len(chunk) > 1
+                    else {
+                        "tag": "img",
+                        "element_id": ctx.new_id("img"),
+                        "img_key": chunk[0],
+                        "alt": {"tag": "plain_text", "content": ""},
+                        "scale_type": "fit_horizontal",
+                        "corner_radius": style.RADIUS,
+                        "preview": True,
+                    }
+                )
+        run.clear()
+
+    for node in out:
+        if node.get("tag") in ("img", "img_combination"):
+            run.append(node)
+            continue
+        close()
+        merged.append(node)
+    close()
+    return merged
 
 
 def image_urls(md: str) -> list[str]:

@@ -602,3 +602,22 @@ async def test_followups_expire_after_half_an_hour(db_session, db_engine):
     async with factory() as session:
         chats = [t for t in (await session.scalars(select(Task))).all() if t.kind == "chat"]
     assert len(chats) == 2  # 回答本身那一轮 + 有效期内的那次点击
+
+
+async def test_form_submit_becomes_the_askers_next_message(db_session, db_engine):
+    from coreman.core.feishu_cards.reply_buttons import form_value
+
+    bot, _cipher = await feishu_worker_bot(db_session)
+    factory = make_session_factory(db_engine)
+    value = form_value(
+        requester=ASKER, row="form_1", buttons=["fld_1", "btn_1"], title="", labels={"city": "城市"}
+    )
+    raw = click_event(value, "om_card", chat_id="oc_chat")
+    raw["event"]["action"]["form_value"] = {"city": "上海"}
+    outcome, message = await click(factory, bot, raw)
+    assert outcome == "queued"
+    assert message.parts[0].text == "（填写了表单）\n城市：上海"
+    assert message.reply_context["reply_button"]["label"] == "已提交表单"
+    other = click_event(value, "om_card", user_id="someone", event_id="ev2", chat_id="oc_chat")
+    other["event"]["action"]["form_value"] = {"city": "北京"}
+    assert (await click(factory, bot, other))[0] == "not_requester"

@@ -22,13 +22,16 @@ from coreman.core.feishu_cards.components import (
     panel,
     render_actions,
     render_callout,
+    render_details,
     render_followups,
+    render_form,
     render_header,
     render_item,
     render_kpi,
     render_note,
     render_people,
     render_raw,
+    render_sources,
     render_subtitle,
     render_table,
     render_timeline,
@@ -45,6 +48,7 @@ from coreman.core.richtext.schema import (
     CalloutBlock,
     ChartBlock,
     ColumnsBlock,
+    DetailsBlock,
     FollowupsBlock,
     HeaderBlock,
     ItemBlock,
@@ -479,6 +483,20 @@ class _Builder:
             return render_kpi(model, ctx)
         if isinstance(model, CalloutBlock):
             return render_callout(model, ctx)
+        if isinstance(model, DetailsBlock):
+            # 面板里不能放表格：正文里的表格退回 Markdown 表格文字。
+            body = [
+                e
+                if e.get("tag") != "table"
+                else {
+                    "tag": "markdown",
+                    "element_id": ctx.new_id("md"),
+                    "content": _element_text(e),
+                }
+                for u in _markdown_units(model.text, ctx)
+                for e in u.elements
+            ]
+            return render_details(model, ctx, body) if body else []
         renderers: dict[str, Any] = {
             "table": render_table,
             "item": render_item,
@@ -486,6 +504,8 @@ class _Builder:
             "people": render_people,
             "note": render_note,
             "actions": render_actions,
+            "sources": render_sources,
+            "form": render_form,
             "raw": render_raw,
         }
         renderer = renderers.get(kind)
