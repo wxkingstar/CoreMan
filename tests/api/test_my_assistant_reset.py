@@ -10,12 +10,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import delivery_checks, followups, handover, notes
+from coreman.core.assistants import delivery_checks, followups, gaps, handover, notes
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantGap,
     AssistantInbox,
     AssistantJob,
     AssistantReport,
+    BusinessSystem,
+    SystemAccessRequest,
 )
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
@@ -75,6 +78,7 @@ async def test_the_owner_starts_fresh_and_history_stays(
         "approvals": 1,
         "inbox": 1,
         "reports": 1,
+        "gaps": 0,
     }
     db_session.expire_all()
     statuses = [(await followups.get(db_session, bot_id, seq)).status for seq in seqs]
@@ -146,3 +150,49 @@ def test_the_assistant_is_told_to_treat_history_as_background() -> None:
     text = "\n".join(handover._reminder({"reminder": "owner_reset"}))
     assert "只作背景" in text and "不要再跟进" in text
     assert handover.REMINDERS["owner_reset"]
+
+
+async def test_starting_fresh_removes_unresolved_gaps_and_withdraws_requests(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, owner = await owner_with_key(db_session)
+    db_session.add(BusinessSystem(key="orders", name="订单系统", allowed_bot_ids=[]))
+    await followups.add(db_session, bot.id, category="promised", title="查订单")
+    await gaps.report(
+        db_session, bot.id, kind="business_system", key="orders", need="查订单", followup_seqs=[1]
+    )
+    await gaps.report(
+        db_session, bot.id, kind="other", key="repo-access", need="读仓库", followup_seqs=[1]
+    )
+    await gaps.report(
+        db_session, bot.id, kind="other", key="old-tool", need="早就开了", followup_seqs=[1]
+    )
+    await gaps.decline(db_session, bot.id, 3)
+    await db_session.commit()
+    bot_id = bot.id
+    await login_existing(client, db_session, owner)
+    requested = await client.post(f"{URL}/gaps/G001/request", json={"reason": "查客户订单状态"})
+    assert requested.status_code == 200, requested.text
+
+    response = await client.post(RESET, json={"confirm": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["gaps"] == 2
+    db_session.expire_all()
+    left = list(
+        await db_session.scalars(select(AssistantGap.seq).where(AssistantGap.bot_id == bot_id))
+    )
+    assert left == [3]
+    [request] = list(
+        await db_session.scalars(
+            select(SystemAccessRequest).where(SystemAccessRequest.bot_id == bot_id)
+        )
+    )
+    assert request.status == "withdrawn" and request.gap_id is None
+    board = (await client.get(f"{URL}/board")).json()["data"]
+    assert board["gaps"] == []
+    # 真缺的以后重新登记，编号接着往后排。
+    await followups.add(db_session, bot_id, category="promised", title="再查订单")
+    row, outcome = await gaps.report(
+        db_session, bot_id, kind="business_system", key="orders", need="查订单", followup_seqs=[2]
+    )
+    assert outcome == "created" and row.status == "open" and row.seq == 4

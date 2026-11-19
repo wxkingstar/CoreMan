@@ -75,7 +75,7 @@ async function startFresh() {
   resetting.value = true
   try {
     const done = await myAssistant.reset()
-    ElMessage.success(t('assistant.page.resetDone', { n: done.followups, count: done.jobs, total: done.approvals, value: done.inbox }))
+    ElMessage.success(t('assistant.page.resetDone', { n: done.followups, count: done.jobs, total: done.approvals, value: done.inbox, detail: done.gaps }))
     resetKey.value += 1
     await load()
   } catch (e) { ElMessage.error(errorMessage(e)) }

@@ -319,4 +319,5 @@ export interface AssistantReset {
   approvals: number
   inbox: number
   reports: number
+  gaps: number
 }
