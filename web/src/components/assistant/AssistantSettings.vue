@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantPrefs, type MessageRange } from '@/api/myAssistant'
 import AssistantAccessLog from '@/components/assistant/AssistantAccessLog.vue'
 import AssistantChatPicker from '@/components/assistant/AssistantChatPicker.vue'
 import LoadState from '@/components/LoadState.vue'
-import { MAX_DIGEST_TIMES, toForm, toPatch, validate, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
+import { MAX_DIGEST_TIMES, TIMEZONES, toForm, toPatch, validate, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
 import { errorMessage } from '@/utils/errors'
 
 const props = defineProps<{ name: string; runtime: string | null }>()
@@ -15,12 +15,19 @@ const { t } = useI18n()
 
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
 const prefs = ref<AssistantPrefs | null>(null)
-const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: '', chat_scope: 'all', ignored_chats: [], managed_chats: [], digest_times: '', quiet_enabled: true, quiet_start: '', quiet_end: '', follow_platform: true, daily_turn_budget: 0 })
+const form = reactive<PrefsForm>({ timezone: '', always_on: true, work_start: '', work_end: '', workdays: [], focus_chats: [], chat_scope: 'all', ignored_chats: [], managed_chats: [], digest_times: '', quiet_enabled: true, quiet_start: '', quiet_end: '', follow_platform: true, daily_turn_budget: 0 })
 const errors = ref<Partial<Record<PrefsField, string>>>({})
 const error = ref(''), loading = ref(false), saving = ref(false)
 const RANGES: MessageRange[] = ['all', 'group', 'p2p']
 const range = ref<MessageRange>('all'), rangeSaving = ref(false), rangeLink = ref('')
 
+/** 时区下拉：三个常用的，加上已存而不在其中的（保持原样，可以继续用）。 */
+const zones = computed(() => (prefs.value && !(TIMEZONES as readonly string[]).includes(prefs.value.timezone) ? [...TIMEZONES, prefs.value.timezone] : [...TIMEZONES]))
+const { te } = useI18n()
+function zoneLabel(zone: string) {
+  const key = 'assistant.settings.zones.' + zone.replace(/\//g, '_')
+  return te(key) ? `${t(key)}（${zone}）` : zone
+}
 /** 这一项的错误提示；没有错误是空串（el-form-item 不显示）。 */
 const fieldError = (field: PrefsField) => (errors.value[field] ? t('assistant.settings.errors.' + errors.value[field]) : '')
 function apply(data: AssistantPrefs) {
@@ -74,7 +81,7 @@ async function deprovision() {
   } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
 }
 onMounted(load)
-defineExpose({ form, save, load, range })
+defineExpose({ form, save, load, range, zones, zoneLabel })
 </script>
 <template>
   <section class="assistant-section">
@@ -97,10 +104,18 @@ defineExpose({ form, save, load, range })
         :error="fieldError('timezone')"
         :show-message="false"
       >
-        <el-input
+        <el-select
           v-model="form.timezone"
-          style="width: 260px"
-        />
+          style="width: 300px"
+          data-test="timezone"
+        >
+          <el-option
+            v-for="zone in zones"
+            :key="zone"
+            :value="zone"
+            :label="zoneLabel(zone)"
+          />
+        </el-select>
         <div class="hint">
           {{ t('assistant.settings.timezoneHint') }}
         </div>
@@ -267,11 +282,12 @@ defineExpose({ form, save, load, range })
         :error="fieldError('focus_chats')"
         :show-message="false"
       >
-        <el-input
+        <AssistantChatPicker
           v-model="form.focus_chats"
-          type="textarea"
-          :rows="3"
+          groups-only
+          :limit="prefs.limits.focus_chats"
           :disabled="prefs.locked"
+          data-test="focus-chats"
         />
         <div class="hint">
           {{ t('assistant.settings.focusChatsHint', { count: prefs.limits.focus_chats }) }}

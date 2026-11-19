@@ -1,6 +1,6 @@
 import type { AssistantPrefs, AssistantPrefsPatch } from '@/api/myAssistant'
 
-/** 「我的助理」设置表单的值：重点群在表单里是多行文本，一行一个 chat_id；托管名单由会话选择器给出 chat_id 列表。 */
+/** 「我的助理」设置表单的值：重点群与托管名单都由会话选择器给出 chat_id 列表。 */
 export interface PrefsForm {
   timezone: string
   /** 全天候：开着时工作时段与工作日不生效，表单里保留原值。 */
@@ -8,7 +8,7 @@ export interface PrefsForm {
   work_start: string
   work_end: string
   workdays: number[]
-  focus_chats: string
+  focus_chats: string[]
   /** 托管范围：all 托管全部（ignored_chats 除外），listed 只托管 managed_chats。 */
   chat_scope: 'all' | 'listed'
   ignored_chats: string[]
@@ -29,11 +29,6 @@ const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/
 export const MAX_DIGEST_TIMES = 6
 const CHAT = /^oc_[A-Za-z0-9_-]{1,80}$/
 
-/** 多行文本 → 去掉空行与重复之后的各行。 */
-export function lines(text: string): string[] {
-  return [...new Set(text.split('\n').map((line) => line.trim()).filter(Boolean))]
-}
-
 export function toForm(prefs: AssistantPrefs): PrefsForm {
   return {
     timezone: prefs.timezone,
@@ -41,7 +36,7 @@ export function toForm(prefs: AssistantPrefs): PrefsForm {
     work_start: prefs.work_start,
     work_end: prefs.work_end,
     workdays: [...prefs.workdays],
-    focus_chats: prefs.focus_chats.join('\n'),
+    focus_chats: [...prefs.focus_chats],
     chat_scope: prefs.chat_scope,
     ignored_chats: [...prefs.ignored_chats],
     managed_chats: [...prefs.managed_chats],
@@ -58,6 +53,9 @@ export function toForm(prefs: AssistantPrefs): PrefsForm {
 export function clocks(text: string): string[] {
   return text.split(/[\s,，、]+/).map((item) => item.trim()).filter(Boolean).sort()
 }
+
+/** 时区只给这几个选：所有者在这三个地方办公。已存的别的时区仍原样显示、可保留。 */
+export const TIMEZONES = ['Asia/Singapore', 'America/New_York', 'America/Los_Angeles'] as const
 
 /** 浏览器认不认识这个 IANA 时区名。 */
 export function validTimezone(name: string): boolean {
@@ -85,7 +83,7 @@ export function validate(form: PrefsForm, prefs: AssistantPrefs): Partial<Record
     if (!errors.work_start && !errors.work_end && form.work_start >= form.work_end) errors.work_end = 'hours'
     if (!form.workdays.length) errors.workdays = 'workdays'
   }
-  const focus = lines(form.focus_chats), ignored = form.ignored_chats, managed = form.managed_chats
+  const focus = [...new Set(form.focus_chats)], ignored = form.ignored_chats, managed = form.managed_chats
   if (focus.some((id) => !CHAT.test(id))) errors.focus_chats = 'chatId'
   else if (focus.length > prefs.limits.focus_chats) errors.focus_chats = 'focusTooMany'
   // 托管范围只校验当前生效的那份名单；另一份原样保留，切回去时还在。
@@ -119,7 +117,7 @@ export function toPatch(form: PrefsForm, prefs: AssistantPrefs): AssistantPrefsP
     work_start: form.work_start,
     work_end: form.work_end,
     workdays: [...form.workdays].sort((a, b) => a - b),
-    focus_chats: lines(form.focus_chats),
+    focus_chats: [...new Set(form.focus_chats)],
     chat_scope: form.chat_scope,
     ignored_chats: [...new Set(form.ignored_chats)],
     managed_chats: [...new Set(form.managed_chats)],
