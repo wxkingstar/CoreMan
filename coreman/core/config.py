@@ -135,6 +135,8 @@ class Settings(BaseSettings):
     decision_provider: Literal["openai"] = Field(default="openai", alias="DECISION_PROVIDER")
     decision_model: str = Field(default="gpt-6-luna", alias="DECISION_MODEL")
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
+    # 飞书语音消息转文字（同一个 OPENAI_API_KEY）。
+    transcribe_model: str = Field(default="gpt-4o-transcribe", alias="TRANSCRIBE_MODEL")
     # scheduler 对每个带通讯录同步能力的平台应用做全量同步的间隔（小时）；0 关闭定时同步
     contact_sync_interval_hours: float = Field(
         default=24.0, ge=0, alias="CONTACT_SYNC_INTERVAL_HOURS"
