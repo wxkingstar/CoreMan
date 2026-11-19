@@ -733,10 +733,9 @@ class FeishuTransport:
         if units and not state.get("paused"):
             layout = state["units"] if "units" in state else list(INITIAL_LAYOUT)
             shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-            shell["body"]["elements"] = [
-                *_prefix(thinking, row.session_url, heading, row.plan),
-                *_suffix(row),
-            ]
+            shell["body"]["elements"] = _prefix(
+                thinking, row.session_url, heading, row.plan, stop_task=_stop_task(row)
+            )
             steps = plan(
                 layout,
                 units,
@@ -787,7 +786,7 @@ class FeishuTransport:
     ) -> Any:
         """布局对不上时整卡重建：流式模式保持开启，之后照常增量更新。"""
         shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-        prefix = _prefix(thinking, row.session_url, heading, row.plan)
+        prefix = _prefix(thinking, row.session_url, heading, row.plan, stop_task=_stop_task(row))
         shell["body"]["elements"] = prefix
         steps = plan(
             [],
@@ -797,7 +796,7 @@ class FeishuTransport:
             show=remote_images_as_links,
         )
         elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
-        shell["body"]["elements"] = [*prefix, *elements, *_suffix(row)]
+        shell["body"]["elements"] = [*prefix, *elements]
         shell["config"]["streaming_mode"] = True
         await self.put_card(row.task_id, card_id, shell)
         steps.actions, steps.texts = [], []
@@ -1501,16 +1500,16 @@ def _stop_task(row: TaskStream) -> int | None:
     return row.task_id if isinstance(requester, str) and requester else None
 
 
-def _suffix(row: TaskStream) -> list[dict[str, Any]]:
-    """流式卡片最后面的固定组件：停止按钮（正文单元都插在它前面）。"""
-    task = _stop_task(row)
-    return [stop_button(task)] if task is not None else []
-
-
 def _prefix(
-    thinking: str, session_url: str | None, heading: str, plan: Sequence[dict[str, str]]
+    thinking: str,
+    session_url: str | None,
+    heading: str,
+    plan: Sequence[dict[str, str]],
+    *,
+    stop_task: int | None = None,
 ) -> list[dict[str, Any]]:
-    """卡片最前面的固定组件：思考面板，有任务清单时再跟一个清单面板。"""
+    """卡片最前面的固定组件：思考面板（流式期间里面带停止按钮），有任务清单时再跟一个清单面板。"""
     box = plan_box(plan)
-    panel = thinking_panel(thinking, session_url=session_url, heading=heading)
+    stop = stop_button(stop_task) if stop_task is not None else None
+    panel = thinking_panel(thinking, session_url=session_url, heading=heading, stop=stop)
     return [panel, box] if box else [panel]

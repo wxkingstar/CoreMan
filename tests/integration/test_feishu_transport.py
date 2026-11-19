@@ -1681,12 +1681,15 @@ async def test_answer_streams_below_the_plan(db_session, db_engine):
 
 
 async def test_stream_card_has_a_stop_button_only_for_a_requester(db_session, db_engine):
-    """有提问人的对话回复：流式卡片底部有「停止」，正文单元插在它前面；终稿里没有。"""
+    """有提问人的对话回复：「停止」在思考面板里「查看完整思考过程」后面；终稿里没有。"""
     bot, row, generation = await seed(db_session)
     await db_session.execute(
         sa_update(TaskStream)
         .where(TaskStream.task_id == row.task_id)
-        .values(reply_context={**row.reply_context, "requester_user_id": "u1"})
+        .values(
+            reply_context={**row.reply_context, "requester_user_id": "u1"},
+            session_url="https://example.com/session/1",
+        )
     )
     await db_session.commit()
     factory, api = make_session_factory(db_engine), FakeAPI()
@@ -1696,7 +1699,12 @@ async def test_stream_card_has_a_stop_button_only_for_a_requester(db_session, db
     await transport.round()
     (created,) = [b for _, p, b in api.calls if p == "/open-apis/cardkit/v1/cards"]
     elements = json.loads(created["data"])["body"]["elements"]
-    stop = elements[-1]
+    panel = elements[0]
+    assert panel["element_id"] == "thinking_panel"
+    assert all(e.get("element_id") != "stop_button" for e in elements[1:])
+    (row_of_buttons,) = [e for e in panel["elements"] if e["tag"] == "column_set"]
+    link, stop = [c["elements"][0] for c in row_of_buttons["columns"]]
+    assert link["element_id"] == "session_link"
     assert stop["element_id"] == "stop_button"
     assert stop["behaviors"][0]["value"] == {
         "task_id": f"stop@{row.task_id}",
