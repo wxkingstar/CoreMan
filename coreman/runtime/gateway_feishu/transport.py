@@ -1129,6 +1129,17 @@ class FeishuTransport:
             )
             item.payload = {**item.payload, "_feishu_message_id": mid}
             return
+        if isinstance(item.payload.get("_file"), dict):
+            # 回复里链接的本地文件：worker 已上传换好 file_key，这里引用提问发一条文件消息。
+            mid = await self.send(
+                str(item.target.get("chat_id") or ""),
+                {"file_key": str(item.payload["_file"].get("file_key") or "")},
+                kind="file",
+                key=f"outbox:{item.id}",
+                reply_to=item.target.get("message_id"),
+            )
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+            return
         if isinstance(item.payload.get("_new_session"), dict):
             item.payload = {
                 **item.payload,

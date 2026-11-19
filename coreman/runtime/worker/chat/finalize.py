@@ -46,6 +46,7 @@ from coreman.core.wecom.cards import (
 from coreman.runtime.worker.chat.base import ChatStageBase
 from coreman.runtime.worker.chat.models import Outcome, Prepared, Verdict
 from coreman.runtime.worker.chat.records import log_entry
+from coreman.runtime.worker.chat.reply_files import ReplyFiles, file_links
 from coreman.runtime.worker.context import TaskContext
 
 
@@ -394,6 +395,7 @@ class FinalizeStage(ChatStageBase):
             return
         logged_text = verdict.final_text
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
+        verdict = await self._attach_files(ctx, pre, verdict)
         # 待答状态与卡片排在抢到终态之后：被 reaper 收过尾的那一轮已经告诉用户「异常中断」，
         # 再开一轮提问就是让用户对着一张没人接的卡片作答。
         card = (
@@ -567,6 +569,28 @@ class FinalizeStage(ChatStageBase):
         ctx.log.info(
             "dispatch_turn_finished", outcome=outcome, codes=result.get("codes"), spoke=bool(line)
         )
+
+    async def _attach_files(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> Verdict:
+        """正文里链接的本地文件作为飞书文件消息发出，链接换成一行说明（见 reply_files）。"""
+        bot = pre.intake.bot
+        if (
+            verdict.log_status not in ("success", "error")
+            or not verdict.final_text
+            or not ReplyFiles.applies(bot)
+            or not file_links(verdict.final_text)
+        ):
+            return verdict
+        inbound = pre.intake.inbound
+        async with ctx.session_factory() as session:
+            text = await ReplyFiles(bot, pre.relay, ctx.cipher).attach(
+                session,
+                verdict.final_text,
+                task_id=ctx.task.id,
+                chat_id=str(inbound.reply_context.get("chat_id") or inbound.chat_id),
+                reply_to=inbound.reply_context.get("message_id"),
+            )
+            await session.commit()
+        return replace(verdict, final_text=text)
 
     async def _notify_long_task(
         self,
