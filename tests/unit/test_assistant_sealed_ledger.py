@@ -54,6 +54,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/feedback.py": 1,  # 只读设置行的时区算所有者当地日期，不碰内容列
     # 待跟进：取一条是 session.scalar（自动还原）；列表显式还原
     "coreman/core/assistants/followups.py": 2,
+    # 从现在开始：取未结的待跟进只改状态与时间，不碰内容列
+    "coreman/core/assistants/reset.py": 1,
     # 缺口：取一条与登记时查重是 session.scalar（自动还原）；解决、列出显式还原
     "coreman/core/assistants/gaps.py": 4,
     # 子任务：取一条、按结果任务号取一条都是 session.scalar（自动还原）；列表显式还原
@@ -176,6 +178,8 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/jobs.py": 1,
     # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
     "coreman/core/assistants/notes.py": 1,
+    # 从现在开始：已结束子任务记为不必投回，只写投回状态与时间
+    "coreman/core/assistants/reset.py": 1,
     "coreman/core/assistants/settings.py": 1,  # 按默认值建行，不写内容列
     # 转录：派出前写交接编号、没到过节点的轮次清掉交接编号（都是元数据）；内容经 ORM 写入，
     # flush 钩子封存

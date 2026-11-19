@@ -74,6 +74,7 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("POST", "/shift"): {"json": {"state": "on"}},
     ("POST", "/voice/regenerate"): {},
     ("POST", "/message-range"): {"json": {"message_range": "group"}},
+    ("POST", "/reset"): {"json": {"confirm": True}},
     # 停用放最后：有的用例按这个顺序把每条路由都调一遍。
     ("POST", "/deprovision"): {"json": {"confirm": True}},
 }
