@@ -264,3 +264,35 @@ def interaction_card(card: dict[str, Any]) -> dict[str, Any]:
         },
         "body": {"elements": elements},
     }
+
+
+def media_card(kind: str, file_key: str, name: str) -> dict[str, Any]:
+    """一段视频或音频放进一张单独的卡片直接播放（这两种组件要求卡片不能转发）。"""
+    fallback = {"tag": "fallback_text", "text": {"tag": "plain_text", "content": f"📎 {name}"}}
+    player: dict[str, Any] = (
+        {"tag": "video", "element_id": "media", "file_key": file_key, "fallback": fallback}
+        if kind == "video"
+        else {
+            "tag": "audio",
+            "element_id": "media",
+            "audio_id": "media",
+            "file_key": file_key,
+            "width": "fill",
+            "time_display": "both",
+            "time_position": "both_sides",
+            "fallback": fallback,
+        }
+    )
+    card = card_shell(
+        [
+            {
+                "tag": "markdown",
+                "content": f"<font color='grey'>📎 {name}</font>",
+                "text_size": "notation",
+            },
+            player,
+        ],
+        summary=f"📎 {name}",
+    )
+    card["config"]["enable_forward"] = False
+    return card

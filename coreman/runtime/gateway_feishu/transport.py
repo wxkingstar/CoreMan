@@ -52,6 +52,7 @@ from coreman.runtime.gateway_feishu.cards import (
     NEW_SESSION_LABEL_CHARS,
     STREAMING_CONFIG,
     interaction_card,
+    media_card,
     new_session_card,
     post_content,
     remote_images_as_links,
@@ -1213,15 +1214,10 @@ class FeishuTransport:
             await feed.pin(self, item.payload["_unpin"], False)
             return
         if isinstance(item.payload.get("_file"), dict):
-            # 回复里链接的本地文件：worker 已上传换好 file_key，这里引用提问发一条文件消息。
-            mid = await self.send(
-                str(item.target.get("chat_id") or ""),
-                {"file_key": str(item.payload["_file"].get("file_key") or "")},
-                kind="file",
-                key=f"outbox:{item.id}",
-                reply_to=item.target.get("message_id"),
-            )
-            item.payload = {**item.payload, "_feishu_message_id": mid}
+            item.payload = {
+                **item.payload,
+                "_feishu_message_id": await self.send_reply_file(item),
+            }
             return
         if isinstance(item.payload.get("_new_session"), dict):
             item.payload = {
@@ -1320,6 +1316,37 @@ class FeishuTransport:
         else:
             text = str(item.payload.get("markdown") or item.payload.get("text") or "…")
             await self.send_posts(chat, text, f"outbox:{item.id}")
+
+    async def send_reply_file(self, item: OutboxItem) -> str:
+        """回复里链接的本地文件：worker 已上传换好 file_key，这里引用提问发出。
+
+        MP4、OPUS 读得出时长的放进一张单独的卡片直接播放（视频、音频组件要求卡片不能转发，所以不和
+        回答放在同一张卡里）；客户端或飞书不认这张卡时改发文件消息。
+        """
+        meta = item.payload["_file"]
+        chat = str(item.target.get("chat_id") or "")
+        key = str(meta.get("file_key") or "")
+        media = meta.get("media")
+        if media in ("video", "audio"):
+            try:
+                return await self.send(
+                    chat,
+                    media_card(media, key, str(meta.get("name") or "")),
+                    kind="interactive",
+                    key=f"outbox:{item.id}",
+                    reply_to=item.target.get("message_id"),
+                )
+            except FeishuError as exc:
+                if exc.code not in CARD_CONTENT_ERRORS:
+                    raise
+                log.warning("feishu_media_card_rejected", code=exc.code, item_id=item.id)
+        return await self.send(
+            chat,
+            {"file_key": key},
+            kind="file",
+            key=f"outbox:{item.id}:file",
+            reply_to=item.target.get("message_id"),
+        )
 
     async def send_new_session(self, item: OutboxItem) -> str:
         """重置会话的回执。私聊：系统消息「新会话」分割线并清屏（飞书只允许发到私聊，需要

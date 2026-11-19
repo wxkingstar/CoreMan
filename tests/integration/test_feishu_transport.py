@@ -2005,3 +2005,44 @@ async def test_confirm_card_gets_a_waiting_feed_card_until_it_is_answered(db_ses
     assert deleted == [
         {"feed_cards": [{"biz_id": created["app_feed_card"]["biz_id"], "user_id": "u1"}]}
     ]
+
+
+class NoMediaCard(FakeAPI):
+    async def call(self, method, path, **kwargs):
+        if (kwargs.get("json") or {}).get("msg_type") == "interactive":
+            self.calls.append((method, path, kwargs.get("json")))
+            raise FeishuError(200860)
+        return await super().call(method, path, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("api_class", "kinds"), [(FakeAPI, ["interactive"]), (NoMediaCard, ["interactive", "file"])]
+)
+async def test_reply_video_plays_in_its_own_card_or_falls_back_to_a_file(
+    db_session, db_engine, api_class, kinds
+):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), api_class()
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="7:file:0",
+            target={"chat_id": "oc1", "message_id": "om_q"},
+            payload={
+                "_file": {"file_key": "file_v3_v", "name": "demo.mp4", "size": 3, "media": "video"}
+            },
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    target = f"/open-apis/im/v1/messages/{api_id('om_q')}/reply"
+    sent = [b for _, p, b in api.calls if p == target]
+    assert [b["msg_type"] for b in sent] == kinds
+    card = json.loads(sent[0]["content"])
+    assert card["config"]["enable_forward"] is False
+    assert card["body"]["elements"][1]["file_key"] == "file_v3_v"
