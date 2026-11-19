@@ -4,7 +4,8 @@ import LoadState from '@/components/LoadState.vue'
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { systemBatches, type SystemBatch, type SystemBatchItem, type SystemBatchItemFilter } from '@/api/infrastructure'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime, secondsBetween } from '@/utils/format'
+import DurationSeconds from '@/components/DurationSeconds.vue'
 
 // 一个批次每一项的写入参数与结果摘要；按页取、按状态筛，打开时取第一页。
 const props = defineProps<{ batch: SystemBatch | null }>()
@@ -148,6 +149,18 @@ const before = (item: SystemBatchItem) => item.before ? JSON.stringify(item.befo
       >
         <template #default="{ row }: { row: SystemBatchItem }">
           <span class="brief">{{ row.brief || '—' }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column
+        width="100"
+        align="right"
+        :label="t('systemBatches.duration')"
+      >
+        <template #default="{ row }: { row: SystemBatchItem }">
+          <DurationSeconds
+            :data-test="'item-duration-' + row.seq"
+            :value="secondsBetween(row.started_at, row.finished_at)"
+          />
         </template>
       </el-table-column>
       <el-table-column

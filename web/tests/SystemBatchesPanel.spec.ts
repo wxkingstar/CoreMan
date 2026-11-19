@@ -12,12 +12,12 @@ const base: SystemBatch = {
   id: 'b-running', phase: 'running', pause_reason: null, stopping: false,
   bot_id: 'bot-1', bot_name: 'demo-bot', user_id: 'u-1', user_name: 'Alex',
   system: 'stock', system_name: 'Stock', operation_id: 'updateItem', operation_summary: 'Update an item', risk: 'write',
-  count: 10, ok: 3, failed: 1, unknown: 0, skipped: 0, pending: 6,
+  count: 10, ok: 3, failed: 1, unknown: 0, skipped: 0, pending: 6, duration_seconds: 1.5,
   created_at: '2026-10-01T00:00:00Z', started_at: '2026-10-01T00:01:00Z', finished_at: null,
 }
-const paused: SystemBatch = { ...base, id: 'b-paused', pause_reason: 'pause_failures', phase: 'paused', operation_summary: '', ok: 0, failed: 10, pending: 40, count: 50 }
+const paused: SystemBatch = { ...base, id: 'b-paused', pause_reason: 'pause_failures', phase: 'paused', operation_summary: '', ok: 0, failed: 10, pending: 40, count: 50, duration_seconds: null }
 const stopping: SystemBatch = { ...base, id: 'b-stopping', stopping: true }
-const finished: SystemBatch = { ...base, id: 'b-finished', phase: 'finished', ok: 8, failed: 0, unknown: 1, skipped: 1, pending: 0, finished_at: '2026-10-01T00:05:00Z' }
+const finished: SystemBatch = { ...base, id: 'b-finished', phase: 'finished', ok: 8, failed: 0, unknown: 1, skipped: 1, pending: 0, duration_seconds: 12.3456, finished_at: '2026-10-01T00:05:00Z' }
 const page = (items: SystemBatch[]) => ({ items, total: items.length, page: 1, per_page: 20 })
 const t = i18n.global.t
 const plugins = [ElementPlus, i18n]
@@ -52,6 +52,13 @@ describe('SystemBatchesPanel', () => {
     expect(done).toContain(`${t('systemBatches.results.unknown')} 1`)
     expect(done).toContain(`${t('systemBatches.results.skipped')} 1`)
     expect(done).not.toContain(t('systemBatches.results.failed'))
+    // 耗时：秒，最多两位小数，小数部分单独一段（小一号、颜色淡）；还没有结果时是 —。
+    expect(text).toContain(t('systemBatches.duration'))
+    const finishedDuration = wrapper.get('[data-test="batch-duration-b-finished"]')
+    expect(finishedDuration.text()).toBe('12.35')
+    expect(finishedDuration.get('.fraction').text()).toBe('.35')
+    expect(wrapper.get('[data-test="batch-duration-b-running"]').text()).toBe('1.5')
+    expect(wrapper.get('[data-test="batch-duration-b-paused"]').text()).toBe('—')
     wrapper.unmount()
   })
 
@@ -133,10 +140,11 @@ describe('SystemBatchesPanel', () => {
   it('opens each item with what was sent and how it went, filtered and paged', async () => {
     const item: SystemBatchItem = {
       seq: 2, target: 'SKU-2 stock', path_params: { id: 'SKU-2' }, query: null, body: { quantity: 3 }, before: { quantity: 1 },
-      status: 'http_error', status_code: 409, brief: 'conflict', started_at: null, finished_at: '2026-10-01T00:02:00Z',
+      status: 'http_error', status_code: 409, brief: 'conflict', started_at: '2026-10-01T00:01:59.766Z', finished_at: '2026-10-01T00:02:00Z',
     }
+    const waiting: SystemBatchItem = { ...item, seq: 3, status: 'pending', status_code: null, brief: null, started_at: null, finished_at: null }
     vi.mocked(systemBatches.list).mockResolvedValue(page([base]))
-    vi.mocked(systemBatches.items).mockResolvedValue({ items: [item], total: 120, page: 1, per_page: 50 })
+    vi.mocked(systemBatches.items).mockResolvedValue({ items: [item, waiting], total: 120, page: 1, per_page: 50 })
     const wrapper = mount(SystemBatchesPanel, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     await wrapper.get('[data-test="batch-items-b-running"]').trigger('click'); await flushPromises()
@@ -146,6 +154,8 @@ describe('SystemBatchesPanel', () => {
     expect(drawer).toContain('"quantity": 3')
     expect(drawer).toContain('conflict')
     expect(document.querySelector('[data-test="item-status-2"]')!.textContent).toContain(`${t('systemBatches.itemStatus.http_error')} · 409`)
+    expect(document.querySelector('[data-test="item-duration-2"]')!.textContent).toBe('0.23')
+    expect(document.querySelector('[data-test="item-duration-3"]')!.textContent).toBe('—')
     const failed = [...document.querySelectorAll<HTMLElement>('[data-test="batch-items-filter"] label')].find(el => el.textContent?.includes(t('systemBatches.itemFilter.failed')))!
     failed.click(); await flushPromises()
     expect(systemBatches.items).toHaveBeenLastCalledWith('b-running', 1, 50, 'failed')

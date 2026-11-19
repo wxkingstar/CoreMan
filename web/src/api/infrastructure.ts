@@ -59,6 +59,8 @@ export interface SystemBatch {
   bot_id: string; bot_name: string | null; user_id: string | null; user_name: string | null
   system: string | null; system_name: string | null; operation_id: string | null; operation_summary: string; risk: string | null
   count: number; ok: number; failed: number; unknown: number; skipped: number; pending: number
+  /** 已出结果的各项从发出到出结果的秒数之和（不含项间间隔和暂停）；还没有出结果的项时为 null。 */
+  duration_seconds: number | null
   created_at: string; started_at: string | null; finished_at: string | null
   /** 当前用户能否停止：管理员和发起人本人。 */
   can_stop?: boolean

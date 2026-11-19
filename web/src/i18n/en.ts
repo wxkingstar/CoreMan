@@ -516,7 +516,7 @@ const en = {
     title: 'Batch writes',
     hint: 'Refreshes every 5 seconds while a batch is in progress, and stops once all have ended.',
     empty: 'No batch writes. Batches are cleaned up 24 hours after they finish, so only recent ones appear here.',
-    createdAt: 'Submitted at', bot: 'AI employee', requester: 'Requester', operation: 'System · Operation', progress: 'Progress', result: 'Result',
+    createdAt: 'Submitted at', bot: 'AI employee', requester: 'Requester', operation: 'System · Operation', progress: 'Progress', result: 'Result', duration: 'Duration (s)',
     stopping: 'Stopping', stop: 'Stop', stopRequested: 'Stop requested',
     stopConfirm: 'The {n} items not yet run will be skipped. Items already run are not rolled back, and the requester will be notified. Stop this batch?',
     phase: { awaiting: 'Awaiting confirmation', running: 'Running', paused: 'Paused', finished: 'Finished', not_started: 'Not started', cancelled: 'Cancelled', expired: 'Expired' },

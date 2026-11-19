@@ -22,6 +22,23 @@ export function formatDateTime(value: string | null | undefined): string {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`
 }
 
+/**
+ * 秒数拆成整数和小数两段，最多两位小数、去掉末尾的 0（1.5 → `1` `.5`，2.004 → `2` ``）。
+ * 空值、非法或负数返回 null。
+ */
+export function secondsParts(value: number | null | undefined): { whole: string; fraction: string } | null {
+  if (value === null || value === undefined || !Number.isFinite(value) || value < 0) return null
+  const [whole, fraction] = String(Number(value.toFixed(2))).split('.')
+  return { whole, fraction: fraction ? `.${fraction}` : '' }
+}
+
+/** 两个时间点之间的秒数；任一为空、非法或结束早于开始时返回 null。 */
+export function secondsBetween(start: string | null | undefined, end: string | null | undefined): number | null {
+  if (!start || !end) return null
+  const seconds = (new Date(end).getTime() - new Date(start).getTime()) / 1000
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null
+}
+
 const BYTE_UNITS = ['KB', 'MB', 'GB', 'TB'] as const
 
 /**

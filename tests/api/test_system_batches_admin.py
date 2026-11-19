@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+import pytest
+from sqlalchemy import select, update
 
-from coreman.core.db.models import AuditLog, BotMember, User
+from coreman.core.db.models import AuditLog, BotMember, SystemBatchItem, User
 from coreman.core.systems_catalog import batch, confirm
 from tests.api import test_systems_batch_writes as writes
 from tests.api.conftest import login_as, login_existing
@@ -56,11 +58,23 @@ async def test_the_list_shows_metadata_only_and_follows_the_batch(
     assert row["can_stop"] is True
     # The list carries metadata only; the staged requests are in the item view.
     assert "SKU-SECRET" not in str(row)
+    # 还没有出结果的项，耗时为空。
+    assert row["duration_seconds"] is None
 
     await run_all(db_session, db_engine)
     (row,) = await listed(client)
     assert (row["phase"], row["pause_reason"]) == ("paused", batch.PAUSE_TRIAL)
     assert (row["ok"], row["pending"]) == (5, 7)
+    # 耗时是已出结果的各项从发出到出结果的秒数之和：试跑的 5 项各 1.25 秒。
+    sent_at = datetime(2026, 10, 1, tzinfo=UTC)
+    await db_session.execute(
+        update(SystemBatchItem)
+        .where(SystemBatchItem.batch_id == state.id, SystemBatchItem.status == "ok")
+        .values(started_at=sent_at, finished_at=sent_at + timedelta(seconds=1.25))
+    )
+    await db_session.commit()
+    (row,) = await listed(client)
+    assert row["duration_seconds"] == pytest.approx(6.25)
 
     # An administrator stops the paused batch: it ends at once and the asker is told who did.
     stopped = await client.post(f"{URL}/{state.id}/stop")
