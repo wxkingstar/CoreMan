@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     # 飞书语音消息转文字（同一个 OPENAI_API_KEY）。
     transcribe_model: str = Field(default="gpt-4o-transcribe", alias="TRANSCRIBE_MODEL")
+    # 飞书链接预览（core/feishu_link_preview）：注册了管理台网址规则的那个飞书应用，与它在开发者
+    # 后台「事件与回调」里的 Verification Token、Encrypt Key（没开加密可不填）。缺一项就不展开。
+    feishu_preview_app_id: str | None = Field(default=None, alias="FEISHU_PREVIEW_APP_ID")
+    feishu_preview_verification_token: SecretStr | None = Field(
+        default=None, alias="FEISHU_PREVIEW_VERIFICATION_TOKEN"
+    )
+    feishu_preview_encrypt_key: SecretStr | None = Field(
+        default=None, alias="FEISHU_PREVIEW_ENCRYPT_KEY"
+    )
     # scheduler 对每个带通讯录同步能力的平台应用做全量同步的间隔（小时）；0 关闭定时同步
     contact_sync_interval_hours: float = Field(
         default=24.0, ge=0, alias="CONTACT_SYNC_INTERVAL_HOURS"
