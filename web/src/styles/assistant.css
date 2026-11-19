@@ -1,0 +1,68 @@
+/* 「我的助理」各分区共用的版式：分组卡片、两行式条目、摘要胶囊。 */
+.ma-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 0 0 20px; }
+.ma-stat { border: 1px solid var(--cm-border); border-radius: 10px; background: var(--cm-surface); padding: 12px 14px; min-width: 0; }
+.ma-stat dt { color: var(--el-text-color-secondary); font-size: 12px; line-height: 18px; margin-bottom: 6px; }
+.ma-stat dd { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 14px; line-height: 22px; min-width: 0; overflow-wrap: anywhere; }
+.ma-stat .ma-sub { flex-basis: 100%; font-size: 12px; line-height: 18px; color: var(--el-text-color-secondary); }
+.ma-stat .el-progress { flex-basis: 100%; }
+.ma-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--el-color-info-light-3); }
+.ma-dot.is-on { background: var(--el-color-success); }
+
+.ma-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
+.ma-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--cm-border); background: var(--cm-surface); color: var(--el-text-color-regular); font: inherit; font-size: 13px; cursor: pointer; transition: border-color .15s, background .15s; }
+.ma-chip:hover { border-color: var(--el-color-primary-light-5); }
+.ma-chip:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+.ma-chip__n { font-weight: 650; font-size: 15px; color: var(--el-text-color-primary); font-variant-numeric: tabular-nums; }
+.ma-chip.is-zero { color: var(--el-text-color-placeholder); }
+.ma-chip.is-zero .ma-chip__n { color: var(--el-text-color-placeholder); font-weight: 500; }
+.ma-chip.is-primary { background: var(--cm-brand-soft); border-color: var(--el-color-primary-light-7); }
+.ma-chip.is-primary .ma-chip__n { color: var(--el-color-primary); }
+.ma-chip.is-alert { background: var(--el-color-danger-light-9); border-color: var(--el-color-danger-light-7); }
+.ma-chip.is-alert .ma-chip__n { color: var(--el-color-danger); }
+
+.ma-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 16px; }
+.ma-toolbar .ma-spacer { flex: 1; }
+
+.ma-group { border: 1px solid var(--cm-border); border-radius: 10px; background: var(--cm-surface); margin-bottom: 16px; overflow: hidden; scroll-margin-top: 16px; }
+.ma-group__head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding: 12px 16px; }
+.ma-group__head h3 { margin: 0; font-size: 15px; line-height: 22px; }
+.ma-group__head .ma-empty { font-size: 13px; color: var(--el-text-color-placeholder); }
+.ma-group.is-empty .ma-group__head { padding: 10px 16px; }
+.ma-group.is-empty h3 { color: var(--el-text-color-secondary); font-weight: 500; }
+.ma-count { display: inline-flex; min-width: 22px; height: 20px; padding: 0 7px; align-items: center; justify-content: center; border-radius: 10px; background: var(--el-fill-color); color: var(--el-text-color-regular); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ma-count.is-primary { background: var(--el-color-primary); color: #fff; }
+.ma-count.is-alert { background: var(--el-color-danger); color: #fff; }
+.ma-subhead { margin: 0; padding: 8px 16px; font-size: 12px; font-weight: 600; color: var(--el-text-color-secondary); background: var(--el-fill-color-lighter); border-top: 1px solid var(--el-border-color-lighter); }
+
+.ma-list { list-style: none; margin: 0; padding: 0; }
+.ma-row { padding: 12px 16px; border-top: 1px solid var(--el-border-color-lighter); transition: background .15s; }
+.ma-row:hover { background: var(--el-fill-color-lighter); }
+.ma-row__main { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.ma-row__main > .el-checkbox { height: 22px; }
+.ma-id { flex-shrink: 0; font-family: var(--el-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; line-height: 22px; color: var(--el-text-color-secondary); }
+.ma-title { flex: 1; min-width: 0; font-size: 14px; line-height: 22px; font-weight: 500; color: var(--el-text-color-primary); overflow-wrap: anywhere; }
+.ma-title .el-tag { margin-left: 6px; vertical-align: 1px; }
+.ma-actions { flex-shrink: 0; display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.ma-actions .el-button + .el-button { margin-left: 4px; }
+.ma-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 4px; font-size: 12px; line-height: 18px; color: var(--el-text-color-secondary); }
+.ma-row--check .ma-meta, .ma-row--check .ma-detail, .ma-row--check .ma-callout { margin-left: 24px; }
+.ma-warn { color: var(--el-color-warning-dark-2, var(--el-color-warning)); }
+.ma-danger { color: var(--el-color-danger); }
+.ma-callout { margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: var(--cm-brand-soft); font-size: 13px; line-height: 20px; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
+.ma-callout.is-warning { background: var(--el-color-warning-light-9); }
+.ma-callout.is-danger { background: var(--el-color-danger-light-9); }
+.ma-callout a { margin-left: 8px; }
+.ma-detail { margin-top: 6px; font-size: 13px; line-height: 20px; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
+.ma-text { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 13px; line-height: 21px; margin: 0; color: var(--el-text-color-regular); }
+.ma-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.ma-clamp.is-2 { -webkit-line-clamp: 2; }
+.ma-toggle { margin-top: 2px; padding: 0; border: 0; background: none; font: inherit; font-size: 12px; color: var(--el-color-primary); cursor: pointer; }
+.ma-toggle:hover { text-decoration: underline; }
+.ma-block { margin-top: 8px; }
+.ma-block__label { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 2px; }
+
+@media (max-width: 767px) {
+  .ma-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ma-row__main { flex-wrap: wrap; }
+  .ma-actions { flex-basis: 100%; justify-content: flex-end; }
+}

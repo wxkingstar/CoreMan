@@ -8,7 +8,8 @@ vi.mock('@/api/myAssistant', async (original) => ({
   myAssistant: { overview: vi.fn(), shift: vi.fn() },
 }))
 // 各分区有自己的用例，这里换成只带标记的替身：壳只管概览、空状态与标签页。
-vi.mock('@/components/assistant/AssistantBoard.vue', () => ({ default: { template: '<div data-test="pane-board" />' } }))
+const boardLoad = vi.hoisted(() => vi.fn())
+vi.mock('@/components/assistant/AssistantBoard.vue', () => ({ default: { template: '<div data-test="pane-board" />', methods: { load: boardLoad } } }))
 vi.mock('@/components/assistant/AssistantJobs.vue', () => ({ default: { template: '<div data-test="pane-jobs" />' } }))
 vi.mock('@/components/assistant/AssistantFollowups.vue', () => ({ default: { template: '<div data-test="pane-followups" />' } }))
 vi.mock('@/components/assistant/AssistantRecent.vue', () => ({ default: { template: '<div data-test="pane-recent" />' } }))
@@ -39,6 +40,8 @@ const render = () => mount(MyAssistantView, { global: { plugins: [ElementPlus, i
 
 beforeEach(() => {
   vi.restoreAllMocks()
+  // 分区记在地址栏里：每条用例从总表开始。
+  window.history.replaceState(null, '', '/my-assistant')
   vi.mocked(myAssistant.overview).mockReset().mockResolvedValue(overview)
 })
 
@@ -104,7 +107,8 @@ describe('My assistant page', () => {
     expect(head).toContain(t('assistant.overview.runtimeNone'))
     expect(head).toContain(t('assistant.overview.paused', { detail: 'runtime_offline' }))
     expect(head).toContain(t('assistant.overview.offShift'))
-    expect(head).toContain(t('assistant.overview.coldStartStates.done'))
+    // 冷启动做完就不再占一格。
+    expect(wrapper.find('[data-test="cold-start"]').exists()).toBe(false)
     expect(head).toContain(t('assistant.overview.watchNone'))
     expect(wrapper.get('[data-test="assistant-locked"]').text()).toContain(t('assistant.page.locked'))
     wrapper.unmount()
@@ -122,6 +126,29 @@ describe('My assistant page', () => {
     wrapper.findComponent(AssistantSettings).vm.$emit('deprovisioned')
     await flushPromises()
     expect(myAssistant.overview).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('refreshes the overview together with the open section', async () => {
+    boardLoad.mockReset().mockResolvedValue(undefined)
+    const wrapper = render(); await flushPromises()
+    await wrapper.get('[data-test="refresh"]').trigger('click'); await flushPromises()
+    expect(myAssistant.overview).toHaveBeenCalledTimes(2)
+    expect(boardLoad).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('opens the section named in the address and keeps it there when switching', async () => {
+    window.history.replaceState(null, '', '/my-assistant?tab=followups')
+    const wrapper = render(); await flushPromises()
+    expect(wrapper.find('[data-test="pane-followups"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="pane-board"]').exists()).toBe(false)
+    ;(wrapper.vm as unknown as { tab: string }).tab = 'notes'
+    await nextTick()
+    expect(window.location.search).toBe('?tab=notes')
+    ;(wrapper.vm as unknown as { tab: string }).tab = 'board'
+    await nextTick()
+    expect(window.location.search).toBe('')
     wrapper.unmount()
   })
 

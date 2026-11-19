@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantAbsent, type AssistantOverview } from '@/api/myAssistant'
 import AssistantBoard from '@/components/assistant/AssistantBoard.vue'
@@ -12,11 +13,35 @@ import AssistantSettings from '@/components/assistant/AssistantSettings.vue'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
+import '@/styles/assistant.css'
 
 const { t } = useI18n()
 const data = ref<AssistantOverview | AssistantAbsent | null>(null)
 const error = ref(''), loading = ref(false)
-const tab = ref('board')
+const TABS = ['board', 'jobs', 'followups', 'recent', 'notes', 'settings'] as const
+/** 打开哪个分区记在地址栏的 ?tab= 里：刷新、分享链接、从别处跳回来都回到同一个分区。 */
+function initialTab() {
+  const wanted = new URLSearchParams(window.location.search).get('tab')
+  return (TABS as readonly string[]).includes(wanted ?? '') ? wanted as string : 'board'
+}
+const tab = ref(initialTab())
+watch(tab, (value) => {
+  const query = new URLSearchParams(window.location.search)
+  if (value === 'board') query.delete('tab'); else query.set('tab', value)
+  const search = query.toString()
+  window.history.replaceState(window.history.state, '', window.location.pathname + (search ? `?${search}` : '') + window.location.hash)
+})
+/** 各分区组件都暴露 load：页头的「刷新」连同当前分区一起刷新，不只刷新概览。 */
+const panes = ref<Record<string, { load?: () => Promise<unknown> } | null>>({})
+const paneRef = (name: string) => (el: unknown) => { panes.value[name] = el as { load?: () => Promise<unknown> } | null }
+async function refresh() {
+  await Promise.all([load(), panes.value[tab.value]?.load?.()])
+}
+/** 今日轮次用到八成以上时提醒一下。 */
+const turnsPercent = computed(() => {
+  const turns = mine.value?.turns
+  return turns && turns.budget > 0 ? Math.min(100, Math.round((turns.today / turns.budget) * 100)) : 0
+})
 /** 有助理时的概览；没有助理时是 null。 */
 const mine = computed(() => (data.value?.exists ? data.value : null))
 /** 没有助理时的空状态；有助理时是 null。 */
@@ -41,12 +66,12 @@ async function shift(state: 'on' | 'off' | 'auto') {
   finally { switching.value = false }
 }
 onMounted(load)
-defineExpose({ tab, load })
+defineExpose({ tab, load, refresh })
 </script>
 <template>
   <section class="my-assistant">
     <div class="cm-page-header">
-      <h1>{{ t('menu.myAssistant') }}</h1>
+      <h2>{{ t('menu.myAssistant') }}</h2>
       <p class="cm-page-intro">
         {{ t('assistant.page.intro') }}
         <a
@@ -58,7 +83,9 @@ defineExpose({ tab, load })
       </p>
       <el-button
         :loading="loading"
-        @click="load"
+        :icon="Refresh"
+        data-test="refresh"
+        @click="refresh"
       >
         {{ t('assistant.page.refresh') }}
       </el-button>
@@ -96,10 +123,10 @@ defineExpose({ tab, load })
     </el-empty>
     <template v-if="mine">
       <dl
-        class="assistant-overview"
+        class="ma-overview"
         data-test="assistant-overview"
       >
-        <div>
+        <div class="ma-stat">
           <dt>{{ t('assistant.overview.state') }}</dt>
           <dd>
             <el-tag :type="mine.state === 'active' ? 'success' : 'warning'">
@@ -107,20 +134,25 @@ defineExpose({ tab, load })
             </el-tag>
             <span
               v-if="mine.paused_reason"
-              class="muted"
+              class="ma-sub ma-danger"
             >{{ t('assistant.overview.paused', { detail: mine.paused_reason }) }}</span>
           </dd>
         </div>
-        <div>
+        <div class="ma-stat">
           <dt>{{ t('assistant.overview.runtime') }}</dt>
           <dd v-if="mine.runtime">
-            {{ mine.runtime.name }} · {{ mine.runtime.online ? t('assistant.overview.online') : t('assistant.overview.offline') }}
+            <span
+              class="ma-dot"
+              :class="{ 'is-on': mine.runtime.online }"
+            />
+            <span>{{ mine.runtime.online ? t('assistant.overview.online') : t('assistant.overview.offline') }}</span>
+            <span class="ma-sub">{{ mine.runtime.name }}</span>
           </dd>
           <dd v-else>
             {{ t('assistant.overview.runtimeNone') }}
           </dd>
         </div>
-        <div>
+        <div class="ma-stat">
           <dt>{{ t('assistant.overview.shift') }}</dt>
           <dd>
             <el-tag
@@ -129,17 +161,14 @@ defineExpose({ tab, load })
             >
               {{ mine.on_shift ? (mine.always_on && !mine.shift_override ? t('assistant.overview.alwaysOn') : t('assistant.overview.onShift')) : t('assistant.overview.offShift') }}
             </el-tag>
-            <span
-              v-if="mine.shift_override && mine.shift_override_until"
-              class="muted"
-              data-test="shift-until"
-            >{{ t('assistant.overview.shiftUntil', { time: formatDateTime(mine.shift_override_until) }) }}</span>
             <!-- 只在助理可用时能切：开通中、停用中没有可切换的东西。 -->
-            <el-button-group v-if="mine.state === 'active'">
+            <template v-if="mine.state === 'active'">
               <!-- 全天候时本来就在班：「上班」与「恢复全天候」是同一个效果，只留后者。 -->
               <el-button
                 v-if="!mine.always_on"
                 size="small"
+                link
+                type="primary"
                 :disabled="switching"
                 data-test="shift-on"
                 @click="shift('on')"
@@ -148,6 +177,8 @@ defineExpose({ tab, load })
               </el-button>
               <el-button
                 size="small"
+                link
+                type="primary"
                 :disabled="switching"
                 data-test="shift-off"
                 @click="shift('off')"
@@ -157,34 +188,58 @@ defineExpose({ tab, load })
               <el-button
                 v-if="mine.shift_override"
                 size="small"
+                link
+                type="primary"
                 :disabled="switching"
                 data-test="shift-auto"
                 @click="shift('auto')"
               >
                 {{ mine.always_on ? t('assistant.overview.shiftAlwaysOn') : t('assistant.overview.shiftAuto') }}
               </el-button>
-            </el-button-group>
+            </template>
+            <span
+              v-if="mine.shift_override && mine.shift_override_until"
+              class="ma-sub"
+              data-test="shift-until"
+            >{{ t('assistant.overview.shiftUntil', { time: formatDateTime(mine.shift_override_until) }) }}</span>
           </dd>
         </div>
-        <div>
+        <!-- 冷启动做完之后就不用再看了：只在没做完时占一格。 -->
+        <div
+          v-if="mine.cold_start.state !== 'done'"
+          class="ma-stat"
+          data-test="cold-start"
+        >
           <dt>{{ t('assistant.overview.coldStart') }}</dt>
           <dd>{{ t('assistant.overview.coldStartStates.' + mine.cold_start.state) }}</dd>
         </div>
-        <div>
+        <div class="ma-stat">
           <dt>{{ t('assistant.overview.turns') }}</dt>
-          <dd>{{ t('assistant.overview.turnsValue', { n: mine.turns.today, total: mine.turns.budget }) }}</dd>
+          <dd>
+            <span>{{ t('assistant.overview.turnsValue', { n: mine.turns.today, total: mine.turns.budget }) }}</span>
+            <el-progress
+              :percentage="turnsPercent"
+              :show-text="false"
+              :stroke-width="4"
+              :status="turnsPercent >= 80 ? 'warning' : undefined"
+            />
+          </dd>
         </div>
-        <div>
+        <div class="ma-stat">
           <dt>{{ t('assistant.overview.watch') }}</dt>
           <dd v-if="mine.watch">
-            {{ t('assistant.overview.watchStates.' + mine.watch.state) }}
+            <span
+              class="ma-dot"
+              :class="{ 'is-on': !mine.watch.last_error }"
+            />
+            <span>{{ t('assistant.overview.watchStates.' + mine.watch.state) }}</span>
             <span
               v-if="mine.watch.last_ok_at"
-              class="muted"
+              class="ma-sub"
             >{{ t('assistant.overview.watchLastOk', { time: formatDateTime(mine.watch.last_ok_at) }) }}</span>
             <span
               v-if="mine.watch.last_error"
-              class="muted"
+              class="ma-sub ma-danger"
             >{{ t('assistant.overview.watchError', { detail: mine.watch.last_error }) }}</span>
           </dd>
           <dd v-else>
@@ -201,41 +256,44 @@ defineExpose({ tab, load })
         :title="t('assistant.page.locked')"
       />
       <!-- lazy：没点开的分区不取数。 -->
-      <el-tabs v-model="tab">
+      <el-tabs
+        v-model="tab"
+        class="ma-tabs"
+      >
         <el-tab-pane
           :label="t('assistant.page.tabs.board')"
           name="board"
           lazy
         >
-          <AssistantBoard />
+          <AssistantBoard :ref="paneRef('board')" />
         </el-tab-pane>
         <el-tab-pane
           :label="t('assistant.page.tabs.jobs')"
           name="jobs"
           lazy
         >
-          <AssistantJobs />
+          <AssistantJobs :ref="paneRef('jobs')" />
         </el-tab-pane>
         <el-tab-pane
           :label="t('assistant.page.tabs.followups')"
           name="followups"
           lazy
         >
-          <AssistantFollowups />
+          <AssistantFollowups :ref="paneRef('followups')" />
         </el-tab-pane>
         <el-tab-pane
           :label="t('assistant.page.tabs.recent')"
           name="recent"
           lazy
         >
-          <AssistantRecent />
+          <AssistantRecent :ref="paneRef('recent')" />
         </el-tab-pane>
         <el-tab-pane
           :label="t('assistant.page.tabs.notes')"
           name="notes"
           lazy
         >
-          <AssistantNotes />
+          <AssistantNotes :ref="paneRef('notes')" />
         </el-tab-pane>
         <el-tab-pane
           :label="t('assistant.page.tabs.settings')"
@@ -243,6 +301,7 @@ defineExpose({ tab, load })
           lazy
         >
           <AssistantSettings
+            :ref="paneRef('settings')"
             :name="mine.name"
             :runtime="mine.runtime?.name ?? null"
             @deprovisioned="load"
@@ -253,9 +312,8 @@ defineExpose({ tab, load })
   </section>
 </template>
 <style scoped>
-.assistant-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 16px 0; }
-.assistant-overview dt { color: var(--el-text-color-secondary); font-size: 12px; }
-.assistant-overview dd { margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .how-to { text-align: left; display: inline-block; }
-.muted { color: var(--el-text-color-secondary); }
+.ma-tabs :deep(.el-tabs__header) { margin-bottom: 16px; }
+/* el-tabs 默认裁掉溢出：放开，设置页底部的保存栏才能贴住视口。 */
+.ma-tabs :deep(.el-tabs__content) { overflow: visible; }
 </style>

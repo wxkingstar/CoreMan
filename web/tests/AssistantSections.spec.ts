@@ -5,7 +5,7 @@ import type { Component } from 'vue'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { board: vi.fn(), declineGap: vi.fn(), grantGap: vi.fn(), requestGap: vi.fn(), withdrawGap: vi.fn(), jobs: vi.fn(), cancelJob: vi.fn(), recentApprovals: vi.fn() },
+  myAssistant: { board: vi.fn(), closeFollowup: vi.fn(), snoozeFollowup: vi.fn(), declineGap: vi.fn(), grantGap: vi.fn(), requestGap: vi.fn(), withdrawGap: vi.fn(), jobs: vi.fn(), cancelJob: vi.fn(), recentApprovals: vi.fn() },
 }))
 
 import { myAssistant, type AssistantJob, type Board, type BoardItem, type SettledApproval } from '@/api/myAssistant'
@@ -308,7 +308,45 @@ describe('board', () => {
   })
 })
 
+describe('board actions', () => {
+  it('counts each group, with pending approvals under 等你, in the jump bar', async () => {
+    const wrapper = render(AssistantBoard); await flushPromises()
+    expect(wrapper.get('[data-test="jump-owner"]').text()).toContain(String(boardData.counts.owner + boardData.approvals_total))
+    expect(wrapper.get('[data-test="jump-stalled"]').classes()).toContain('is-alert')
+    expect(wrapper.get('[data-test="jump-working"]').classes()).toContain('is-zero')
+    wrapper.unmount()
+  })
+
+  it('closes or snoozes an item right from the board, then reloads', async () => {
+    vi.mocked(myAssistant.closeFollowup).mockReset().mockResolvedValue({} as never)
+    vi.mocked(myAssistant.snoozeFollowup).mockReset().mockResolvedValue({} as never)
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: '2026-11-20', action: 'confirm' } as never)
+    const wrapper = render(AssistantBoard); await flushPromises()
+    await wrapper.get('[data-test="finish-F001"]').trigger('click'); await flushPromises()
+    expect(myAssistant.closeFollowup).toHaveBeenCalledWith('F001', false)
+    await wrapper.get('[data-test="snooze-F002"]').trigger('click'); await flushPromises()
+    const validator = (prompt.mock.calls[0][2] as { inputValidator: (v: string) => unknown }).inputValidator
+    expect(validator('2026-11-18')).toBe(t('assistant.followups.snoozeInvalid'))
+    expect(validator('2026-11-19')).toBe(true)
+    expect(myAssistant.snoozeFollowup).toHaveBeenCalledWith('F002', '2026-11-20')
+    expect(myAssistant.board).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
+  })
+})
+
 describe('running', () => {
+  it('shows the start of a long conclusion and expands it on request', async () => {
+    const long = Array.from({ length: 8 }, (_, i) => `第 ${i + 1} 行`).join('\n')
+    vi.mocked(myAssistant.jobs).mockResolvedValue({ active: [], recent: [job({ id: 'j7', status: 'done', result: long, has_result: true })] })
+    const wrapper = render(AssistantJobs); await flushPromises()
+    const result = () => wrapper.get('[data-test="job-j7"] pre.ma-text')
+    expect(result().classes()).toContain('ma-clamp')
+    expect(result().text()).toContain('第 8 行')
+    await wrapper.get('[data-test="toggle-result-j7"]').trigger('click')
+    expect(result().classes()).not.toContain('ma-clamp')
+    wrapper.unmount()
+  })
+
   it('shows the brief of running jobs and the conclusion of finished ones', async () => {
     const wrapper = render(AssistantJobs); await flushPromises()
     expect(wrapper.get('[data-test="job-j1"]').text()).toContain('查一下上季度的退货原因')
