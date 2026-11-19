@@ -15,6 +15,7 @@ from tests.api.conftest import login_as, login_existing
 # 复用批量写操作用例的假业务系统与临时存储。
 fake = writes.fake
 storage = writes.storage
+small_trial = writes.small_trial
 confirmed, run_all, run_next = writes.confirmed, writes.run_all, writes.run_next
 statuses, updates, resumed, text_of = (
     writes.statuses,
@@ -38,6 +39,7 @@ async def test_the_list_shows_metadata_only_and_follows_the_batch(
     db_session,
     db_engine,
     fake,
+    small_trial,
 ) -> None:
     skus = [f"SKU-SECRET-{i}" for i in range(12)]
     bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)

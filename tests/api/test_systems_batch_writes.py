@@ -62,6 +62,12 @@ def storage(app: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(batch, "get_settings", lambda: app.state.settings)
 
 
+@pytest.fixture
+def small_trial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trial a batch of more than 10 items, so pause tests stay small."""
+    monkeypatch.setattr(batch, "TRIAL_OVER", 10)
+
+
 def lines(*rows: dict[str, Any] | str) -> bytes:
     return "\n".join(r if isinstance(r, str) else json.dumps(r) for r in rows).encode()
 
@@ -914,21 +920,39 @@ def buttons(card: dict[str, Any]) -> dict[str, str]:
     return found
 
 
+async def test_a_batch_of_at_most_trial_over_items_runs_without_a_trial(
+    client, app, db_session, db_engine, fake
+) -> None:
+    skus = [f"S{i}" for i in range(batch.TRIAL_OVER)]
+    await confirmed(client, app, db_session, db_engine, *skus)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).first()
+    assert "先执行前" not in text_of(card.payload["card"])
+
+    await run_all(db_session, db_engine)
+    assert [s["sku"] for s in fake.sent] == skus  # type: ignore[attr-defined]
+    assert await statuses(db_session) == ["ok"] * batch.TRIAL_OVER
+    assert (await updates(db_session))[-1]["header"]["title"]["content"] == "已完成"
+
+
 async def test_a_large_batch_runs_a_few_items_then_waits_for_the_asker(
     client, app, db_session, db_engine, fake
 ) -> None:
-    skus = [f"S{i}" for i in range(12)]
+    skus = [f"S{i}" for i in range(batch.TRIAL_OVER + 1)]
+    rest = len(skus) - batch.TRIAL_ITEMS
     bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)
     card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).first()
     assert "先执行前 5 项并暂停" in text_of(card.payload["card"])
 
     assert await run_all(db_session, db_engine) == 1
     assert [s["sku"] for s in fake.sent] == skus[:5]  # type: ignore[attr-defined]
-    assert await statuses(db_session) == ["ok"] * 5 + ["pending"] * 7
+    assert await statuses(db_session) == ["ok"] * 5 + ["pending"] * rest
     paused = (await updates(db_session))[-1]
     assert paused["header"]["title"]["content"] == "已试跑 5 项，等你确认"
     assert "第 5 项" in text_of(paused) and "核对" in text_of(paused)
-    assert buttons(paused) == {"继续执行剩余 7 项": batch.GO, "停止，剩余的不执行": batch.STOP}
+    assert buttons(paused) == {
+        f"继续执行剩余 {rest} 项": batch.GO,
+        "停止，剩余的不执行": batch.STOP,
+    }
     assert "试跑前 5 项并暂停" in (await notices(db_session))[-1]
     # Paused: nothing is queued, and the patrol does not queue anything either.
     async with app.state.session_factory() as session:
@@ -940,14 +964,14 @@ async def test_a_large_batch_runs_a_few_items_then_waits_for_the_asker(
     )
     await run_all(db_session, db_engine)
     assert [s["sku"] for s in fake.sent] == skus  # type: ignore[attr-defined]
-    assert await statuses(db_session) == ["ok"] * 12
+    assert await statuses(db_session) == ["ok"] * len(skus)
     assert (await updates(db_session))[-1]["header"]["title"]["content"] == "已完成"
     # No second trial, and a second "carry on" does nothing.
     assert await click(db_session, db_engine, bot, task, state.id, batch.GO) == "ignored"
 
 
 async def test_stopping_a_paused_batch_ends_it_and_an_unanswered_pause_ends_too(
-    client, app, db_session, db_engine, fake
+    client, app, db_session, db_engine, fake, small_trial
 ) -> None:
     skus = [f"S{i}" for i in range(12)]
     bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)
@@ -974,7 +998,7 @@ async def test_stopping_a_paused_batch_ends_it_and_an_unanswered_pause_ends_too(
 
 
 async def test_a_pause_nobody_answers_ends_the_batch(
-    client, app, db_session, db_engine, fake
+    client, app, db_session, db_engine, fake, small_trial
 ) -> None:
     await confirmed(client, app, db_session, db_engine, *(f"S{i}" for i in range(12)))
     await run_all(db_session, db_engine)
@@ -987,7 +1011,7 @@ async def test_a_pause_nobody_answers_ends_the_batch(
 
 
 async def test_ten_failures_in_a_row_pause_the_batch_and_failed_items_can_be_retried(
-    client, app, db_session, db_engine, fake
+    client, app, db_session, db_engine, fake, small_trial
 ) -> None:
     skus = [f"S{i}" for i in range(5)] + [f"BAD{i}" for i in range(10)] + ["T1", "T2"]
     bot, task, state = await confirmed(client, app, db_session, db_engine, *skus)

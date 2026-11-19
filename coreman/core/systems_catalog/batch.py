@@ -94,7 +94,7 @@ GO, CONTINUE, RETRY = "go", "continue", "retry"
 # A batch of more than `TRIAL_OVER` items first runs `TRIAL_ITEMS` and pauses for the asker to
 # check them in the business system.
 TRIAL_ITEMS = 5
-TRIAL_OVER = 10
+TRIAL_OVER = 50
 # This many items in a row without success pause the batch: the business system is probably down
 # or refusing everything, and the asker decides whether to carry on.
 FAIL_STREAK = 10
@@ -114,7 +114,7 @@ LABELS = {
 }
 HINT = (
     "已整批暂存，没有执行。本轮结束时平台给提问人发一张确认卡（总数、字段统计、抽样预览和完整"
-    "明细下载），点确认后平台逐项执行；超过 10 项时先执行前 5 项并暂停，等提问人核对后继续。"
+    "明细下载），点确认后平台逐项执行；超过 50 项时先执行前 5 项并暂停，等提问人核对后继续。"
     "告诉用户需要在卡片上确认，不要说已经完成。"
 )
 
