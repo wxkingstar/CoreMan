@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -57,9 +58,9 @@ async def save_health(
     at = observation.observed_at or datetime.now(UTC)
     data = observation.model_dump(mode="json")
     if (
-        observation.check_kind == "model"
+        observation.check_kind in ("model", "conversation")
         and observation.status in ("down", "auth_fail", "timeout")
-        and not observation.error_code
+        and observation.error_code in (None, "model_request_failed")
         and observation.detail
     ):
         _, code, _ = provider_failure(observation.detail)
@@ -161,7 +162,17 @@ def provider_failure(message: str) -> tuple[str, str, str]:
             "登录会话已过期，请重新登录",
         ),
         (
-            ("usage limit", "quota exceeded"),
+            (
+                "usage limit",
+                "quota exceeded",
+                "insufficient_quota",
+                "quota_exhausted",
+                "credit balance is too low",
+                "insufficient credits",
+                "额度已耗尽",
+                "额度已用完",
+                "额度已用尽",
+            ),
             "down",
             "quota_limited",
             "已触发订阅额度限制",
@@ -179,6 +190,10 @@ def provider_failure(message: str) -> tuple[str, str, str]:
             "模型服务认证失败",
         ),
     ):
-        if any(marker in text for marker in markers):
+        exhausted = code == "quota_limited" and re.search(
+            r"\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:usage )?limit\b",
+            text,
+        )
+        if any(marker in text for marker in markers) or exhausted:
             return status, code, detail
     return "down", "model_request_failed", "模型调用失败"
