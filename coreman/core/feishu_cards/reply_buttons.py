@@ -26,6 +26,8 @@ ACTION = "reply"
 MAX_LABEL_CHARS = 40
 MAX_BUTTONS = 6
 USED_TIPS = "这组按钮已经用过了"
+# 能点的组件：按钮和气泡（可点的容器）；置灰、到期都按这两种找。
+CLICKABLE = frozenset({"button", "interactive_container"})
 EXPIRED_TIPS = "建议已过期，直接发消息就好"
 USER_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
@@ -41,6 +43,8 @@ class ReplyClick:
     row: str | None
     buttons: tuple[str, ...]
     expires: int | None = None
+    # 置灰后「已选择：…」那一行写什么；不给就写 text（表单提交的 text 太长，写「已提交表单」）。
+    label: str | None = None
 
 
 def reply_value(
@@ -59,8 +63,68 @@ def reply_value(
     return value
 
 
-def _ids(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list) or len(value) > MAX_BUTTONS:
+FORM_ACTION = "form"
+FORM_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,19}\Z")
+# 表单提交拼成的那句话最长这么多字。
+MAX_FORM_TEXT = 3000
+FORM_LABEL = "已提交表单"
+
+
+def form_value(
+    *, requester: str, row: str, buttons: list[str], title: str, labels: dict[str, str]
+) -> dict[str, Any]:
+    """表单提交按钮的回调 value：发出去的话由网关按「标签：所填内容」拼出来。"""
+    return {
+        "action": FORM_ACTION,
+        "requester": requester,
+        "row": row,
+        "buttons": list(buttons),
+        "title": title,
+        "labels": dict(labels),
+    }
+
+
+def _form_entry(raw: Any) -> str:
+    if isinstance(raw, list):
+        return "、".join(str(v).strip() for v in raw if str(v).strip())
+    return str(raw if raw is not None else "").strip()
+
+
+def parse_form(value: Any, form_value: Any) -> ReplyClick | None:
+    """表单提交 → ReplyClick：text 是「（填写了表单「标题」）\n标签：值」，只收 value 里列出的字段。
+
+    字段名和标签来自渲染器生成的 value；所填内容来自回调的 form_value，按字段名对上才收。
+    """
+    if not isinstance(value, dict) or value.get("action") != FORM_ACTION:
+        return None
+    requester, labels = value.get("requester"), value.get("labels")
+    if not isinstance(requester, str) or not USER_ID.fullmatch(requester):
+        return None
+    if not isinstance(labels, dict) or not labels or len(labels) > 8:
+        return None
+    filled = form_value if isinstance(form_value, dict) else {}
+    title = str(value.get("title") or "").strip()[:40]
+    lines = [f"（填写了表单「{title}」）" if title else "（填写了表单）"]
+    for name, label in labels.items():
+        if not isinstance(name, str) or not FORM_NAME.fullmatch(name):
+            return None
+        entry = _form_entry(filled.get(name))
+        lines.append(f"{str(label)[:40]}：{entry or '（未填）'}")
+    row = value.get("row")
+    return ReplyClick(
+        text="\n".join(lines)[:MAX_FORM_TEXT],
+        requester=requester,
+        row=row if isinstance(row, str) and valid_element_id(row) else None,
+        buttons=_ids(value.get("buttons"), limit=MAX_FORM_IDS),
+        label=FORM_LABEL,
+    )
+
+
+MAX_FORM_IDS = 9
+
+
+def _ids(value: Any, limit: int = MAX_BUTTONS) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > limit:
         return ()
     return tuple(v for v in value if isinstance(v, str) and valid_element_id(v))
 
@@ -112,7 +176,7 @@ class UsedRow:
         if not isinstance(label, str) or not label.strip() or len(label) > MAX_LABEL_CHARS:
             return None
         chat: ChatType = "single" if value.get("chat_type") == "single" else "group"
-        return cls(row, _ids(value.get("buttons")), label.strip(), chat)
+        return cls(row, _ids(value.get("buttons"), limit=MAX_FORM_IDS), label.strip(), chat)
 
 
 def note_id(row: str) -> str | None:
@@ -163,7 +227,7 @@ def expire_card(card: dict[str, Any], buttons: Sequence[str]) -> bool:
     found = [
         node
         for node in _nodes((card.get("body") or {}).get("elements"))
-        if node.get("tag") == "button" and node.get("element_id") in wanted
+        if node.get("tag") in CLICKABLE and node.get("element_id") in wanted
     ]
     for node in found:
         if not node.get("disabled"):
@@ -245,7 +309,7 @@ def _find_parent(elements: Any, element_id: str) -> tuple[list[Any], int] | None
 
 def _disable(node: Any, wanted: set[str]) -> None:
     if isinstance(node, dict):
-        if node.get("tag") == "button" and node.get("element_id") in wanted:
+        if node.get("tag") in CLICKABLE and node.get("element_id") in wanted:
             node.update(_disabled())
         for value in node.values():
             _disable(value, wanted)

@@ -277,6 +277,8 @@ class ContentBuilder:
         quoted = quote.get("text")
         if kind in ("text", "voice"):
             key = "quote_text_prefix" if kind == "text" else "quote_voice_prefix"
+            if quote.get("self"):
+                key = "self_render_prefix"
             body = msg(key, self.locale, quoted=quoted or "", text=text)
             current_media = [part for part in own if part.get("type") in {"image", "file"}]
             if current_media:

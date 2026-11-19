@@ -22,13 +22,17 @@ from coreman.core.feishu_cards.components import (
     panel,
     render_actions,
     render_callout,
+    render_details,
     render_followups,
+    render_form,
     render_header,
     render_item,
     render_kpi,
     render_note,
     render_people,
     render_raw,
+    render_recommend,
+    render_sources,
     render_subtitle,
     render_table,
     render_timeline,
@@ -45,6 +49,7 @@ from coreman.core.richtext.schema import (
     CalloutBlock,
     ChartBlock,
     ColumnsBlock,
+    DetailsBlock,
     FollowupsBlock,
     HeaderBlock,
     ItemBlock,
@@ -390,7 +395,10 @@ class _Builder:
         self.units.extend(_markdown_units(text, self.ctx))
 
     def add_half(self, unit: _Unit) -> None:
-        """半宽块：攒到两个就并排成一行；落单的按全宽放。"""
+        """半宽块：攒到两个就并排成一行；落单的按全宽放。手机上不并排。"""
+        if self.ctx.mobile:
+            self.add(unit)
+            return
         if self._half is None:
             self._half = unit
             return
@@ -479,6 +487,20 @@ class _Builder:
             return render_kpi(model, ctx)
         if isinstance(model, CalloutBlock):
             return render_callout(model, ctx)
+        if isinstance(model, DetailsBlock):
+            # 面板里不能放表格：正文里的表格退回 Markdown 表格文字。
+            body = [
+                e
+                if e.get("tag") != "table"
+                else {
+                    "tag": "markdown",
+                    "element_id": ctx.new_id("md"),
+                    "content": _element_text(e),
+                }
+                for u in _markdown_units(model.text, ctx)
+                for e in u.elements
+            ]
+            return render_details(model, ctx, body) if body else []
         renderers: dict[str, Any] = {
             "table": render_table,
             "item": render_item,
@@ -486,6 +508,9 @@ class _Builder:
             "people": render_people,
             "note": render_note,
             "actions": render_actions,
+            "sources": render_sources,
+            "recommend": render_recommend,
+            "form": render_form,
             "raw": render_raw,
         }
         renderer = renderers.get(kind)
@@ -561,6 +586,7 @@ def compile_reply(
     summary: str | None = None,
     requester: str | None = None,
     reply_expires: int | None = None,
+    mobile: bool = False,
 ) -> Compiled:
     """一条回复 → 若干张卡。`prefix` 是放在主卡最前面的组件（思考面板）。
 
@@ -574,6 +600,7 @@ def compile_reply(
         people=people or {},
         requester=requester or None,
         reply_expires=reply_expires,
+        mobile=mobile,
     )
     try:
         return _compile(text, prefix, ctx, final, summary)
@@ -629,7 +656,7 @@ def _followups_at(cards: list[dict[str, Any]]) -> tuple[int, tuple[str, ...]] | 
         ids = tuple(
             str(node.get("element_id"))
             for node in _walk(card)
-            if node.get("tag") == "button"
+            if node.get("tag") in ("button", "interactive_container")
             and any(
                 isinstance(b, dict) and isinstance((b.get("value") or {}).get("expires"), int)
                 for b in node.get("behaviors") or []

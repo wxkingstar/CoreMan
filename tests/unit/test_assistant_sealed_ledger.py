@@ -88,7 +88,8 @@ ENTITY_SELECTS = {
     "coreman/runtime/gateway_common/inbound.py": 1,  # session.scalar
     # 都是 session.scalar（置灰回复按钮、建议追问到期置灰）
     "coreman/runtime/gateway_feishu/reply_buttons.py": 5,
-    "coreman/runtime/gateway_feishu/transport.py": 1,  # 显式还原，跳过不可读的行
+    # 显式还原，跳过不可读的行；确认卡的消息流卡片标记是 session.scalar（自动还原）
+    "coreman/runtime/gateway_feishu/transport.py": 2,
     "coreman/runtime/scheduler/notifications.py": 1,  # 不绑机器人的通知
     "coreman/runtime/scheduler/reaper.py": 2,  # 显式还原
     "coreman/runtime/worker/chat/api.py": 1,  # session.scalar
@@ -135,6 +136,7 @@ COLUMN_REFERENCES = {
     "coreman/runtime/gateway_common/inbound.py": 7,  # 明文键
     "coreman/runtime/gateway_feishu/assistant_inbound.py": 1,  # 下划线开头的明文键
     "coreman/runtime/gateway_feishu/reply_buttons.py": 2,  # 下划线开头的明文键
+    "coreman/runtime/gateway_feishu/transport.py": 2,  # 下划线开头的明文键
     "coreman/runtime/scheduler/reaper.py": 1,  # 任务报错：取值后 open_value
     "coreman/runtime/worker/busy_choice.py": 1,  # 明文键 platform_user_id
     "coreman/runtime/worker/card_actions.py": 2,  # 明文键与 card.task_id 的明文镜像

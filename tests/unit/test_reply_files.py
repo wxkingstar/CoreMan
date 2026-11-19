@@ -118,6 +118,7 @@ async def test_attach_reads_uploads_queues_and_rewrites(monkeypatch) -> None:
         "file_key": "file_v3_abc",
         "name": "report.csv",
         "size": len(content),
+        "media": None,
     }
 
 
@@ -127,3 +128,30 @@ def test_only_ordinary_feishu_bots() -> None:
     assistant: Any = SimpleNamespace(platform="feishu", kind="assistant")
     assert ReplyFiles.applies(feishu)
     assert not ReplyFiles.applies(wecom) and not ReplyFiles.applies(assistant)
+
+
+def _box(kind: bytes, body: bytes) -> bytes:
+    return (8 + len(body)).to_bytes(4, "big") + kind + body
+
+
+def test_media_durations() -> None:
+    from coreman.runtime.worker.chat.reply_files import mp4_duration_ms, opus_duration_ms
+
+    mvhd = bytes(12) + (1000).to_bytes(4, "big") + (12_345).to_bytes(4, "big") + bytes(80)
+    mp4 = _box(b"ftyp", b"isom" + bytes(4)) + _box(b"moov", _box(b"mvhd", mvhd))
+    assert mp4_duration_ms(mp4) == 12_345
+    assert mp4_duration_ms(b"not an mp4") is None
+    head = b"OggS" + bytes(24) + b"OpusHead" + b"\x01\x02" + (312).to_bytes(2, "little") + bytes(8)
+    tail = b"OggS" + b"\x00\x04" + (48_000 * 3 + 312).to_bytes(8, "little") + bytes(16)
+    assert opus_duration_ms(head + tail) == 3000
+    assert opus_duration_ms(b"OggS" + bytes(20)) is None
+
+
+def test_media_card_is_not_forwardable() -> None:
+    from coreman.runtime.gateway_feishu.cards import media_card
+
+    video = media_card("video", "file_v3_x", "demo.mp4")
+    assert video["config"]["enable_forward"] is False
+    assert video["body"]["elements"][1]["tag"] == "video"
+    audio = media_card("audio", "file_v3_y", "a.opus")
+    assert audio["body"]["elements"][1]["tag"] == "audio"

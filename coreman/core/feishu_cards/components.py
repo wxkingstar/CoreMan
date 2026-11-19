@@ -16,14 +16,17 @@ import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 from coreman.core.feishu_cards import reply_buttons, sanitize, style
 from coreman.core.feishu_cards.context import RenderContext
-from coreman.core.feishu_cards.markdown import normalize
+from coreman.core.feishu_cards.markdown import MOBILE_TABLE_COLUMNS, normalize, records
 from coreman.core.richtext.schema import (
     ActionsBlock,
     CalloutBlock,
+    DetailsBlock,
     FollowupsBlock,
+    FormBlock,
     HeaderBlock,
     ItemBlock,
     KpiBlock,
@@ -31,6 +34,8 @@ from coreman.core.richtext.schema import (
     NoteBlock,
     PeopleBlock,
     RawBlock,
+    RecommendBlock,
+    SourcesBlock,
     TableBlock,
     TableColumn,
     Tag,
@@ -498,50 +503,258 @@ def render_actions(block: ActionsBlock, ctx: RenderContext) -> list[dict[str, An
     return out
 
 
+def render_sources(block: SourcesBlock, ctx: RenderContext) -> list[Element]:
+    """引用来源：灰色小标题 + 编号链接（后面灰字写域名），只认 http/https。"""
+    lines: list[str] = []
+    for index, item in enumerate(block.items, 1):
+        title = _inline(item.title).replace("[", "［").replace("]", "］")
+        url = item.url.strip()
+        if sanitize.is_http_url(url):
+            host = urlsplit(url).hostname or ""
+            line = f"{index}. [{title}]({url}) {_font(host, 'grey')}"
+        else:
+            line = f"{index}. {title}"
+        if item.note:
+            line += f" {_font('· ' + _inline(item.note), 'grey')}"
+        lines.append(line)
+    return [
+        _md(
+            ctx,
+            _font(_inline(block.title or SOURCES_TITLE), "grey"),
+            size=style.TEXT_NOTE,
+            icon=style.icon("link-copy_outlined", "grey"),
+        ),
+        _md(ctx, "\n".join(lines), size=style.TEXT_NOTE),
+    ]
+
+
+def render_details(block: DetailsBlock, ctx: RenderContext, body: list[Element]) -> list[Element]:
+    """可折叠的段落：默认收起。`body` 是正文已经渲染好的组件（面板里不能放表格、表单）。"""
+    return [
+        {
+            "tag": "collapsible_panel",
+            "element_id": ctx.new_id("fold"),
+            "expanded": block.expanded,
+            "header": {
+                "title": {"tag": "markdown", "content": f"**{_inline(block.title)}**"},
+            },
+            "background_color": style.PANEL,
+            "border": {"color": "grey", "corner_radius": style.RADIUS},
+            "padding": "8px",
+            "elements": body,
+        }
+    ]
+
+
+def render_form(block: FormBlock, ctx: RenderContext) -> list[Element]:
+    """模型要的几项信息：只在提问人自己的对话回复里渲染成表单，其余出口降级成文字。
+
+    提交按钮的回调 value 带提问人、字段名到标签的映射和表单里全部交互组件的 element_id：
+    网关按它把填的内容拼成「标签：值」作为提问人的下一句话，这一轮开始后整张表单置灰。
+    """
+    requester = ctx.requester
+    if not requester:
+        return []
+    form_id = ctx.new_id("form")
+    items: list[Element] = []
+    ids: list[str] = []
+    if block.title:
+        items.append(_md(ctx, f"**{_inline(block.title)}**", size=style.TEXT_BODY))
+    for field in block.fields:
+        eid = ctx.new_id("fld")
+        ids.append(eid)
+        label = _inline(field.label) + (" *" if field.required else "")
+        placeholder = {"tag": "plain_text", "content": field.placeholder or "请填写"}
+        node: Element
+        if field.type in ("text", "textarea", "number"):
+            node = {
+                "tag": "input",
+                "element_id": eid,
+                "name": field.name,
+                "required": field.required,
+                "width": "fill",
+                "max_length": FORM_TEXT_CHARS,
+                "placeholder": placeholder,
+                "label": {"tag": "plain_text", "content": field.label},
+                "label_position": "top",
+            }
+            if field.type == "textarea":
+                node["input_type"] = "multiline_text"
+                node["rows"] = 3
+            items.append(node)
+            continue
+        items.append(_md(ctx, label, size=style.TEXT_NOTE))
+        if field.type == "date":
+            node = {
+                "tag": "date_picker",
+                "element_id": eid,
+                "name": field.name,
+                "required": field.required,
+                "width": "fill",
+                "placeholder": {"tag": "plain_text", "content": field.placeholder or "选择日期"},
+            }
+        else:
+            node = {
+                "tag": "select_static" if field.type == "select" else "multi_select_static",
+                "element_id": eid,
+                "name": field.name,
+                "required": field.required,
+                "width": "fill",
+                "placeholder": {"tag": "plain_text", "content": field.placeholder or "请选择"},
+                "options": [
+                    {"text": {"tag": "plain_text", "content": o}, "value": o} for o in field.options
+                ],
+            }
+        items.append(node)
+    submit_id = ctx.new_id("btn")
+    ids.append(submit_id)
+    items.append(
+        {
+            "tag": "button",
+            "element_id": submit_id,
+            "name": "submit",
+            "type": "primary_filled",
+            "form_action_type": "submit",
+            "text": {"tag": "plain_text", "content": block.submit},
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": reply_buttons.form_value(
+                        requester=requester,
+                        row=form_id,
+                        buttons=ids,
+                        title=block.title or "",
+                        labels={f.name: f.label for f in block.fields},
+                    ),
+                }
+            ],
+        }
+    )
+    return [{"tag": "form", "element_id": form_id, "name": form_id, "elements": items}]
+
+
+SOURCES_TITLE = "来源"
+# 表单单行、多行输入的字数上限：提交的内容整段作为一句话发给模型，不能太长。
+FORM_TEXT_CHARS = 500
 FOLLOWUPS_TITLE = "你可能还想问"
+RECOMMENDED_TAG = "推荐"
+
+
+def bubble(
+    ctx: RenderContext,
+    text: str,
+    value: dict[str, Any],
+    *,
+    element_id: str | None = None,
+    recommended: bool = False,
+    note: str = "",
+) -> Element:
+    """可点的气泡：圆角描边的容器包一段文字。按钮只能显示一行、长了就截断，气泡整句换行。
+
+    推荐项用蓝框浅蓝底、前面一个「推荐」标签；`note` 是下面一行灰字说明。
+    """
+    body = _inline(text)
+    if recommended:
+        body = f"<text_tag color='blue'>{RECOMMENDED_TAG}</text_tag> **{body}**"
+    if note:
+        body += "\n" + _font(_inline(note), "grey")
+    return {
+        "tag": "interactive_container",
+        "element_id": element_id or ctx.new_id("bubble"),
+        "width": "fill",
+        "has_border": True,
+        "border_color": "blue" if recommended else "grey",
+        "background_style": "blue-50" if recommended else "default",
+        "corner_radius": style.RADIUS,
+        "padding": "8px 12px",
+        "behaviors": [{"type": "callback", "value": value}],
+        "elements": [{"tag": "markdown", "content": body, "text_size": style.TEXT_BODY}],
+    }
+
+
+def render_recommend(block: RecommendBlock, ctx: RenderContext) -> list[Element]:
+    """推荐方案：蓝框浅蓝底，「推荐」标签加粗写结论，下面灰字写理由；其他办法灰字列在框下。
+
+    提问人自己的对话回复里框里多一个「就按这个办」：点了等于提问人说「就按这个办：结论」
+    （回复按钮同一套，结论就在按钮正上方）。之后真要改数据，写操作照样要确认。
+    """
+    box_id = ctx.new_id("panel")
+    inner: list[Element] = [
+        _md(
+            ctx,
+            f"<text_tag color='blue'>{RECOMMENDED_TAG}</text_tag> **{_inline(block.title)}**",
+            size=style.TEXT_BODY,
+        )
+    ]
+    if block.reason:
+        inner.append(_md(ctx, _font(_inline(block.reason), "grey"), size=style.TEXT_NOTE))
+    if ctx.requester and block.action:
+        bid = ctx.new_id("btn")
+        said = f"{block.action}：{block.title}"[: reply_buttons.MAX_LABEL_CHARS]
+        inner.append(
+            {
+                "tag": "button",
+                "element_id": bid,
+                "type": "primary_filled",
+                "size": "small",
+                "text": {"tag": "plain_text", "content": block.action},
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": reply_buttons.reply_value(
+                            said, requester=ctx.requester, row=box_id, buttons=[bid]
+                        ),
+                    }
+                ],
+            }
+        )
+    out: list[Element] = [
+        {
+            "tag": "interactive_container",
+            "element_id": box_id,
+            "width": "fill",
+            "has_border": True,
+            "border_color": "blue",
+            "background_style": "blue-50",
+            "corner_radius": style.RADIUS,
+            "padding": "12px 14px",
+            "vertical_spacing": "6px",
+            "behaviors": [],
+            "elements": inner,
+        }
+    ]
+    if block.alternatives:
+        lines = "\n".join(f"- {_inline(a)}" for a in block.alternatives)
+        out.append(_md(ctx, _font("其他办法：", "grey") + "\n" + lines, size=style.TEXT_NOTE))
+    return out
 
 
 def render_followups(block: FollowupsBlock, ctx: RenderContext) -> list[Element]:
-    """建议追问：卡片最底部一列整宽按钮，点一下就是提问人把这句话发给机器人。
+    """建议追问：卡片最底部，分割线下一行灰色「你可能还想问」，下面每句一个整句换行的气泡。
 
-    和选择题（一排实心按钮）在样式上分开：上面一行灰色小标题，按钮竖排、描边、撑满宽度。
-    只在提问人自己的对话回复里渲染（`ctx.requester`），value 带过期时刻；其余出口不渲染。
+    点一下就是提问人把这句话发给机器人（回复按钮同一套）。只在提问人自己的对话回复里渲染
+    （`ctx.requester`），value 带过期时刻；其余出口不渲染。
     """
     requester = ctx.requester
     if not requester:
         return []
     row = ctx.new_id("cols")
-    ids = [ctx.new_id("btn") for _ in block.questions]
-    buttons: list[Element] = [
-        {
-            "tag": "button",
-            "element_id": bid,
-            "type": "default",
-            "width": "fill",
-            "text": {"tag": "plain_text", "content": question},
-            "behaviors": [
-                {
-                    "type": "callback",
-                    "value": reply_buttons.reply_value(
-                        question,
-                        requester=requester,
-                        row=row,
-                        buttons=ids,
-                        expires=ctx.reply_expires,
-                    ),
-                }
-            ],
-        }
+    ids = [ctx.new_id("bubble") for _ in block.questions]
+    bubbles = [
+        bubble(
+            ctx,
+            question,
+            reply_buttons.reply_value(
+                question, requester=requester, row=row, buttons=ids, expires=ctx.reply_expires
+            ),
+            element_id=bid,
+        )
         for bid, question in zip(ids, block.questions, strict=True)
     ]
-    column = _column(ctx, buttons, vertical_spacing="6px")
+    column = _column(ctx, bubbles, vertical_spacing="6px")
     return [
-        _md(
-            ctx,
-            _font(FOLLOWUPS_TITLE, "grey"),
-            size=style.TEXT_NOTE,
-            icon=style.icon("chat_outlined", "grey"),
-        ),
+        {"tag": "hr", "element_id": ctx.new_id("hr")},
+        _md(ctx, _font(FOLLOWUPS_TITLE, "grey"), size=style.TEXT_NOTE),
         _column_set(ctx, [column], flex_mode="none", spacing="0px", element_id=row),
     ]
 
@@ -683,6 +896,11 @@ def _table_column(
 
 def render_table(block: TableBlock, ctx: RenderContext) -> list[dict[str, Any]]:
     """显式的 table 块 → 表格组件。名额用完（每卡 5 个）返回空列表，由调用方降级。"""
+    if ctx.mobile and len(block.columns) > MOBILE_TABLE_COLUMNS:
+        header = [c.title or c.key for c in block.columns]
+        cells = [[_cell_text(row.get(c.key)) for c in block.columns] for row in block.rows]
+        caption = [_caption(ctx, block.title)] if block.title else []
+        return [*caption, _md(ctx, records(header, cells), size=style.TEXT_BODY)]
     if not ctx.take_table():
         return []
     specs: list[Element] = []

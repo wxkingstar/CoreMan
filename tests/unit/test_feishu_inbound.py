@@ -295,10 +295,23 @@ def test_card_text_is_bounded_and_tolerates_unknown_shapes():
     assert odd.parts[0].text == ""
 
 
-def test_card_from_a_person_stays_unsupported():
+def test_card_from_a_person_is_read_by_the_worker():
+    """人发的卡片不信事件里的内容：不出 part，交给 worker 用消息接口读（与引用同一套渲染）。"""
     message = normalize_event(_card_event("user", {"title": "t"}), **KW, observe=True)
     assert message is not None
-    assert message.parts[0].type != "text"
+    assert message.parts == [] and message.reply_context["self_render"] == "om1"
+
+
+def test_forwarded_chats_stickers_and_videos_are_rendered_by_the_worker():
+    for kind in ("merge_forward", "sticker", "media", "share_chat", "location"):
+        raw = copy.deepcopy(RAW)
+        raw["event"]["message"]["message_type"] = kind
+        raw["event"]["message"]["content"] = json.dumps({"content": "Merged and Forwarded Message"})
+        message = normalize_event(raw, **KW)
+        assert message is not None and message.parts == [], kind
+        assert message.reply_context["self_render"] == "om1"
+    plain = normalize_event(copy.deepcopy(RAW), **KW)
+    assert plain is not None and "self_render" not in plain.reply_context
 
 
 def test_topic_messages_carry_their_thread():
@@ -321,3 +334,13 @@ def test_topic_choice_clicks_are_admitted():
         normalize_event(_click_event({"task_id": "topic@x", "event_key": "topic_fork"}), **KW)
         is None
     )
+
+
+def test_user_agent_is_kept_only_as_a_client_kind():
+    raw = copy.deepcopy(RAW)
+    raw["event"]["sender"]["user_agent"] = "Mozilla/5.0 (iPhone) Lark/7.30"
+    message = normalize_event(raw, **KW)
+    assert message is not None and message.reply_context["client"] == "mobile"
+    assert "user_agent" not in message.raw["event"]["sender"]
+    plain = normalize_event(copy.deepcopy(RAW), **KW)
+    assert plain is not None and "client" not in plain.reply_context

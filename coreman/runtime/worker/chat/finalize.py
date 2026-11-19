@@ -803,6 +803,7 @@ class FinalizeStage(ChatStageBase):
             task_id=question_task_id(prefix, 0),
             icon_url=await self._icon_url(ctx),
             locale=ctx.locale,
+            rich=intake.bot.platform == "feishu",
         )
 
     async def _queue_card(

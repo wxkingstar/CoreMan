@@ -104,6 +104,11 @@ async def previous_speaker(session: AsyncSession, info: sessions.SessionInfo) ->
     )
 
 
+MOBILE_NOTE = (
+    "- 提问人这条消息是在手机上发的：结论放最前，段落短，表格不超过 3 列，长内容放进可折叠段落。"
+)
+
+
 class OpenStage(ChatStageBase):
     """开流：同会话串行、会话与提示词、task_streams 与超时看护。"""
 
@@ -377,6 +382,14 @@ class OpenStage(ChatStageBase):
             if work_note:
                 ctx.turn_notes.append(work_note)
                 await work.mark_started(session, ctx, intake)
+        inbound_context = intake.inbound.reply_context or {}
+        if (
+            intake.bot.platform == "feishu"
+            and intake.chat_type == "single"
+            and inbound_context.get("client") == "mobile"
+        ):
+            # 私聊里提问人在手机上：本轮提示，不进 system prompt（设备每轮都可能变）。
+            ctx.turn_notes.append(MOBILE_NOTE)
         if ctx.task.payload.get("stopped_previous"):
             from coreman.core.prompting.defaults import STOPPED_PREVIOUS_NOTE
 

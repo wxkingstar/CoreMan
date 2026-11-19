@@ -149,7 +149,7 @@ class ReplyFiles:
                     notes.append(f"📎 {name}（不在工作目录里，发不出来）")
                     continue
                 try:
-                    key, size = await asyncio.wait_for(self._upload(rel, name), FILE_SECONDS)
+                    key, size, media = await asyncio.wait_for(self._upload(rel, name), FILE_SECONDS)
                 except _TooLarge:
                     notes.append(f"📎 {name}（超过 30MB，飞书发不了，可以让我压缩或拆分）")
                     continue
@@ -164,9 +164,12 @@ class ReplyFiles:
                     kind="send",
                     dedupe_key=f"{task_id}:file:{index}",
                     target={"chat_id": chat_id, "message_id": reply_to},
-                    payload={"_file": {"file_key": key, "name": name, "size": size}},
+                    payload={
+                        "_file": {"file_key": key, "name": name, "size": size, "media": media}
+                    },
                 )
-                notes.append(f"📎 **{name}**（已作为文件发送，见下方）")
+                what = {"video": "视频", "audio": "音频"}.get(media or "", "文件")
+                notes.append(f"📎 **{name}**（已作为{what}发送，见下方）")
         finally:
             if self._client is not None:
                 await self._client.aclose()
@@ -218,23 +221,79 @@ class ReplyFiles:
             raise ValueError("空文件")
         return bytes(data)
 
-    async def _upload(self, rel: str, name: str) -> tuple[str, int]:
+    async def _upload(self, rel: str, name: str) -> tuple[str, int, str | None]:
+        """返回 (file_key, 字节数, video|audio|None)：MP4、OPUS 读得出时长的，卡片里直接播放。"""
         data = await self._read(rel)
         if self._client is None:
             creds = decrypt_json(self.cipher, self.bot.credentials_enc, CREDENTIALS_AAD)
             self._client = FeishuClient(creds.get("app_id", ""), creds.get("app_secret", ""))
         ext = PurePosixPath(name).suffix.lstrip(".").lower()
+        form: dict[str, str] = {"file_type": _FILE_TYPES.get(ext, "stream"), "file_name": name}
+        media = MEDIA_KINDS.get(ext)
+        duration = media[1](data) if media else None
+        if duration:
+            form["duration"] = str(duration)
         result = await self._client.call(
             "POST",
             "/open-apis/im/v1/files",
-            data={"file_type": _FILE_TYPES.get(ext, "stream"), "file_name": name},
+            data=form,
             files={"file": (name, data, "application/octet-stream")},
         )
         key = (result.get("data") or {}).get("file_key")
         if not isinstance(key, str) or not re.fullmatch(r"file_[A-Za-z0-9_-]{1,240}", key):
             raise FeishuError(-2, "invalid file key")
-        return key, len(data)
+        return key, len(data), (media[0] if media and duration else None)
 
 
 class _TooLarge(Exception):
     pass
+
+
+def mp4_duration_ms(data: bytes) -> int | None:
+    """MP4 的时长（毫秒）：moov/mvhd 里的 duration ÷ timescale。认不出返回 None。"""
+
+    def boxes(buf: bytes, start: int, end: int) -> list[tuple[bytes, int, int]]:
+        out, pos = [], start
+        while pos + 8 <= end:
+            size = int.from_bytes(buf[pos : pos + 4], "big")
+            kind = buf[pos + 4 : pos + 8]
+            header = 8
+            if size == 1 and pos + 16 <= end:
+                size, header = int.from_bytes(buf[pos + 8 : pos + 16], "big"), 16
+            elif size == 0:
+                size = end - pos
+            if size < header or pos + size > end:
+                break
+            out.append((kind, pos + header, pos + size))
+            pos += size
+        return out
+
+    for kind, body, end in boxes(data, 0, len(data)):
+        if kind != b"moov":
+            continue
+        for inner, start, stop in boxes(data, body, end):
+            if inner != b"mvhd" or stop - start < 32:
+                continue
+            if data[start] == 1:
+                scale = int.from_bytes(data[start + 20 : start + 24], "big")
+                length = int.from_bytes(data[start + 24 : start + 32], "big")
+            else:
+                scale = int.from_bytes(data[start + 12 : start + 16], "big")
+                length = int.from_bytes(data[start + 16 : start + 20], "big")
+            return length * 1000 // scale if scale else None
+    return None
+
+
+def opus_duration_ms(data: bytes) -> int | None:
+    """Ogg Opus 的时长（毫秒）：末页 granule position 减 OpusHead 的 pre-skip，按 48kHz 算。"""
+    head = data.find(b"OpusHead")
+    last = data.rfind(b"OggS")
+    if head < 0 or last < 0 or last + 14 > len(data) or head + 12 > len(data):
+        return None
+    granule = int.from_bytes(data[last + 6 : last + 14], "little")
+    pre_skip = int.from_bytes(data[head + 10 : head + 12], "little")
+    return max(0, granule - pre_skip) * 1000 // 48000 or None
+
+
+# 能放进卡片直接播放的格式：飞书视频组件只认 MP4，音频组件只认 OPUS。
+MEDIA_KINDS = {"mp4": ("video", mp4_duration_ms), "opus": ("audio", opus_duration_ms)}

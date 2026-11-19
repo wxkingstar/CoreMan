@@ -695,7 +695,9 @@ def test_image_urls_match_render_lookups() -> None:
     urls = image_urls(src)
     assert len(urls) == 2
     out = render(src, images={u: f"img_v3_{i}" for i, u in enumerate(urls)})
-    assert tags(out) == ["img", "img"]
+    # 相邻两段图片合成一组多图排版。
+    assert tags(out) == ["img_combination"]
+    assert [i["img_key"] for i in out[0]["img_list"]] == ["img_v3_0", "img_v3_1"]
 
 
 # ---------------------------------------------------------------- 性质：任意输入都不崩

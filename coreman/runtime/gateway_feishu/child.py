@@ -224,6 +224,7 @@ async def run_child(bot_id: uuid.UUID, instance_id: str, generation: int) -> Non
                 info.observe = current.group_observe != "off"
                 info.dispatch_live = _dispatch_live(current)
                 transport.rich_cards = current.rich_cards
+                transport.bot_name = current.name
                 more = await transport.round()  # 租约围栏在这一轮开头查一次
             except LeaseLost:
                 raise

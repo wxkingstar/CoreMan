@@ -426,6 +426,83 @@ class ActionsBlock(_Model):
         return {"buttons": value} if isinstance(value, list) else value
 
 
+class Source(_Model):
+    title: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=1, max_length=2000)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class SourcesBlock(_Model):
+    """引用来源：回答依据的网页、文档，编号列在回答末尾，点开就是原文。"""
+
+    items: list[Source] = Field(min_length=1, max_length=10)
+    title: str | None = Field(default=None, max_length=40)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bare_list(cls, value: Any) -> Any:
+        return {"items": value} if isinstance(value, list) else value
+
+
+class DetailsBlock(_Model):
+    """可折叠的段落：长代码、长日志、附录，默认收起，点开看全文。"""
+
+    title: str = Field(min_length=1, max_length=80)
+    text: str = Field(min_length=1, max_length=60_000)
+    expanded: bool = False
+
+
+FormFieldType = Literal["text", "textarea", "number", "date", "select", "multi_select"]
+
+
+class FormField(_Model):
+    name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,19}$")
+    label: str = Field(min_length=1, max_length=40)
+    type: FormFieldType = "text"
+    options: list[str] = Field(default_factory=list, max_length=20)
+    required: bool = False
+    placeholder: str | None = Field(default=None, max_length=60)
+
+    @model_validator(mode="after")
+    def _options(self) -> FormField:
+        if self.type in ("select", "multi_select"):
+            if not self.options or any(not o.strip() or len(o) > 40 for o in self.options):
+                raise ValueError("下拉选项 1–20 个，每个 1–40 个字")
+        elif self.options:
+            raise ValueError("只有下拉字段才有 options")
+        return self
+
+
+class FormBlock(_Model):
+    """模型向提问人要几项结构化信息：提交后按「字段：值」作为提问人的下一句话发回来。"""
+
+    fields: list[FormField] = Field(min_length=1, max_length=8)
+    title: str | None = Field(default=None, max_length=40)
+    submit: str = Field(default="提交", min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def _unique(self) -> FormBlock:
+        if len({f.name for f in self.fields}) != len(self.fields):
+            raise ValueError("字段 name 不能重复")
+        return self
+
+
+class RecommendBlock(_Model):
+    """回答里的推荐方案：高亮的框写结论和理由，下面灰字列其他办法；提问人可以点「就按这个办」。"""
+
+    title: str = Field(min_length=1, max_length=80)
+    reason: str | None = Field(default=None, max_length=300)
+    alternatives: list[str] = Field(default_factory=list, max_length=5)
+    action: str | None = Field(default="就按这个办", max_length=10)
+
+    @field_validator("alternatives")
+    @classmethod
+    def _short(cls, value: list[str]) -> list[str]:
+        if any(len(v) > 120 for v in value):
+            raise ValueError("其他办法每条最多 120 字")
+        return [v.strip() for v in value if v.strip()]
+
+
 class FollowupsBlock(_Model):
     """建议追问：提问人接下来很可能问的 1–3 句话，点一下就作为他的下一句发出。
 
@@ -504,6 +581,10 @@ BLOCK_MODELS: dict[str, type[_Model]] = {
     "note": NoteBlock,
     "actions": ActionsBlock,
     "followups": FollowupsBlock,
+    "recommend": RecommendBlock,
+    "sources": SourcesBlock,
+    "details": DetailsBlock,
+    "form": FormBlock,
     "raw": RawBlock,
 }
 BLOCK_KINDS: frozenset[str] = frozenset(BLOCK_MODELS)

@@ -11,7 +11,7 @@ from typing import Any
 from coreman.core.chat import busy_choice, stream_stop, topics
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
-from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
+from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_form, parse_reply
 from coreman.core.personal_credentials.policy import parse_card_task_id, sealed_aad
 from coreman.core.wecom.cards import parse_task_id
 from coreman.core.wecom.messages import (
@@ -22,7 +22,6 @@ from coreman.core.wecom.messages import (
     Part,
     Sender,
     TextPart,
-    VideoPart,
 )
 
 _RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
@@ -106,7 +105,7 @@ def _reply_click(
                 "message_id": message_id,
                 "row": click.row,
                 "buttons": list(click.buttons),
-                "label": click.text,
+                "label": click.label or click.text,
                 "requester": click.requester,
                 **({"expires": click.expires} if click.expires is not None else {}),
             },
@@ -160,7 +159,7 @@ def _normalize_event(
         value = action.get("value") or {}
         if not isinstance(value, dict):
             return None
-        click = parse_reply(value)
+        click = parse_reply(value) or parse_form(value, action.get("form_value"))
         if click is not None:
             return _reply_click(raw, click, bot_id=bot_id, context=context)
         task_id = str(value.get("task_id") or "")
@@ -335,8 +334,9 @@ def _normalize_event(
         parts.append(
             AudioPart(ref={"message_id": mid, "file_key": str(key), "type": "file"} if key else {})
         )
-    else:
-        parts.append(VideoPart(ref={}))  # 公共 worker 的明确“不支持”回复，不送模型猜测。
+    # 其余类型（合并转发、用户发的卡片、表情包、视频、名片、位置、日程、任务、投票等）：这里
+    # 不解析，worker 用「获取指定消息的内容」接口把它渲染成文字交给模型（与引用同一套渲染）。
+    self_render = not parts and kind not in {"text", "post", "image", "file", "audio"}
     return InboundMessage(
         platform="feishu",
         bot_id=bot_id,
@@ -362,9 +362,22 @@ def _normalize_event(
             # 话题里的消息才有：会话按话题分开（core/chat/topics.py）。
             "thread_id": message.get("thread_id"),
             "create_time": message.get("create_time"),
+            **({"self_render": mid} if self_render else {}),
+            # 提问人从手机还是电脑发的（需要 im:user_agent:read；只留分类，不存原始 UA）。
+            **({"client": client} if (client := client_kind(sender.get("user_agent"))) else {}),
         },
         raw=raw,
     )
+
+
+_MOBILE_UA = re.compile(r"Android|iPhone|iPad|iOS|HarmonyOS|OpenHarmony|Mobile", re.IGNORECASE)
+
+
+def client_kind(user_agent: Any) -> str | None:
+    """飞书事件里的 user_agent → mobile / desktop；没有（缺权限）返回 None。"""
+    if not isinstance(user_agent, str) or not user_agent.strip():
+        return None
+    return "mobile" if _MOBILE_UA.search(user_agent) else "desktop"
 
 
 def normalize_event(raw: dict[str, Any], **kwargs: Any) -> InboundMessage | None:
@@ -377,6 +390,10 @@ def normalize_event(raw: dict[str, Any], **kwargs: Any) -> InboundMessage | None
             # 回调 token 只属于传输认证，持久审计不保留可复用凭据。
             safe_header = {k: v for k, v in (raw.get("header") or {}).items() if k != "token"}
             safe_event = {k: v for k, v in (raw.get("event") or {}).items() if k != "token"}
+            sender = safe_event.get("sender")
+            if isinstance(sender, dict) and "user_agent" in sender:
+                # 只留手机/电脑的分类（reply_context.client），原始 UA 不落库。
+                safe_event["sender"] = {k: v for k, v in sender.items() if k != "user_agent"}
             if (message.card_action or {}).get("card_type") == "credential":
                 safe_event["action"] = {**(safe_event.get("action") or {}), "form_value": {}}
             message.raw = {**raw, "header": safe_header, "event": safe_event}
