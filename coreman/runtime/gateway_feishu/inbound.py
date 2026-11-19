@@ -363,9 +363,21 @@ def _normalize_event(
             "thread_id": message.get("thread_id"),
             "create_time": message.get("create_time"),
             **({"self_render": mid} if self_render else {}),
+            # 提问人从手机还是电脑发的（需要 im:user_agent:read；只留分类，不存原始 UA）。
+            **({"client": client} if (client := client_kind(sender.get("user_agent"))) else {}),
         },
         raw=raw,
     )
+
+
+_MOBILE_UA = re.compile(r"Android|iPhone|iPad|iOS|HarmonyOS|OpenHarmony|Mobile", re.IGNORECASE)
+
+
+def client_kind(user_agent: Any) -> str | None:
+    """飞书事件里的 user_agent → mobile / desktop；没有（缺权限）返回 None。"""
+    if not isinstance(user_agent, str) or not user_agent.strip():
+        return None
+    return "mobile" if _MOBILE_UA.search(user_agent) else "desktop"
 
 
 def normalize_event(raw: dict[str, Any], **kwargs: Any) -> InboundMessage | None:
@@ -378,6 +390,10 @@ def normalize_event(raw: dict[str, Any], **kwargs: Any) -> InboundMessage | None
             # 回调 token 只属于传输认证，持久审计不保留可复用凭据。
             safe_header = {k: v for k, v in (raw.get("header") or {}).items() if k != "token"}
             safe_event = {k: v for k, v in (raw.get("event") or {}).items() if k != "token"}
+            sender = safe_event.get("sender")
+            if isinstance(sender, dict) and "user_agent" in sender:
+                # 只留手机/电脑的分类（reply_context.client），原始 UA 不落库。
+                safe_event["sender"] = {k: v for k, v in sender.items() if k != "user_agent"}
             if (message.card_action or {}).get("card_type") == "credential":
                 safe_event["action"] = {**(safe_event.get("action") or {}), "form_value": {}}
             message.raw = {**raw, "header": safe_header, "event": safe_event}

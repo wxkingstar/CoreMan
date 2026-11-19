@@ -394,7 +394,10 @@ class _Builder:
         self.units.extend(_markdown_units(text, self.ctx))
 
     def add_half(self, unit: _Unit) -> None:
-        """半宽块：攒到两个就并排成一行；落单的按全宽放。"""
+        """半宽块：攒到两个就并排成一行；落单的按全宽放。手机上不并排。"""
+        if self.ctx.mobile:
+            self.add(unit)
+            return
         if self._half is None:
             self._half = unit
             return
@@ -581,6 +584,7 @@ def compile_reply(
     summary: str | None = None,
     requester: str | None = None,
     reply_expires: int | None = None,
+    mobile: bool = False,
 ) -> Compiled:
     """一条回复 → 若干张卡。`prefix` 是放在主卡最前面的组件（思考面板）。
 
@@ -594,6 +598,7 @@ def compile_reply(
         people=people or {},
         requester=requester or None,
         reply_expires=reply_expires,
+        mobile=mobile,
     )
     try:
         return _compile(text, prefix, ctx, final, summary)

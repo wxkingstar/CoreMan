@@ -885,6 +885,10 @@ class _Blocks:
 
     def table(self, tok: Token, inner: list[Token]) -> None:
         header, aligns, rows = _table_cells(inner)
+        if self.ctx.mobile and len(header) > MOBILE_TABLE_COLUMNS:
+            # 手机上宽表格要左右拖着看：改成一条条记录。
+            self.ready(records(header, rows))
+            return
         numeric = [_numeric([row[c] for row in rows]) for c in range(len(header))]
         wanted = (
             len(rows) > _MD_TABLE_ROWS
@@ -965,6 +969,28 @@ class _Blocks:
             "corner_radius": style.RADIUS,
             "img_list": [{"img_key": key} for _, key in chunk],
         }
+
+
+# 手机上超过这么多列的表格改成一条条记录。
+MOBILE_TABLE_COLUMNS = 3
+MOBILE_RECORDS = 30
+
+
+def records(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """表格 → 记录：每行第一列加粗作标题，其余列写成「列名：值」，空值省略。"""
+    out: list[str] = []
+    for row in rows[:MOBILE_RECORDS]:
+        cells = [str(c).strip() for c in row]
+        head = cells[0] if cells and cells[0] else "—"
+        pairs = [
+            f"{_plain(str(header[i]))}：{cells[i]}"
+            for i in range(1, min(len(header), len(cells)))
+            if cells[i]
+        ]
+        out.append(f"**{head}**" + ("\n" + " · ".join(pairs) if pairs else ""))
+    if len(rows) > MOBILE_RECORDS:
+        out.append(f"<font color='grey'>还有 {len(rows) - MOBILE_RECORDS} 行未列出</font>")
+    return "\n\n".join(out)
 
 
 def render_markdown(md: str, ctx: RenderContext) -> list[dict[str, Any]]:

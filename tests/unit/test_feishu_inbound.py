@@ -334,3 +334,13 @@ def test_topic_choice_clicks_are_admitted():
         normalize_event(_click_event({"task_id": "topic@x", "event_key": "topic_fork"}), **KW)
         is None
     )
+
+
+def test_user_agent_is_kept_only_as_a_client_kind():
+    raw = copy.deepcopy(RAW)
+    raw["event"]["sender"]["user_agent"] = "Mozilla/5.0 (iPhone) Lark/7.30"
+    message = normalize_event(raw, **KW)
+    assert message is not None and message.reply_context["client"] == "mobile"
+    assert "user_agent" not in message.raw["event"]["sender"]
+    plain = normalize_event(copy.deepcopy(RAW), **KW)
+    assert plain is not None and "client" not in plain.reply_context

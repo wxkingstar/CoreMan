@@ -563,6 +563,7 @@ class FeishuTransport:
                 heading=heading,
                 requester=requester if isinstance(requester, str) and requester else None,
                 plan=row.plan,
+                mobile=_mobile_private(row),
             )
             card, summary = compiled.cards[0], compiled.summary
         else:
@@ -801,6 +802,7 @@ class FeishuTransport:
         heading: str,
         requester: str | None = None,
         plan: Sequence[dict[str, str]] = (),
+        mobile: bool = False,
     ) -> Compiled:
         """终稿编译成若干张卡；关掉富卡片或编译自检不过时用简化卡。"""
         prefix = _prefix(thinking, session_url, heading, plan)
@@ -819,6 +821,7 @@ class FeishuTransport:
                 people=people,
                 requester=requester,
                 reply_expires=int(time.time()) + FOLLOWUPS_TTL_SECONDS,
+                mobile=mobile,
             )
             if not compiled.problems:
                 return compiled
@@ -1313,6 +1316,12 @@ def _card_markdown(card: dict[str, Any]) -> str:
         for e in (card.get("body") or {}).get("elements") or []
         if e.get("tag") == "markdown" and e.get("element_id") != "thinking"
     )
+
+
+def _mobile_private(row: TaskStream) -> bool:
+    """私聊、提问人在手机上：终稿按手机排。群里读的人设备不一，不按提问人的设备排。"""
+    context = row.reply_context
+    return context.get("chat_type") == "single" and context.get("client") == "mobile"
 
 
 def _stop_task(row: TaskStream) -> int | None:

@@ -118,3 +118,48 @@ def test_adjacent_image_paragraphs_become_one_gallery() -> None:
     assert tags == ["markdown", "img_combination", "markdown", "img"]
     assert [i["img_key"] for i in out[1]["img_list"]] == ["img_v3_a", "img_v3_b", "img_v3_c"]
     assert out[1]["combination_mode"] == "triple"
+
+
+WIDE = (
+    "| 订单 | 金额 | 状态 | 渠道 |\n|---|--:|---|---|\n"
+    "| A1 | 12 | 已发货 | 官网 |\n| A2 | 30 | 待付款 |  |"
+)
+
+
+def test_mobile_turns_wide_tables_into_records_and_stacks_half_blocks() -> None:
+    desktop = compile_reply(WIDE)
+    assert "table" in _tags(desktop.cards[0])
+    phone = compile_reply(WIDE, mobile=True)
+    text = json.dumps(phone.cards[0], ensure_ascii=False)
+    assert "table" not in _tags(phone.cards[0])
+    assert "**A1**\\n金额：12 · 状态：已发货 · 渠道：官网" in text
+    assert "**A2**\\n金额：30 · 状态：待付款" in text
+    narrow = compile_reply(
+        "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |\n| 7 | 8 |\n| 9 | 0 |\n| x | y |",
+        mobile=True,
+    )
+    assert "records" not in json.dumps(narrow.cards, ensure_ascii=False)
+    block = (
+        '```card:table\n{"columns": [{"key": "a", "title": "名"}, {"key": "b"}, {"key": "c"}, '
+        '{"key": "d"}], "rows": [{"a": "x", "b": 1, "c": 2, "d": 3}]}\n```'
+    )
+    assert "**x**\\nb：1 · c：2 · d：3" in json.dumps(
+        compile_reply(block, mobile=True).cards[0], ensure_ascii=False
+    )
+    halves = (
+        '```card:callout\n{"level": "info", "text": "甲", "size": "half"}\n```\n\n'
+        '```card:callout\n{"level": "info", "text": "乙", "size": "half"}\n```'
+    )
+    assert "column_set" in _tags(compile_reply(halves).cards[0])
+    assert "column_set" not in _tags(compile_reply(halves, mobile=True).cards[0])
+
+
+def test_client_kind_from_user_agent() -> None:
+    from coreman.runtime.gateway_feishu.inbound import client_kind
+
+    assert client_kind(None) is None and client_kind("") is None
+    assert client_kind("Mozilla/5.0 (Macintosh; Intel Mac OS X 13_2_1) Lark/6.7.5") == "desktop"
+    assert (
+        client_kind("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Lark/7.30") == "mobile"
+    )
+    assert client_kind("Mozilla/5.0 (Linux; Android 14) Feishu/7.30") == "mobile"

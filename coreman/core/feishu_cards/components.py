@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from coreman.core.feishu_cards import reply_buttons, sanitize, style
 from coreman.core.feishu_cards.context import RenderContext
-from coreman.core.feishu_cards.markdown import normalize
+from coreman.core.feishu_cards.markdown import MOBILE_TABLE_COLUMNS, normalize, records
 from coreman.core.richtext.schema import (
     ActionsBlock,
     CalloutBlock,
@@ -820,6 +820,11 @@ def _table_column(
 
 def render_table(block: TableBlock, ctx: RenderContext) -> list[dict[str, Any]]:
     """显式的 table 块 → 表格组件。名额用完（每卡 5 个）返回空列表，由调用方降级。"""
+    if ctx.mobile and len(block.columns) > MOBILE_TABLE_COLUMNS:
+        header = [c.title or c.key for c in block.columns]
+        cells = [[_cell_text(row.get(c.key)) for c in block.columns] for row in block.rows]
+        caption = [_caption(ctx, block.title)] if block.title else []
+        return [*caption, _md(ctx, records(header, cells), size=style.TEXT_BODY)]
     if not ctx.take_table():
         return []
     specs: list[Element] = []

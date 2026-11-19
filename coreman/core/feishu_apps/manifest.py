@@ -34,6 +34,8 @@ TENANT_SCOPES: tuple[str, ...] = (
     "im:message.reactions:write_only",
     # 私聊里「新会话」分割线并清屏（系统消息）；没有这个权限时重置回执退回文字。
     "im:message:send_sys_msg",
+    # 私聊里按提问人是手机还是电脑调整排版（消息事件里的 user_agent）。
+    "im:user_agent:read",
     "im:resource",
     "im:chat:read",
     # 机器人协作确认成员是否在群里。
