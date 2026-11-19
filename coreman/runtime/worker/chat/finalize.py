@@ -322,9 +322,14 @@ class FinalizeStage(ChatStageBase):
                     or isinstance(out.error, RelayError)
                 )
             ):
-                status, code, detail = provider_failure(
-                    str(out.error or verdict.error_message or "")
-                )
+                # Relay errors can carry the provider's quota notice only in the
+                # reply body. Use the same recognition as the relay switch card.
+                if verdict.log_status == "error" and is_rate_limited(verdict.final_text):
+                    status, code, detail = "down", "quota_limited", "已触发订阅额度限制"
+                else:
+                    status, code, detail = provider_failure(
+                        str(out.error or verdict.error_message or "")
+                    )
                 observation = HealthObservation(
                     status=status,
                     error_code=code,
