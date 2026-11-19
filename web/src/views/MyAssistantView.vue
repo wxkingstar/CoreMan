@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantAbsent, type AssistantOverview } from '@/api/myAssistant'
@@ -40,6 +40,22 @@ async function shift(state: 'on' | 'off' | 'auto') {
   } catch (e) { ElMessage.error(errorMessage(e)) }
   finally { switching.value = false }
 }
+/** 从现在开始：清掉试用期间攒下的事项，历史对话留着做背景。先确认；清完重新取概览、刷新各分区。 */
+const resetting = ref(false), resetKey = ref(0)
+async function startFresh() {
+  if (resetting.value) return
+  try {
+    await ElMessageBox.confirm(t('assistant.page.resetConfirm'), t('assistant.page.resetTitle'), { type: 'warning' })
+  } catch { return }
+  resetting.value = true
+  try {
+    const done = await myAssistant.reset()
+    ElMessage.success(t('assistant.page.resetDone', { n: done.followups, count: done.jobs, total: done.approvals, value: done.inbox }))
+    resetKey.value += 1
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+  finally { resetting.value = false }
+}
 onMounted(load)
 defineExpose({ tab, load })
 </script>
@@ -61,6 +77,16 @@ defineExpose({ tab, load })
         @click="load"
       >
         {{ t('assistant.page.refresh') }}
+      </el-button>
+      <el-button
+        v-if="mine?.state === 'active'"
+        type="warning"
+        plain
+        :loading="resetting"
+        data-test="assistant-reset"
+        @click="startFresh"
+      >
+        {{ t('assistant.page.reset') }}
       </el-button>
     </div>
     <LoadState
@@ -201,7 +227,10 @@ defineExpose({ tab, load })
         :title="t('assistant.page.locked')"
       />
       <!-- lazy：没点开的分区不取数。 -->
-      <el-tabs v-model="tab">
+      <el-tabs
+        :key="resetKey"
+        v-model="tab"
+      >
         <el-tab-pane
           :label="t('assistant.page.tabs.board')"
           name="board"

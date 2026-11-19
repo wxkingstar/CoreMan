@@ -4,6 +4,10 @@ export const assistantZh = {
   page: {
     intro: '以你的飞书身份工作的个人助理。这里的内容只有你本人看得到，管理员也看不到。',
     refresh: '刷新',
+    reset: '从现在开始',
+    resetTitle: '从现在开始正式启用',
+    resetConfirm: '会清掉试用期间攒下的事项：未结的待跟进记为不再需要，进行中的子任务与调度取消，待批的审批单撤回，还没交给助理的消息作废。历史对话、知识库、设置与能力缺口都保留，助理会把以前的对话当背景。清掉的事项找不回来，确定吗？',
+    resetDone: '已从现在开始：关闭待跟进 {n} 条，取消子任务 {count} 个，撤回审批单 {total} 张，作废未交回的消息 {value} 条',
     story: '用一个故事看懂它',
     tabs: { board: '总表', jobs: '正在跑', followups: '待跟进', recent: '最近落地', notes: '知识库', settings: '设置' },
     locked: '加密保存的个人内容已不可读取（数据密钥已销毁），下面只显示编号、状态与时间。',
@@ -195,6 +199,10 @@ export const assistantEn: typeof assistantZh = {
   page: {
     intro: 'A personal assistant that works as you in Feishu. Only you can see what is on this page; administrators cannot.',
     refresh: 'Refresh',
+    reset: 'Start fresh',
+    resetTitle: 'Start using it for real from now on',
+    resetConfirm: 'This clears what piled up during the trial: open follow-ups are dropped, running subtasks and dispatches are cancelled, pending approvals are withdrawn, and messages not yet handed to the assistant are discarded. Past conversations, the knowledge base, settings and capability gaps are kept, and the assistant treats past conversations as background. Cleared items cannot be restored. Continue?',
+    resetDone: 'Started fresh: dropped {n} follow-ups, cancelled {count} subtasks, withdrew {total} approvals, discarded {value} pending messages',
     story: 'See how it works in one story (Chinese)',
     tabs: { board: 'Board', jobs: 'Running', followups: 'Follow-ups', recent: 'Recently settled', notes: 'Knowledge base', settings: 'Settings' },
     locked: 'Your encrypted personal content can no longer be read (the data key was destroyed). Only numbers, states and times are shown below.',
@@ -386,6 +394,10 @@ export const assistantJa: typeof assistantZh = {
   page: {
     intro: 'あなたの飛書アカウントとして働く個人アシスタントです。このページの内容は本人だけが閲覧でき、管理者にも見えません。',
     refresh: '更新',
+    reset: '今から始める',
+    resetTitle: '今から正式に使い始める',
+    resetConfirm: '試用期間中にたまった項目をクリアします：未完了のフォローアップは不要として閉じ、実行中のサブタスクと依頼は取り消し、承認待ちの申請は取り下げ、まだアシスタントに渡していないメッセージは破棄します。過去の会話、ナレッジベース、設定、能力の不足は残り、アシスタントは過去の会話を背景として扱います。クリアした項目は元に戻せません。続けますか？',
+    resetDone: '今から始めました：フォローアップ {n} 件を閉じ、サブタスク {count} 件を取り消し、承認 {total} 件を取り下げ、未処理のメッセージ {value} 件を破棄しました',
     story: 'ストーリーで仕組みを見る（中国語）',
     tabs: { board: '一覧', jobs: '実行中', followups: 'フォローアップ', recent: '最近の結果', notes: 'ナレッジベース', settings: '設定' },
     locked: '暗号化された個人データは読み取れなくなりました（データ鍵は破棄済み）。以下は番号・状態・時刻のみ表示します。',

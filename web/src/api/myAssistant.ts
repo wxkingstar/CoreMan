@@ -288,6 +288,7 @@ export const myAssistant = {
   /** 重新生成口吻页：冷启动做完之后才能用，每天至多 3 次。 */
   regenerateVoice: () => call<{ queued: boolean; left_today: number }>(http.post(`${root}/voice/regenerate`, undefined, SLOW)),
   /** 停用不可撤销：调用前必须已经让所有者二次确认。 */
+  reset: () => call<AssistantReset>(http.post(`${root}/reset`, { confirm: true })),
   deprovision: () => call<{ state: string }>(http.post(`${root}/deprovision`, { confirm: true })),
   accessLog: (before?: number) => call<AccessPage>(http.get(`${root}/access-log`, { params: before ? { before } : {} })),
   /** `dryRun` 为真只出清单；为假时必须带上预览给的 `expect`。 */
@@ -309,4 +310,13 @@ export const myAssistant = {
       throw new ApiError(status, status, err.message ?? '')
     }
   },
+}
+
+/** 「从现在开始」各清了多少。 */
+export interface AssistantReset {
+  followups: number
+  jobs: number
+  approvals: number
+  inbox: number
+  reports: number
 }

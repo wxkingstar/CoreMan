@@ -1,11 +1,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessage } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { overview: vi.fn(), shift: vi.fn() },
+  myAssistant: { overview: vi.fn(), shift: vi.fn(), reset: vi.fn() },
 }))
 // 各分区有自己的用例，这里换成只带标记的替身：壳只管概览、空状态与标签页。
 vi.mock('@/components/assistant/AssistantBoard.vue', () => ({ default: { template: '<div data-test="pane-board" />' } }))
@@ -168,6 +168,29 @@ describe('My assistant page', () => {
     const wrapper = render(); await flushPromises()
     expect(wrapper.find('[data-test="shift-on"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="shift-off"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('starts fresh after confirming, reports what was cleared and reloads', async () => {
+    vi.mocked(myAssistant.reset).mockReset().mockResolvedValue({ followups: 5, jobs: 2, approvals: 1, inbox: 7, reports: 0 })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+    const success = vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
+    const wrapper = render(); await flushPromises()
+    // 取消确认不发请求。
+    await wrapper.get('[data-test="assistant-reset"]').trigger('click'); await flushPromises()
+    expect(myAssistant.reset).not.toHaveBeenCalled()
+    confirm.mockResolvedValueOnce('confirm' as never)
+    await wrapper.get('[data-test="assistant-reset"]').trigger('click'); await flushPromises()
+    expect(myAssistant.reset).toHaveBeenCalledTimes(1)
+    expect(success).toHaveBeenCalledWith(t('assistant.page.resetDone', { n: 5, count: 2, total: 1, value: 7 }))
+    expect(myAssistant.overview).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('offers no fresh start while the assistant is not active', async () => {
+    vi.mocked(myAssistant.overview).mockResolvedValue({ ...overview, state: 'provisioning' })
+    const wrapper = render(); await flushPromises()
+    expect(wrapper.find('[data-test="assistant-reset"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
