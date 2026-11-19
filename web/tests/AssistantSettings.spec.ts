@@ -4,13 +4,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { settings: vi.fn(), saveSettings: vi.fn(), deprovision: vi.fn(), changeMessageRange: vi.fn() },
+  myAssistant: { settings: vi.fn(), saveSettings: vi.fn(), deprovision: vi.fn(), changeMessageRange: vi.fn(), chatChoices: vi.fn() },
 }))
 
 import { myAssistant, type AssistantPrefs } from '@/api/myAssistant'
+import AssistantChatPicker from '@/components/assistant/AssistantChatPicker.vue'
 import AssistantSettings from '@/components/assistant/AssistantSettings.vue'
 import { i18n } from '@/i18n'
-import { lines, toForm, toPatch, validate, validTimezone, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
+import { toForm, toPatch, validate, validTimezone, type PrefsField, type PrefsForm } from '@/utils/assistantSettings'
 
 const t = i18n.global.t
 const prefs: AssistantPrefs = {
@@ -35,8 +36,8 @@ const CASES: [Partial<PrefsForm>, Partial<Record<PrefsField, string>>][] = [
   [{ workdays: [] }, { workdays: 'workdays' }],
   // 全天候时工作时段与工作日置灰，不校验。
   [{ always_on: true, work_start: '20:00', workdays: [] }, {}],
-  [{ focus_chats: 'oc_a\nnot-a-chat' }, { focus_chats: 'chatId' }],
-  [{ focus_chats: 'oc_1\noc_2\noc_3\noc_4\noc_5\noc_6' }, { focus_chats: 'focusTooMany' }],
+  [{ focus_chats: ['oc_a', 'not-a-chat'] }, { focus_chats: 'chatId' }],
+  [{ focus_chats: ['oc_1', 'oc_2', 'oc_3', 'oc_4', 'oc_5', 'oc_6'] }, { focus_chats: 'focusTooMany' }],
   [{ ignored_chats: ['oc_b', 'oc_a'] }, { ignored_chats: 'chatInBoth' }],
   [{ ignored_chats: Array.from({ length: 201 }, (_, i) => `oc_${i}`) }, { ignored_chats: 'ignoredTooMany' }],
   // 只托管名单时：重点群必须在名单里；不托管的名单不再校验（切回去时还在）。
@@ -63,11 +64,10 @@ describe('settings form rules', () => {
     expect(validate({ ...toForm(prefs), ...change }, prefs)).toEqual(expected)
   })
 
-  it('knows time zones and splits chat lists', () => {
+  it('knows time zones and copies chat lists', () => {
     expect(validTimezone('UTC')).toBe(true)
     expect(validTimezone('Mars/Olympus')).toBe(false)
-    expect(lines(' oc_a \n\noc_b\noc_a\n')).toEqual(['oc_a', 'oc_b'])
-    expect(toForm({ ...prefs, daily_turn_budget: 80 })).toMatchObject({ follow_platform: false, daily_turn_budget: 80, focus_chats: 'oc_a' })
+    expect(toForm({ ...prefs, daily_turn_budget: 80 })).toMatchObject({ follow_platform: false, daily_turn_budget: 80, focus_chats: ['oc_a'] })
     expect(toForm(prefs)).toMatchObject({ follow_platform: true, daily_turn_budget: 200 })
   })
 
@@ -84,7 +84,7 @@ describe('settings form rules', () => {
 
   it('builds a patch with only what changed', () => {
     expect(toPatch(toForm(prefs), prefs)).toEqual({})
-    expect(toPatch({ ...toForm(prefs), timezone: 'UTC', workdays: [5, 1], focus_chats: 'oc_a\noc_b' }, prefs)).toEqual({
+    expect(toPatch({ ...toForm(prefs), timezone: 'UTC', workdays: [5, 1], focus_chats: ['oc_a', 'oc_b', 'oc_a'] }, prefs)).toEqual({
       timezone: 'UTC', workdays: [1, 5], focus_chats: ['oc_a', 'oc_b'],
     })
     expect(toPatch({ ...toForm(prefs), follow_platform: false, daily_turn_budget: 120 }, prefs)).toEqual({ daily_turn_budget: 120 })
@@ -121,6 +121,28 @@ describe('settings section', () => {
     vi.mocked(myAssistant.saveSettings).mockReset().mockImplementation(async (patch) => ({ ...prefs, ...patch }) as AssistantPrefs)
     vi.mocked(myAssistant.deprovision).mockReset().mockResolvedValue({ state: 'deprovisioning' })
     vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
+  })
+
+  it('offers three time zones and keeps a saved one that is not among them', async () => {
+    const wrapper = render(); await flushPromises()
+    const zones = (wrapper.vm as unknown as { zones: string[] }).zones
+    expect(zones).toEqual(['Asia/Singapore', 'America/New_York', 'America/Los_Angeles', 'Asia/Shanghai'])
+    expect((wrapper.vm as unknown as { zoneLabel: (z: string) => string }).zoneLabel('America/Los_Angeles')).toBe('洛杉矶（America/Los_Angeles）')
+    wrapper.unmount()
+  })
+
+  it('picks focus groups by name, lists groups only and caps the count', async () => {
+    vi.mocked(myAssistant.chatChoices).mockReset().mockResolvedValue({ items: [
+      { chat_id: 'oc_g1', name: '项目群', kind: 'group' }, { chat_id: 'oc_p1', name: '张三', kind: 'p2p' },
+    ] })
+    const wrapper = render(); await flushPromises()
+    const focus = wrapper.findAllComponents(AssistantChatPicker).find((picker) => picker.props('groupsOnly'))!
+    expect(focus.props('modelValue')).toEqual(['oc_a'])
+    expect(focus.props('limit')).toBe(5)
+    await (focus.vm as unknown as { search: (q: string) => Promise<void> }).search('')
+    const shown = (focus.vm as unknown as { shown: { chat_id: string }[] }).shown.map((c) => c.chat_id)
+    expect(shown).toEqual(['oc_a', 'oc_g1'])
+    wrapper.unmount()
   })
 
   it('loads the current values and shows the runtime', async () => {

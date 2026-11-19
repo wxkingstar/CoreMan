@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type ChatChoice } from '@/api/myAssistant'
 import { errorMessage } from '@/utils/errors'
 
 /** 按会话名挑会话：先列最近活跃的会话，输入时按名字或成员搜；值是 chat_id 的列表。 */
 const model = defineModel<string[]>({ required: true })
-defineProps<{ disabled?: boolean }>()
+const props = defineProps<{
+  disabled?: boolean
+  /** 只列群（重点群用）：单聊不出现在下拉里。 */
+  groupsOnly?: boolean
+  /** 最多选几个；0 或不给表示不限（超出交给表单校验）。 */
+  limit?: number
+}>()
 const { t } = useI18n()
 
 const options = ref<ChatChoice[]>([])
@@ -22,7 +28,7 @@ async function search(query: string) {
     const { items } = await myAssistant.chatChoices(query.trim())
     if (ticket !== latest) return
     for (const item of items) known[item.chat_id] = item
-    options.value = items
+    options.value = props.groupsOnly ? items.filter((item) => item.kind === 'group') : items
     loaded.value = true
   } catch (e) { if (ticket === latest) error.value = errorMessage(e) }
   finally { if (ticket === latest) loading.value = false }
@@ -38,6 +44,9 @@ const shown = computed(() => {
   return [...extra, ...options.value]
 })
 function open(visible: boolean) { if (visible && !loaded.value && !loading.value) void search('') }
+// 已有选中的会话时先取一次清单：已选的会话一打开页面就显示名字，而不是 chat_id。
+onMounted(() => { if (model.value.length) void search('') })
+defineExpose({ search, shown })
 </script>
 <template>
   <div class="chat-picker">
@@ -49,6 +58,7 @@ function open(visible: boolean) { if (visible && !loaded.value && !loading.value
       :remote-method="search"
       :loading="loading"
       :disabled="disabled"
+      :multiple-limit="limit ?? 0"
       :placeholder="t('assistant.settings.chatPickerPlaceholder')"
       :no-data-text="error || t('assistant.settings.chatPickerEmpty')"
       style="width: 100%"
