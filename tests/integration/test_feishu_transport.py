@@ -1876,3 +1876,132 @@ async def test_reply_file_is_sent_as_a_file_message_quoting_the_question(db_sess
     (body,) = [b for _, p, b in api.calls if p == target]
     assert body["msg_type"] == "file"
     assert json.loads(body["content"]) == {"file_key": "file_v3_abc"}
+
+
+async def test_long_private_reply_gets_a_feed_card_then_a_pin(db_session, db_engine):
+    """跑满 3 分钟：建「进行中」消息流卡片；做完删卡片、私聊临时置顶，6 小时后或下次来问取消。"""
+    bot, row, generation = await seed(db_session)
+    started = datetime.now(UTC) - timedelta(minutes=4)
+    await db_session.execute(
+        sa_update(TaskStream)
+        .where(TaskStream.task_id == row.task_id)
+        .values(
+            running_since=started,
+            reply_context={
+                "chat_id": "oc1",
+                "message_id": "om_in",
+                "chat_type": "single",
+                "requester_user_id": "u1",
+            },
+        )
+    )
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    created = [b for m, p, b in api.calls if m == "POST" and p == "/open-apis/im/v2/app_feed_card"]
+    assert len(created) == 1
+    card = created[0]["app_feed_card"]
+    assert card["status_label"] == {"text": "进行中", "type": "primary"}
+    assert created[0]["user_ids"] == ["u1"] and card["link"]["link"].startswith("https://applink")
+    await transport.round()
+    assert len([1 for m, p, _ in api.calls if p == "/open-apis/im/v2/app_feed_card"]) == 1
+    await streams.complete(db_session, row.task_id, final_text="做完了")
+    await db_session.commit()
+    await transport.round()
+    deleted = [b for m, p, b in api.calls if m == "DELETE"]
+    assert deleted == [{"feed_cards": [{"biz_id": f"coreman-task-{row.task_id}", "user_id": "u1"}]}]
+    pins = [b for m, p, b in api.calls if p == "/open-apis/im/v2/feed_cards/bot_time_sentive"]
+    assert pins == [{"time_sensitive": True, "user_ids": ["u1"]}]
+    async with factory() as session:
+        unpin = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == f"{row.task_id}:unpin")
+        )
+        assert unpin.payload == {"_unpin": "u1"} and unpin.not_before > datetime.now(UTC)
+        unpin.not_before = datetime.now(UTC)
+        await session.commit()
+    await transport.round()
+    pins = [b for m, p, b in api.calls if p == "/open-apis/im/v2/feed_cards/bot_time_sentive"]
+    assert pins[-1] == {"time_sensitive": False, "user_ids": ["u1"]}
+
+
+async def test_short_or_group_replies_get_no_feed_card_or_pin(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    await db_session.execute(
+        sa_update(TaskStream)
+        .where(TaskStream.task_id == row.task_id)
+        .values(
+            running_since=datetime.now(UTC) - timedelta(minutes=4),
+            reply_context={"chat_id": "oc1", "chat_type": "group", "requester_user_id": "u1"},
+        )
+    )
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await streams.complete(db_session, row.task_id, final_text="好了")
+    await db_session.commit()
+    await transport.round()
+    assert not [p for _, p, _ in api.calls if "feed_card" in p]
+
+
+async def test_confirm_card_gets_a_waiting_feed_card_until_it_is_answered(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    card = {
+        "schema": "2.0",
+        "header": {"title": {"tag": "plain_text", "content": "确认修改订单备注"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "button",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {"event_key": "systems_write", "level": "confirm:s1"},
+                        }
+                    ],
+                }
+            ]
+        },
+        "task_id": "personal:1",
+    }
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="confirm:1",
+            target={"user_id": "u1"},
+            payload={"card": card},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    [created] = [b for m, p, b in api.calls if p == "/open-apis/im/v2/app_feed_card"]
+    assert created["app_feed_card"]["status_label"] == {"text": "待确认", "type": "danger"}
+    assert created["app_feed_card"]["preview"] == "确认修改订单备注"
+    async with factory() as session:
+        sent = await session.scalar(select(OutboxItem).where(OutboxItem.dedupe_key == "confirm:1"))
+        mid = sent.payload["_feishu_message_id"]
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="card_update",
+            dedupe_key="confirm:1:update",
+            target={"message_id": mid},
+            payload={"card": {**card, "body": {"elements": []}}},
+        )
+        await session.commit()
+    await transport.round()
+    deleted = [b for m, p, b in api.calls if m == "DELETE"]
+    assert deleted == [
+        {"feed_cards": [{"biz_id": created["app_feed_card"]["biz_id"], "user_id": "u1"}]}
+    ]

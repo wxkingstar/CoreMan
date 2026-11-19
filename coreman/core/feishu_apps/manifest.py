@@ -36,6 +36,9 @@ TENANT_SCOPES: tuple[str, ...] = (
     "im:message:send_sys_msg",
     # 私聊里按提问人是手机还是电脑调整排版（消息事件里的 user_agent）。
     "im:user_agent:read",
+    # 长任务与待确认事项的消息流卡片、私聊长任务做完临时置顶（gateway_feishu/feed.py）。
+    "im:app_feed_card:write",
+    "im:datasync.feed_card.time_sensitive:write",
     "im:resource",
     "im:chat:read",
     # 机器人协作确认成员是否在群里。

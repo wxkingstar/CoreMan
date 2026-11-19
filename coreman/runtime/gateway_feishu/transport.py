@@ -28,7 +28,9 @@ from coreman.core.db.models import (
     BotLease,
     FeishuDelivery,
     FeishuSentMessage,
+    InboundEvent,
     OutboxItem,
+    Task,
     TaskStream,
 )
 from coreman.core.feishu_cards.compile import (
@@ -45,6 +47,7 @@ from coreman.core.feishu_cards.thinking import thinking_panel, thinking_preview
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.platforms.feishu_content import bounded, sent_text
+from coreman.runtime.gateway_feishu import feed
 from coreman.runtime.gateway_feishu.cards import (
     NEW_SESSION_LABEL_CHARS,
     STREAMING_CONFIG,
@@ -147,6 +150,10 @@ class FeishuTransport:
         self.images = RemoteImages(self.upload_image, transport=image_transport)
         # 机器人的富卡片开关；子进程每轮从库里刷新。
         self.rich_cards = True
+        # 消息流卡片标题里的名字；子进程每轮刷新。
+        self.bot_name = "AI 员工"
+        # 做完置顶过的私聊（提问人 user_id）：本人下一次来问时取消置顶。重启后丢了由定时取消兜底。
+        self._pinned: set[str] = set()
         # 这个机器人是个人助理：日志里不写卡片内容的片段。每轮开头刷新。
         self._private = False
         # 调度员在单人群里收到消息就打的「处理中」表情（见 acks.py）。
@@ -400,6 +407,68 @@ class FeishuTransport:
         self._headings[row.task_id] = (title, 0.0)
         return title
 
+    async def long_task_feed(self, row: TaskStream, delivery: FeishuDelivery) -> None:
+        """对话回复跑满 3 分钟：给提问人建一张「进行中」的消息流卡片，之后预览跟着最后动作走。"""
+        requester = _requester(row)
+        if requester is None or row.running_since is None:
+            return
+        if (datetime.now(UTC) - row.running_since).total_seconds() < feed.LONG_TASK_SECONDS:
+            return
+        state = dict(delivery.layout or {})
+        preview = liveness.preview(row.activity, datetime.now(UTC)) or "正在处理…"
+        if not state.get("feed"):
+            created = await feed.create(
+                self,
+                biz_id=feed.task_biz(row.task_id),
+                user_id=requester,
+                title=f"{self.bot_name}：正在处理你的请求",
+                preview=preview,
+                status=("进行中", "primary"),
+            )
+            state["feed"] = {"ok": created, "preview": preview}
+        elif state["feed"].get("ok") and state["feed"].get("preview") != preview:
+            await feed.update_preview(
+                self, biz_id=feed.task_biz(row.task_id), user_id=requester, preview=preview
+            )
+            state["feed"] = {**state["feed"], "preview": preview}
+        else:
+            return
+        async with self.factory() as session:
+            saved = await session.get(FeishuDelivery, row.task_id)
+            assert saved is not None
+            saved.layout = state
+            await session.commit()
+        delivery.layout = state
+
+    async def finish_long_task(
+        self, session: AsyncSession, row: TaskStream, delivery: FeishuDelivery
+    ) -> None:
+        """回复做完：删掉「进行中」卡片；私聊里跑满 3 分钟的，把会话在消息列表临时置顶。"""
+        requester = _requester(row)
+        if requester is None:
+            return
+        if ((delivery.layout or {}).get("feed") or {}).get("ok"):
+            await feed.delete(self, biz_id=feed.task_biz(row.task_id), user_id=requester)
+        started, ended = row.running_since, row.completed_at or datetime.now(UTC)
+        if (
+            row.reply_context.get("chat_type") != "single"
+            or started is None
+            or (ended - started).total_seconds() < feed.LONG_TASK_SECONDS
+        ):
+            return
+        if await feed.pin(self, requester, True):
+            self._pinned.add(requester)
+            await outbox.add(
+                session,
+                bot_id=self.bot_id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"{row.task_id}:unpin",
+                target={"user_id": requester},
+                payload={"_unpin": requester},
+                not_before=datetime.now(UTC) + timedelta(seconds=feed.PIN_SECONDS),
+            )
+
     async def update_preview(self, row: TaskStream, card_id: str) -> None:
         """流式期间把消息列表的预览换成最后动作（「⏳ 运行命令：…」），不打开会话也看得到进展。
 
@@ -521,6 +590,11 @@ class FeishuTransport:
                 await session.commit()
         card_id = api_id(delivery.card_id)
         if not delivery.message_id:
+            requester = _requester(row)
+            if requester and requester in self._pinned:
+                # 本人又来问了：上一次做完时的置顶取消。
+                self._pinned.discard(requester)
+                await feed.pin(self, requester, False)
             delivery.message_id = await self.send(
                 str(row.reply_context.get("chat_id") or ""),
                 {"type": "card", "data": {"card_id": card_id}},
@@ -534,6 +608,7 @@ class FeishuTransport:
         heading = await self.update_heading(row, card_id)
         if not row.is_complete and not delivery.is_static:
             await self.update_preview(row, card_id)
+            await self.long_task_feed(row, delivery)
         if row.version <= row.pushed_version and not row.is_complete:
             return
         answer = (
@@ -620,6 +695,7 @@ class FeishuTransport:
             saved.failures, saved.retry_at, saved.last_error = 0, None, None
             await streams.mark_pushed(session, row.task_id, row.version)
             if row.is_complete:
+                await self.finish_long_task(session, row, delivery)
                 await self.enqueue_cards(session, row, compiled)
                 await self.enqueue_followups_expiry(session, row, compiled, delivery.message_id)
                 await self.enqueue_interrupt_notice(session, row)
@@ -1132,6 +1208,10 @@ class FeishuTransport:
             )
             item.payload = {**item.payload, "_feishu_message_id": mid}
             return
+        if isinstance(item.payload.get("_unpin"), str):
+            self._pinned.discard(item.payload["_unpin"])
+            await feed.pin(self, item.payload["_unpin"], False)
+            return
         if isinstance(item.payload.get("_file"), dict):
             # 回复里链接的本地文件：worker 已上传换好 file_key，这里引用提问发一条文件消息。
             mid = await self.send(
@@ -1165,6 +1245,7 @@ class FeishuTransport:
                 f"/open-apis/im/v1/messages/{mid}",
                 json={"content": json.dumps(interaction_card(card), ensure_ascii=False)},
             )
+            await self.resolve_confirm_feed(mid)
             return
         if item.kind not in {"send", "welcome"}:
             raise FeishuError(-2, "unsupported outbox kind")
@@ -1200,6 +1281,7 @@ class FeishuTransport:
                 )
                 return
             item.payload = {**item.payload, "_feishu_message_id": mid}
+            await self.confirm_feed(item, card, mid)
             return
         if item.payload.get("_reply") and item.target.get("message_id"):
             # 群里对某条消息的简短回应（旁听插话的「我看一下」、排队提示、要不要停下上一条的
@@ -1214,6 +1296,8 @@ class FeishuTransport:
                 reply_to=item.target.get("message_id"),
             )
             item.payload = {**item.payload, "_feishu_message_id": mid}
+            if isinstance(card, dict):
+                await self.confirm_feed(item, card, mid)
             return
         if isinstance(card, dict):
             fallback = item.payload.get("_fallback_markdown")
@@ -1228,6 +1312,7 @@ class FeishuTransport:
                 await self.send_posts(chat, fallback, f"outbox:{item.id}")
                 return
             item.payload = {**item.payload, "_feishu_message_id": mid}
+            await self.confirm_feed(item, card, mid)
         elif isinstance(item.payload.get("markdown"), str) and not item.payload.get("_plain"):
             # Markdown 消息（定时任务结果等）也优先用卡片；某张被拒只把那一张改发成 post。
             # 这些不是提问人自己的对话回复，回复按钮只显示成文字。
@@ -1270,6 +1355,60 @@ class FeishuTransport:
             key=f"outbox:{item.id}",
             reply_to=item.target.get("message_id"),
         )
+
+    async def confirm_feed(self, item: OutboxItem, card: dict[str, Any], mid: str) -> None:
+        """等发起人确认的卡片发出去了：给发起人建一张「待确认」的消息流卡片（点过后删掉）。"""
+        title = feed.confirm_card(card)
+        if title is None:
+            return
+        user = item.target.get("user_id")
+        if not isinstance(user, str) or not user:
+            user = await self._initiator(card)
+        if not user:
+            return
+        biz = feed.confirm_biz(mid)
+        if await feed.create(
+            self,
+            biz_id=biz,
+            user_id=user,
+            title=f"{self.bot_name}：有一项操作等你确认",
+            preview=title or "点开会话处理",
+            status=("待确认", "danger"),
+        ):
+            item.payload = {**item.payload, "_feed": {"biz": biz, "user": user}}
+
+    async def _initiator(self, card: dict[str, Any]) -> str | None:
+        """确认卡的发起人：卡片 task_id 是 `personal:<发起那条消息的任务>`。"""
+        kind, _, raw = str(card.get("task_id") or "").partition(":")
+        if kind != "personal" or not raw.isdigit():
+            return None
+        async with self.factory() as session:
+            origin = await session.get(Task, int(raw))
+            if origin is None or origin.bot_id != self.bot_id or origin.inbound_event_id is None:
+                return None
+            event = await session.get(InboundEvent, origin.inbound_event_id)
+            return event.sender_platform_user_id if event is not None else None
+
+    async def resolve_confirm_feed(self, mid: str) -> None:
+        """确认卡被更新（点过、作废）：删掉对应的「待确认」卡片。"""
+        async with self.factory() as session:
+            sent = await session.scalar(
+                select(OutboxItem)
+                .where(
+                    OutboxItem.bot_id == self.bot_id,
+                    OutboxItem.status == "sent",
+                    OutboxItem.payload["_feishu_message_id"].astext == mid,
+                    OutboxItem.payload.has_key("_feed"),
+                )
+                .order_by(OutboxItem.id.desc())
+                .limit(1)
+            )
+            marker = sent.payload.get("_feed") if sent is not None else None
+            if sent is None or not isinstance(marker, dict):
+                return
+            sent.payload = {k: v for k, v in sent.payload.items() if k != "_feed"}
+            await session.commit()
+        await feed.delete(self, biz_id=str(marker.get("biz")), user_id=str(marker.get("user")))
 
     async def send_posts(self, chat: str, markdown: str, key: str) -> None:
         for index, chunk in enumerate(split_utf8(markdown)):
@@ -1322,6 +1461,11 @@ def _mobile_private(row: TaskStream) -> bool:
     """私聊、提问人在手机上：终稿按手机排。群里读的人设备不一，不按提问人的设备排。"""
     context = row.reply_context
     return context.get("chat_type") == "single" and context.get("client") == "mobile"
+
+
+def _requester(row: TaskStream) -> str | None:
+    requester = row.reply_context.get("requester_user_id")
+    return requester if isinstance(requester, str) and requester else None
 
 
 def _stop_task(row: TaskStream) -> int | None:
