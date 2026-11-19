@@ -90,8 +90,18 @@ class ContentStage(ChatStageBase):
             await pre.writer.flush(force=True)
 
         try:
+            transcriber = None
+            if pre.intake.bot.platform == "feishu":
+                from coreman.core.chat.transcribe import from_settings
+                from coreman.core.config import get_settings
+
+                transcriber = from_settings(get_settings())
             builder = ContentBuilder(
-                fetcher, locale=ctx.locale, platform=pre.intake.bot.platform, on_hint=on_hint
+                fetcher,
+                locale=ctx.locale,
+                platform=pre.intake.bot.platform,
+                on_hint=on_hint,
+                transcriber=transcriber,
             )
             build_task = asyncio.create_task(builder.build(parts, text=enriched_text))
             stopping = asyncio.create_task(ctx.cancel_event.wait())
@@ -124,6 +134,11 @@ class ContentStage(ChatStageBase):
             if owns_fetcher:
                 await fetcher.aclose()
         if built.failed is None:
+            if pre.intake.bot.platform == "feishu" and built.message_type == "voice":
+                # 先把听到的话写在回复最前面：识别错了一眼就能看出来。
+                heard = msg("voice_heard", ctx.locale, text=built.text.replace("\n", " "))
+                pre.writer.add_text(f"<font color='grey'>{heard}</font>\n\n")
+                await pre.writer.flush(force=True)
             return built
         ctx.log.info("content_rejected", code=built.failed_code, message_type=built.message_type)
         failed = built.failed_code == "media_failed"
