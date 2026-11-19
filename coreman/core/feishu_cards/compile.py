@@ -31,6 +31,7 @@ from coreman.core.feishu_cards.components import (
     render_note,
     render_people,
     render_raw,
+    render_recommend,
     render_sources,
     render_subtitle,
     render_table,
@@ -508,6 +509,7 @@ class _Builder:
             "note": render_note,
             "actions": render_actions,
             "sources": render_sources,
+            "recommend": render_recommend,
             "form": render_form,
             "raw": render_raw,
         }

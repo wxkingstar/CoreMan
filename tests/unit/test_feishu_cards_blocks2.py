@@ -198,3 +198,30 @@ def test_choice_card_marks_the_recommended_option_only_for_feishu() -> None:
         "question": "choice_answer",
         "option": "opt_0",
     }
+
+
+RECOMMEND = (
+    "有三种办法，我建议第一种：\n\n```card:recommend\n"
+    '{"title": "先对手袋品类暂停 7 天无理由退货", "reason": "退款里 62% 来自手袋",'
+    ' "alternatives": ["给手袋加验货视频", "只对新客户收退货运费"]}\n```'
+)
+
+
+def test_recommend_box_with_a_go_ahead_button_for_the_requester() -> None:
+    from coreman.core.feishu_cards.reply_buttons import parse_reply
+
+    compiled = compile_reply(RECOMMEND, requester="u_1")
+    assert compiled.problems == [] and validate_card(compiled.cards[0]) == []
+    [box] = [n for n in _walk(compiled.cards[0]) if n.get("tag") == "interactive_container"]
+    assert box["border_color"] == "blue" and box["behaviors"] == []
+    text = json.dumps(box, ensure_ascii=False)
+    assert "推荐</text_tag> **先对手袋品类暂停 7 天无理由退货**" in text and "62%" in text
+    [button] = [n for n in _walk(box) if n.get("tag") == "button"]
+    assert button["text"]["content"] == "就按这个办"
+    click = parse_reply(button["behaviors"][0]["value"])
+    assert click is not None and click.text == "就按这个办：先对手袋品类暂停 7 天无理由退货"
+    assert click.row == box["element_id"]
+    assert "其他办法" in json.dumps(compiled.cards[0], ensure_ascii=False)
+    plain = compile_reply(RECOMMEND)
+    assert not [n for n in _walk(plain.cards[0]) if n.get("tag") == "button"]
+    assert "⭐ 推荐：**先对手袋品类暂停 7 天无理由退货**" in to_markdown(RECOMMEND)

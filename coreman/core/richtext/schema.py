@@ -487,6 +487,22 @@ class FormBlock(_Model):
         return self
 
 
+class RecommendBlock(_Model):
+    """回答里的推荐方案：高亮的框写结论和理由，下面灰字列其他办法；提问人可以点「就按这个办」。"""
+
+    title: str = Field(min_length=1, max_length=80)
+    reason: str | None = Field(default=None, max_length=300)
+    alternatives: list[str] = Field(default_factory=list, max_length=5)
+    action: str | None = Field(default="就按这个办", max_length=10)
+
+    @field_validator("alternatives")
+    @classmethod
+    def _short(cls, value: list[str]) -> list[str]:
+        if any(len(v) > 120 for v in value):
+            raise ValueError("其他办法每条最多 120 字")
+        return [v.strip() for v in value if v.strip()]
+
+
 class FollowupsBlock(_Model):
     """建议追问：提问人接下来很可能问的 1–3 句话，点一下就作为他的下一句发出。
 
@@ -565,6 +581,7 @@ BLOCK_MODELS: dict[str, type[_Model]] = {
     "note": NoteBlock,
     "actions": ActionsBlock,
     "followups": FollowupsBlock,
+    "recommend": RecommendBlock,
     "sources": SourcesBlock,
     "details": DetailsBlock,
     "form": FormBlock,

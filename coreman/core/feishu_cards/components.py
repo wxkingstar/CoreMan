@@ -34,6 +34,7 @@ from coreman.core.richtext.schema import (
     NoteBlock,
     PeopleBlock,
     RawBlock,
+    RecommendBlock,
     SourcesBlock,
     TableBlock,
     TableColumn,
@@ -669,6 +670,63 @@ def bubble(
         "behaviors": [{"type": "callback", "value": value}],
         "elements": [{"tag": "markdown", "content": body, "text_size": style.TEXT_BODY}],
     }
+
+
+def render_recommend(block: RecommendBlock, ctx: RenderContext) -> list[Element]:
+    """推荐方案：蓝框浅蓝底，「推荐」标签加粗写结论，下面灰字写理由；其他办法灰字列在框下。
+
+    提问人自己的对话回复里框里多一个「就按这个办」：点了等于提问人说「就按这个办：结论」
+    （回复按钮同一套，结论就在按钮正上方）。之后真要改数据，写操作照样要确认。
+    """
+    box_id = ctx.new_id("panel")
+    inner: list[Element] = [
+        _md(
+            ctx,
+            f"<text_tag color='blue'>{RECOMMENDED_TAG}</text_tag> **{_inline(block.title)}**",
+            size=style.TEXT_BODY,
+        )
+    ]
+    if block.reason:
+        inner.append(_md(ctx, _font(_inline(block.reason), "grey"), size=style.TEXT_NOTE))
+    if ctx.requester and block.action:
+        bid = ctx.new_id("btn")
+        said = f"{block.action}：{block.title}"[: reply_buttons.MAX_LABEL_CHARS]
+        inner.append(
+            {
+                "tag": "button",
+                "element_id": bid,
+                "type": "primary_filled",
+                "size": "small",
+                "text": {"tag": "plain_text", "content": block.action},
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": reply_buttons.reply_value(
+                            said, requester=ctx.requester, row=box_id, buttons=[bid]
+                        ),
+                    }
+                ],
+            }
+        )
+    out: list[Element] = [
+        {
+            "tag": "interactive_container",
+            "element_id": box_id,
+            "width": "fill",
+            "has_border": True,
+            "border_color": "blue",
+            "background_style": "blue-50",
+            "corner_radius": style.RADIUS,
+            "padding": "12px 14px",
+            "vertical_spacing": "6px",
+            "behaviors": [],
+            "elements": inner,
+        }
+    ]
+    if block.alternatives:
+        lines = "\n".join(f"- {_inline(a)}" for a in block.alternatives)
+        out.append(_md(ctx, _font("其他办法：", "grey") + "\n" + lines, size=style.TEXT_NOTE))
+    return out
 
 
 def render_followups(block: FollowupsBlock, ctx: RenderContext) -> list[Element]:
