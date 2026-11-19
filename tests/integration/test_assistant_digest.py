@@ -260,7 +260,7 @@ async def test_the_digest_lists_approvals_owner_items_and_reports(
     card = item.payload["card"]
     body = texts(card)
     assert body.index("总表") < body.index("等你（") < body.index("我处理了这些")
-    assert "待批的写操作（1）" in body and "等你拍板或当面处理（1）" in body
+    assert "待批的写操作（1）" in body and "等你拍板、补信息或当面处理（1）" in body
     assert "[去审批台处理](https://tower.example.com/)" in body
     assert "tower-api" not in str(item.payload)
     assert body.count("已回复王五的会议邀请") == 1 and SECRET in body
@@ -300,7 +300,7 @@ async def test_a_decision_without_needs_owner_waits_for_the_owner_too(
     assert (await digest.tick(factory, AFTERNOON))["assistant_digests_sent"] == 1
     (item,) = await sent(db_session, bot)
     body = texts(item.payload["card"])
-    assert "等你拍板或当面处理（1）" in body and "F001 选哪家物流" in body
+    assert "等你拍板、补信息或当面处理（1）" in body and "F001 选哪家物流" in body
     assert "建议：选报价低的那家" in body
     (button,) = buttons(item.payload["card"])
     assert button["text"]["content"] == "现在处理 F001"

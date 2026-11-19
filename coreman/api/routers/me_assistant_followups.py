@@ -1,7 +1,7 @@
-"""「我的助理」页的待跟进：所有者按四类看，直接在页面上新增、改、推后、关闭。
+"""「我的助理」页的待跟进：所有者按四类看，直接在页面上新增、改、补充、改期、关闭。
 
-核心逻辑全在 `coreman/core/assistants/followups.py`，这里只做入参、所有者时区的「今天」、错误
-映射与提交。待跟进没有「谁改的」一列：所有者改的与助理改的不作区分。
+核心逻辑在 `coreman/core/assistants/followups.py` 与 `owner_feedback.py`，这里只做入参、所有者
+时区的「今天」、错误映射与提交。补充、改期、关闭都记一条所有者反馈，下班编译时进知识库。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from coreman.api.routers.me_assistant_common import (
     refuse,
     writable,
 )
-from coreman.core.assistants import access_log, followups, sealed
+from coreman.core.assistants import access_log, followups, owner_feedback, sealed
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.assistants.followups import FollowupError
 from coreman.core.db.models import FOLLOWUP_CATEGORIES, AssistantFollowup
@@ -37,7 +37,10 @@ ERRORS: dict[str, tuple[int, str]] = {
     "invalid_title": (422, f"标题不能为空，且不超过 {followups.MAX_TITLE} 字"),
     "invalid_notes": (422, f"备注不超过 {followups.MAX_NOTES} 字"),
     "too_many_followups": (409, f"未结的待跟进已达 {followups.MAX_OPEN} 条上限，先关掉一些"),
-    "snooze_not_future": (422, "推后的日期必须晚于今天"),
+    "snooze_not_future": (422, "改期的日期必须晚于今天"),
+    "invalid_feedback": (422, f"请填写内容，且不超过 {owner_feedback.MAX_NOTE} 字"),
+    "invalid_close_code": (422, "请选择关闭原因"),
+    "notes_full": (409, "这一条的备注已满，先精简备注再补充"),
     "content_locked": (409, "加密保存的个人内容已不可读取，不能再写入"),
     "nothing_to_change": (422, "至少修改一项"),
     "null_not_allowed": (422, "分类与标题不能清空"),
@@ -64,13 +67,23 @@ class PatchIn(BaseModel):
 
 
 class CloseIn(BaseModel):
+    """给了 `reason` 就按所有者选的原因关闭并记反馈；只给 `dropped` 是旧的办完 / 不再需要。"""
+
     model_config = ConfigDict(extra="forbid")
     dropped: StrictBool = False
+    reason: str | None = Field(default=None, max_length=32)
+    note: str | None = Field(default=None, max_length=owner_feedback.MAX_NOTE * 4)
 
 
 class SnoozeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     until: date
+    note: str | None = Field(default=None, max_length=owner_feedback.MAX_NOTE * 4)
+
+
+class FeedbackIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(max_length=owner_feedback.MAX_NOTE * 4)
 
 
 async def _today(session: AsyncSession, own: Mine) -> date:
@@ -180,7 +193,10 @@ async def close(
     seq = _seq(label)
     today = await _today(session, own)
     try:
-        row = await followups.close(session, own.bot.id, seq, dropped=body.dropped)
+        if body.reason is not None:
+            row = await owner_feedback.close(session, own.bot.id, seq, body.reason, body.note)
+        else:
+            row = await followups.close(session, own.bot.id, seq, dropped=body.dropped)
     except FollowupError as exc:
         await session.rollback()
         raise refuse(exc.code, ERRORS) from None
@@ -199,7 +215,29 @@ async def snooze(
     seq = _seq(label)
     today = await _today(session, own)
     try:
-        row = await followups.snooze(session, own.bot.id, seq, body.until, today=today)
+        row = await owner_feedback.reschedule(
+            session, own.bot.id, seq, body.until, body.note, today=today
+        )
+    except FollowupError as exc:
+        await session.rollback()
+        raise refuse(exc.code, ERRORS) from None
+    data = _item(row, today)
+    await session.commit()
+    return {"code": 0, "data": data}
+
+
+@router.post("/{label}/feedback")
+async def feedback(
+    label: str,
+    body: FeedbackIn,
+    own: Mine = Depends(writable),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """补充一段话：写进这一条的备注，立刻交回助理重新判断。"""
+    seq = _seq(label)
+    today = await _today(session, own)
+    try:
+        row = await owner_feedback.supplement(session, own.bot.id, seq, body.text, today=today)
     except FollowupError as exc:
         await session.rollback()
         raise refuse(exc.code, ERRORS) from None

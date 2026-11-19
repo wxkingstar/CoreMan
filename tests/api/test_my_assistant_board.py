@@ -277,8 +277,11 @@ async def test_board_lists_gaps_and_owner_can_decline(
     )
     await db_session.commit()
     data = (await client.get(BOARD)).json()["data"]
-    assert data["bot_id"] == str(bot.id) and data["counts"]["gap"] == 1
-    assert data["groups"]["gap"][0]["gap"] == "G001"
+    # 要平台管理员开的缺口：卡住的事列在停滞，原因是要找管理员。
+    assert data["bot_id"] == str(bot.id) and data["counts"]["stalled"] == 1
+    [stuck] = data["groups"]["stalled"]
+    assert stuck["gap"] == "G001" and stuck["reason"] == "gap_admin"
+    assert stuck["need"] is None and stuck["nudges"] == 0
     assert data["gaps"] == [
         {
             "id": "G001",
@@ -291,6 +294,7 @@ async def test_board_lists_gaps_and_owner_can_decline(
             "hint": "需要平台管理员为这位助理开放业务系统 orders",
             "followups": ["F001"],
             "request": None,
+            "stage": "stalled",
         }
     ]
     r = await client.post(f"{URL}/gaps/G001/decline")

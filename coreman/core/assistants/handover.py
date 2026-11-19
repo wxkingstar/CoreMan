@@ -35,6 +35,8 @@ REMINDERS = {
     "message_recalled": "消息被对方撤回",
     "mark_stale": "「处理中」表情挂了很久",
     "followup_due": "待跟进到期",
+    "followup_nudge": "等别人的事该催了",
+    "owner_feedback": "所有者补充了信息",
     "morning_brief": "每日例行：今天要留意的事",
     "weekly_review": "每周例行：把待跟进过一遍",
     "gap_resolved": "权限开通了",
@@ -121,6 +123,32 @@ def _reminder(data: dict[str, Any]) -> list[str]:
         return [
             f"待跟进 {ident(data.get('label'))}（{ident(data.get('category'))}）今天到期{dates}。",
             quoted(data.get("title")),
+        ]
+    if kind == "followup_nudge":
+        count = int(data.get("nudges") or 0)
+        out = [
+            f"待跟进 {ident(data.get('label'))} 在等别人，到了催办时间（已催过 {count} 次）。",
+            quoted(data.get("title")),
+        ]
+        if data.get("handler_name"):
+            out += ["在等的人：", quoted(data.get("handler_name"))]
+        return [
+            *out,
+            "先看对方是不是已经回了（查消息）：回了就用 followup_progress 记下、接着办。没回就起草"
+            "一条催办消息，作为待批单提交，approval 里带上这一条的编号；所有者批准发出后用 "
+            "followup_progress 带 nudged=true 记一句。不知道该找谁的，用 followup_update 标 "
+            "stuck=who。",
+        ]
+    if kind == "owner_feedback":
+        return [
+            f"所有者在「我的助理」页给待跟进 {ident(data.get('label'))} 补充了信息"
+            "（引用行是他本人写的，按他的意思办）：",
+            quoted(data.get("title")),
+            quoted(data.get("text")),
+            "据此重新判断这件事：能办就接着办（必要时派子任务）；要等别人就改 handler；"
+            "要到某天才能做就设 review_on；还缺他的信息就带 needs_owner=true 并在备注写一行"
+            "「需要你：」。办到哪用 followup_progress 记下。他的补充若说明了长期适用的偏好或"
+            "规则，记进知识库相关的页。",
         ]
     if kind == "gap_rejected":
         blocked = "、".join(ident(item) for item in data.get("followups") or [] if ident(item))

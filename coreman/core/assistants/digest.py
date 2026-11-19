@@ -10,9 +10,9 @@
   时点，攒下的并成一条。
 - 摘要是事项总表（`board`）的简版：计数行、等你（在途审批单带审批系统的链接；要所有者拍板或
   当面处理的待跟进，每条一个「现在处理」回复按钮）、停滞、我处理了这些（攒下的汇报，去重）；
-  在推进、等别人、排期只进计数行。自上次摘要以来没有新东西就不发，停滞本身不算新东西。
-- 所有者私聊发「看板」时回完整的总表卡片（`send_board`），六组都列；「卡在权限」每个缺口一行、
-  怎么开一行，私聊里当面办得了的给「开通 G003」回复按钮，都给「不开 G003」（平台截下）。
+  执行中、等别人、排期只进计数行。自上次摘要以来没有新东西就不发，停滞本身不算新东西。
+- 所有者私聊发「看板」时回完整的总表卡片（`send_board`），五组都列；缺口列在它所在的组里，每个
+  一行、怎么开一行，私聊里当面办得了的给「开通 G003」回复按钮，都给「不开 G003」（平台截下）。
 - 「现在处理 F012」是回复按钮：只有所有者本人点得动（网关按按钮里的提问人拒绝别人），点了就是
   他在私聊里发了这句话，开一轮他在场的轮次；`now_note` 把那条待跟进附进本轮块。按钮用过由网关
   置灰；待跟进关闭时 `retire` 把各张摘要与看板卡片上的那一行置灰。
@@ -273,12 +273,13 @@ def _now_button(seq: int, requester: str) -> dict[str, Any]:
 
 GROUP_TITLES = {
     "owner": "等你",
-    "stalled": "停滞",
-    "working": "在推进",
+    "working": "执行中",
     "others": "等别人",
-    "gap": "卡在权限",
     "scheduled": "排期",
+    "stalled": "停滞",
 }
+# 原因这一句没有新信息的（等别人里的「在等对方」、执行中的「助理在推进」）不写。
+_PLAIN_REASONS = ("waiting", "assistant")
 MORE_HINT = "另有 {n} 件，发「看板」或在「我的助理」页看全部"
 EMPTY_BOARD = "现在没有要跟进的事。"
 
@@ -335,8 +336,12 @@ def _who(item: board.Item) -> str:
 
 def _line(item: board.Item) -> str:
     parts = [f"{followups.label(item.row.seq)} {_clean(item.row.title_enc or '')}", _who(item)]
-    if item.idle_days > 0 and item.stage in ("working", "others"):
+    if item.reason not in _PLAIN_REASONS and item.reason in board.REASONS:
+        parts.append(board.REASONS[item.reason])
+    if item.idle_days > 0 and item.stage in ("working", "others", "stalled"):
         parts.append(f"{item.idle_days} 个工作日没动")
+    if item.stage == "scheduled" and item.row.review_on is not None:
+        parts.append(f"{item.row.review_on.isoformat()} 启动")
     if item.row.due_on is not None:
         parts.append(f"期限 {item.row.due_on.isoformat()}")
     return " · ".join(parts)
@@ -362,6 +367,9 @@ def _items(
         tip = board.suggestion(item.row)
         if tip:
             nodes.append(_plain(f"建议：{tip}", "notation"))
+        ask = board.need(item.row) if item.stage == "owner" else None
+        if ask:
+            nodes.append(_plain(f"需要你：{ask}", "notation"))
         for approval in item.approvals:
             line = f"待批：{_approval_summary(approval, (sizes or {}).get(approval.id, 1))}" + (
                 f" [去处理]({link})" if link else ""
@@ -431,7 +439,7 @@ def _gap_buttons(entry: board.Gap, requester: str) -> dict[str, Any]:
 def _gaps(
     elements: list[dict[str, Any]], entries: list[board.Gap], requester: str, room: _Room
 ) -> None:
-    """「卡在权限」：每个缺口一行、怎么开一行灰字、按钮一行；读不出来的跳过。至多 `LIST_MAX` 个。"""
+    """一组里的缺口：每个缺口一行、怎么开一行灰字、按钮一行；读不出来的跳过。至多 `LIST_MAX` 个。"""
     done = 0
     for entry in entries[:LIST_MAX]:
         if sealed.is_locked(entry.row):
@@ -461,8 +469,8 @@ def board_card(
 ) -> tuple[dict[str, Any], list[int]]:
     """总表卡片，连同卡片上「现在处理」按钮对应的编号。
 
-    `full` 是「看板」指令：六组全列（排期只列 `SCHEDULE_DAYS` 天以内的）；摘要只展开等你与停滞，
-    其余只进计数行。拼到 `CARD_BUDGET` 字节为止，放不下的只说个数。
+    `full` 是「看板」指令：五组全列（排期只列 `SCHEDULE_DAYS` 天以内的）；摘要只展开等你与停滞，
+    其余只进计数行。缺口列在它所在的组里。拼到 `CARD_BUDGET` 字节为止，放不下的只说个数。
     """
     title = "事项看板" if full else "助理摘要"
     room = _Room(title)
@@ -479,7 +487,8 @@ def board_card(
     )
     buttons: list[int] = []
     owner = result.groups["owner"]
-    if result.approvals or owner:
+    staged = {g: [e for e in result.gaps if e.stage == g] for g in board.GROUPS}
+    if result.approvals or owner or staged["owner"]:
         room.add(elements, _heading(f"等你（{result.approvals_total + len(owner)}）"))
     if result.approvals:
         room.add(elements, _heading(f"待批的写操作（{result.approvals_total}）"))
@@ -497,27 +506,23 @@ def board_card(
             else _plain(f"请到{name}里处理", "notation"),
         )
     if owner:
-        room.add(elements, _heading(f"等你拍板或当面处理（{len(owner)}）"))
+        room.add(elements, _heading(f"等你拍板、补信息或当面处理（{len(owner)}）"))
         _items(elements, owner, requester, buttons, room, link, result.approval_items)
-    shown = ["stalled", "working", "others", "gap", "scheduled"] if full else ["stalled"]
+    if staged["owner"]:
+        room.add(elements, _heading(f"要你开通的权限（{len(staged['owner'])}）"))
+        _gaps(elements, staged["owner"], requester, room)
+    shown = ["stalled", "working", "others", "scheduled"] if full else ["stalled"]
     horizon = result.today + timedelta(days=board.SCHEDULE_DAYS)
     for group in shown:
-        if group == "gap":
-            if result.gaps:
-                heading = (
-                    f"{GROUP_TITLES['gap']}（{len(result.groups['gap'])} 件，"
-                    f"{len(result.gaps)} 个缺口）"
-                )
-                room.add(elements, _heading(heading))
-                _gaps(elements, result.gaps, requester, room)
-            continue
         items = result.groups[group]
         if group == "scheduled":
             items = [i for i in items if i.row.review_on is None or i.row.review_on <= horizon]
-        if not items:
+        if not items and not staged[group]:
             continue
         room.add(elements, _heading(f"{GROUP_TITLES[group]}（{len(items)}）"))
         _items(elements, items, requester, buttons, room, link, result.approval_items)
+        if staged[group]:
+            _gaps(elements, staged[group], requester, room)
     if full and not result.approvals_total and not any(counts.values()) and not result.gaps:
         room.add(elements, _plain(EMPTY_BOARD))
     if reports:

@@ -25,6 +25,7 @@ from coreman.core.assistants import sealed
 from coreman.core.db.models import (
     FOLLOWUP_CATEGORIES,
     FOLLOWUP_HANDLERS,
+    FOLLOWUP_STUCK,
     AssistantApproval,
     AssistantFollowup,
     AssistantJob,
@@ -90,6 +91,8 @@ def view(row: AssistantFollowup, *, notes: bool = True) -> dict[str, Any]:
         "job_id": str(row.job_id) if row.job_id else None,
         "progress_at": row.progress_at.isoformat(),
         "created_at": row.created_at.isoformat(),
+        "stuck": row.stuck,
+        "nudges": row.nudges or 0,
     }
     if notes:
         out["notes"] = row.notes_enc
@@ -113,6 +116,12 @@ def _notes(value: str | None) -> str | None:
     if value is not None and len(value) > MAX_NOTES:
         raise FollowupError("invalid_notes")
     return value or None
+
+
+def _stuck(value: str | None) -> str | None:
+    if value is not None and value not in FOLLOWUP_STUCK:
+        raise FollowupError("invalid_stuck")
+    return value
 
 
 def _category(value: str) -> str:
@@ -275,8 +284,12 @@ async def update(
     handler: str | None = None,
     handler_name: str | None = None,
     job_id: uuid.UUID | None = None,
+    stuck: str | None | Keep = KEEP,
 ) -> AssistantFollowup:
-    """改一条未结的；没给的项不动，`notes` / `review_on` / `due_on` 给 None 是清空。
+    """改一条未结的；没给的项不动，`notes` / `review_on` / `due_on` / `stuck` 给 None 是清空。
+
+    Args:
+        stuck: 停滞的原因（how 不知道怎么做、who 不知道找谁、failed 反复失败）
 
     Raises:
         FollowupError: followup_not_found / followup_closed / invalid_* / content_locked
@@ -284,6 +297,11 @@ async def update(
     row = await _live(session, bot_id, seq)
     if title is not None or not isinstance(notes, Keep):
         await _writable(session, bot_id)
+    if (category is not None and category != row.category) or (
+        handler is not None and handler != row.handler
+    ):
+        # 换了在等的人或不再是等别人：催办从头算。
+        row.nudges = 0
     if category is not None:
         row.category = _category(category)
     if title is not None:
@@ -294,6 +312,8 @@ async def update(
         row.due_on = due_on
     if needs_owner is not None:
         row.needs_owner = needs_owner
+    if not isinstance(stuck, Keep):
+        row.stuck = _stuck(stuck)
     if handler is not None:
         if handler == "person":
             await _writable(session, bot_id)
@@ -310,12 +330,37 @@ async def update(
     return row
 
 
-async def progress(
-    session: AsyncSession, bot_id: uuid.UUID, seq: int, note: str, *, today: date
-) -> AssistantFollowup:
-    """记一行进展：备注末尾追加「[日期] 内容」，刷新进展时间。
+def append_line(row: AssistantFollowup, text_: str, today: date) -> None:
+    """备注末尾追加一行「[日期] 内容」。
 
     备注超长时从最早的进展行丢起；开头的来龙去脉（不以日期开头的行）不丢，丢完还放不下就拒绝。
+
+    Raises:
+        FollowupError: notes_full
+    """
+    lines = (row.notes_enc or "").split("\n") if row.notes_enc else []
+    lines.append(f"[{today.isoformat()}] {text_}")
+    while len("\n".join(lines)) > MAX_NOTES:
+        oldest = next((i for i, line in enumerate(lines[:-1]) if _PROGRESS_LINE.match(line)), None)
+        if oldest is None:
+            raise FollowupError("notes_full")
+        del lines[oldest]
+    row.notes_enc = "\n".join(lines)
+
+
+async def progress(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    seq: int,
+    note: str,
+    *,
+    today: date,
+    nudged: bool = False,
+) -> AssistantFollowup:
+    """记一行进展：备注末尾追加「[日期] 内容」，刷新进展时间（备注超长时见 `append_line`）。
+
+    Args:
+        nudged: 这次进展是催办消息发出去了：催办次数加一，催办时间从现在重新算
 
     Raises:
         FollowupError: invalid_progress / notes_full / followup_not_found / followup_closed /
@@ -326,14 +371,9 @@ async def progress(
         raise FollowupError("invalid_progress")
     row = await _live(session, bot_id, seq)
     await _writable(session, bot_id)
-    lines = (row.notes_enc or "").split("\n") if row.notes_enc else []
-    lines.append(f"[{today.isoformat()}] {note_text}")
-    while len("\n".join(lines)) > MAX_NOTES:
-        oldest = next((i for i, line in enumerate(lines[:-1]) if _PROGRESS_LINE.match(line)), None)
-        if oldest is None:
-            raise FollowupError("notes_full")
-        del lines[oldest]
-    row.notes_enc = "\n".join(lines)
+    append_line(row, note_text, today)
+    if nudged:
+        row.nudges = (row.nudges or 0) + 1
     row.updated_at = row.progress_at = utcnow()
     await session.flush()
     return row
@@ -438,11 +478,13 @@ async def close(
     *,
     dropped: bool = False,
     notes: str | None = None,
+    code: str | None = None,
 ) -> AssistantFollowup:
     """办完（或 `dropped`：不再需要）。已经关了的原样返回。
 
     Args:
         notes: 给了就替换备注（怎么了结的）
+        code: 关闭原因（所有者在页面上选的），记进 `close_code`
 
     Raises:
         FollowupError: followup_not_found / invalid_notes / content_locked
@@ -454,6 +496,7 @@ async def close(
         await _writable(session, bot_id)
         row.notes_enc = _notes(notes)
     row.status = "dropped" if dropped else "done"
+    row.close_code = code
     row.closed_at = row.updated_at = utcnow()
     await session.flush()
     await _retire(session, bot_id, [row.seq])

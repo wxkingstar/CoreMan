@@ -79,6 +79,8 @@ async def test_add_numbers_items_and_stores_ciphertext(db_session: AsyncSession)
         "job_id": None,
         "progress_at": first.progress_at.isoformat(),
         "created_at": first.created_at.isoformat(),
+        "stuck": None,
+        "nudges": 0,
         "notes": f"他周一问的。{SECRET}",
     }
     assert "notes" not in followups.view(first, notes=False)
