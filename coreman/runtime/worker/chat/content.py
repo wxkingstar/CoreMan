@@ -44,6 +44,10 @@ class ContentStage(ChatStageBase):
         # Resuming after a colleague's reply: its attachments live on that reply message, and
         # the origin text is already inside the prepared JSON, so the origin quote is not re-read.
         media_message_id = ctx.task.payload.get("human_reply_message_id")
+        # 合并转发、用户发的卡片、表情包、视频等：网关不解析，这里按引用同一套渲染读成文字。
+        self_render = reply_context.get("self_render")
+        if pre.intake.bot.platform == "feishu" and self_render and not media_message_id:
+            parent_id, has_parent = self_render, True
         if pre.intake.bot.platform == "feishu" and has_parent and not media_message_id:
             from coreman.runtime.worker.chat.feishu_quote import enrich
 
@@ -53,11 +57,14 @@ class ContentStage(ChatStageBase):
                     bot=pre.intake.bot,
                     cipher=ctx.cipher,
                     chat_id=pre.intake.chat_id,
-                    parent_id=pre.intake.inbound.reply_context.get("parent_id"),
+                    parent_id=parent_id,
                     parts=parts,
                     text=pre.intake.text,
                 )
             parts, enriched_text = enriched.parts, enriched.text
+            if self_render:
+                # 不是引用别人的话，是这条消息本身：前缀换成「发来的消息」。
+                parts = [{**p, "self": True} if p.get("type") == "quote" else p for p in parts]
             quoted_message_id = enriched.media_message_id
         else:
             enriched_text, quoted_message_id = pre.intake.text, None
