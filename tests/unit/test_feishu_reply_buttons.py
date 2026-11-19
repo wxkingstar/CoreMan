@@ -205,3 +205,64 @@ def test_people_names_cover_blocks_columns_and_person_columns() -> None:
     assert people_names(text) == ["alice@example.com", "bob", "carol", "dave", "frank"]
     assert people_names("没有块") == []
     assert scan(text) == (["https://example.com/a.png"], people_names(text))
+
+
+FOLLOWUPS = (
+    '```card:followups\n{"questions": ["按品类拆开看", "和上周比呢"]}\n```\n\n'
+    "订单比上周多 12%。\n\n"
+    '```card:note\n{"text": "数据截至昨天"}\n```'
+)
+
+
+def test_followups_go_last_with_an_expiry_and_only_for_the_requester() -> None:
+    from coreman.core.feishu_cards.stream import stream_units
+
+    compiled = compile_reply(FOLLOWUPS, requester="u_1", reply_expires=1_900_000_000)
+    assert compiled.problems == []
+    elements = compiled.cards[0]["body"]["elements"]
+    # 写在开头也放到卡片最后：标题一行 + 一组竖排按钮。
+    assert "你可能还想问" in elements[-2]["content"]
+    buttons = _buttons(elements[-1])
+    assert [b["text"]["content"] for b in buttons] == ["按品类拆开看", "和上周比呢"]
+    assert all(b["width"] == "fill" for b in buttons)
+    values = [b["behaviors"][0]["value"] for b in buttons]
+    assert {v["expires"] for v in values} == {1_900_000_000}
+    assert values[0]["row"] == elements[-1]["element_id"]
+    assert compiled.followups == (0, tuple(b["element_id"] for b in buttons))
+    click = parse_reply(values[1])
+    assert click is not None and click.expires == 1_900_000_000 and click.text == "和上周比呢"
+    # 没有提问人的出口（定时任务等）不显示；流式期间也不显示。
+    plain = compile_reply(FOLLOWUPS)
+    assert "按品类拆开看" not in json.dumps(plain.cards, ensure_ascii=False)
+    assert plain.followups is None
+    assert all(
+        "按品类" not in json.dumps(u.record(), ensure_ascii=False) for u in stream_units(FOLLOWUPS)
+    )
+
+
+def test_followups_block_validation() -> None:
+    from coreman.core.richtext.degrade import block_to_markdown
+    from coreman.core.richtext.schema import FollowupsBlock
+
+    assert FollowupsBlock.model_validate(["a", " b "]).questions == ["a", "b"]
+    for bad in ([], ["a", "b", "c", "d"], ["长" * 41], ["  "]):
+        with pytest.raises(BlockError):
+            validate_block("followups", bad)
+    # 其他出口点不了，不显示。
+    assert block_to_markdown("followups", FollowupsBlock(questions=["a"])) == ""
+
+
+def test_expire_card_disables_only_the_followups() -> None:
+    from coreman.core.feishu_cards.reply_buttons import EXPIRED_TIPS, expire_actions, expire_card
+
+    compiled = compile_reply(ACTIONS + "\n\n" + FOLLOWUPS, requester="u_1", reply_expires=1)
+    assert compiled.followups is not None
+    _index, ids = compiled.followups
+    card = copy.deepcopy(compiled.cards[0])
+    assert expire_card(card, ids)
+    disabled = [b["element_id"] for b in _buttons(card) if b.get("disabled")]
+    assert disabled == list(ids)
+    assert not expire_card(card, ["nope_1"])
+    actions = expire_actions(ids)
+    assert [a["params"]["element_id"] for a in actions] == list(ids)
+    assert actions[0]["params"]["partial_element"]["disabled_tips"]["content"] == EXPIRED_TIPS

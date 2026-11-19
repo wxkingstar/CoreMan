@@ -108,6 +108,7 @@ def _reply_click(
                 "buttons": list(click.buttons),
                 "label": click.text,
                 "requester": click.requester,
+                "expires": click.expires,
             },
         },
         raw=raw,

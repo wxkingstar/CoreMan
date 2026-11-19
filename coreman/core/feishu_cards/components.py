@@ -23,6 +23,7 @@ from coreman.core.feishu_cards.markdown import normalize
 from coreman.core.richtext.schema import (
     ActionsBlock,
     CalloutBlock,
+    FollowupsBlock,
     HeaderBlock,
     ItemBlock,
     KpiBlock,
@@ -495,6 +496,54 @@ def render_actions(block: ActionsBlock, ctx: RenderContext) -> list[dict[str, An
         hints = " · ".join(f"「{_inline(b.text)}」" for b in replies)
         out.append(_md(ctx, _font(hints, "grey"), size=style.TEXT_NOTE))
     return out
+
+
+FOLLOWUPS_TITLE = "你可能还想问"
+
+
+def render_followups(block: FollowupsBlock, ctx: RenderContext) -> list[Element]:
+    """建议追问：卡片最底部一列整宽按钮，点一下就是提问人把这句话发给机器人。
+
+    和选择题（一排实心按钮）在样式上分开：上面一行灰色小标题，按钮竖排、描边、撑满宽度。
+    只在提问人自己的对话回复里渲染（`ctx.requester`），value 带过期时刻；其余出口不渲染。
+    """
+    requester = ctx.requester
+    if not requester:
+        return []
+    row = ctx.new_id("cols")
+    ids = [ctx.new_id("btn") for _ in block.questions]
+    buttons: list[Element] = [
+        {
+            "tag": "button",
+            "element_id": bid,
+            "type": "default",
+            "width": "fill",
+            "text": {"tag": "plain_text", "content": question},
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": reply_buttons.reply_value(
+                        question,
+                        requester=requester,
+                        row=row,
+                        buttons=ids,
+                        expires=ctx.reply_expires,
+                    ),
+                }
+            ],
+        }
+        for bid, question in zip(ids, block.questions, strict=True)
+    ]
+    column = _column(ctx, buttons, vertical_spacing="6px")
+    return [
+        _md(
+            ctx,
+            _font(FOLLOWUPS_TITLE, "grey"),
+            size=style.TEXT_NOTE,
+            icon=style.icon("chat_outlined", "grey"),
+        ),
+        _column_set(ctx, [column], flex_mode="none", spacing="0px", element_id=row),
+    ]
 
 
 # ---------------------------------------------------------------- 表格

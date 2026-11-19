@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -25,6 +26,7 @@ ACTION = "reply"
 MAX_LABEL_CHARS = 40
 MAX_BUTTONS = 6
 USED_TIPS = "这组按钮已经用过了"
+EXPIRED_TIPS = "建议已过期，直接发消息就好"
 USER_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 ChatType = Literal["single", "group"]
@@ -32,23 +34,29 @@ ChatType = Literal["single", "group"]
 
 @dataclass(frozen=True)
 class ReplyClick:
-    """回调 value 里的一次回复按钮点击。"""
+    """回调 value 里的一次回复按钮点击。`expires`：过期时刻（epoch 秒），建议追问才有。"""
 
     text: str
     requester: str
     row: str | None
     buttons: tuple[str, ...]
+    expires: int | None = None
 
 
-def reply_value(text: str, *, requester: str, row: str, buttons: list[str]) -> dict[str, Any]:
+def reply_value(
+    text: str, *, requester: str, row: str, buttons: list[str], expires: int | None = None
+) -> dict[str, Any]:
     """按钮的回调 value：要发的话就是按钮文字本身。"""
-    return {
+    value: dict[str, Any] = {
         "action": ACTION,
         "text": text,
         "requester": requester,
         "row": row,
         "buttons": list(buttons),
     }
+    if expires is not None:
+        value["expires"] = expires
+    return value
 
 
 def _ids(value: Any) -> tuple[str, ...]:
@@ -67,11 +75,13 @@ def parse_reply(value: Any) -> ReplyClick | None:
     if not isinstance(requester, str) or not USER_ID.fullmatch(requester):
         return None
     row = value.get("row")
+    expires = value.get("expires")
     return ReplyClick(
         text=text.strip(),
         requester=requester,
         row=row if isinstance(row, str) and valid_element_id(row) else None,
         buttons=_ids(value.get("buttons")),
+        expires=expires if isinstance(expires, int) and not isinstance(expires, bool) else None,
     )
 
 
@@ -132,8 +142,45 @@ def used_note(used: UsedRow, user_id: str) -> dict[str, Any] | None:
     return node
 
 
-def _disabled() -> dict[str, Any]:
-    return {"disabled": True, "disabled_tips": {"tag": "plain_text", "content": USED_TIPS}}
+def _disabled(tips: str = USED_TIPS) -> dict[str, Any]:
+    return {"disabled": True, "disabled_tips": {"tag": "plain_text", "content": tips}}
+
+
+def expire_actions(buttons: Sequence[str]) -> list[dict[str, Any]]:
+    """建议追问到期：CardKit batch_update 把这些按钮置灰（点过的那组已经灰了，再置一次无妨）。"""
+    return [
+        {
+            "action": "partial_update_element",
+            "params": {"element_id": button, "partial_element": _disabled(EXPIRED_TIPS)},
+        }
+        for button in buttons
+    ]
+
+
+def expire_card(card: dict[str, Any], buttons: Sequence[str]) -> bool:
+    """在卡片 JSON 上原地做同样的置灰（续卡整卡 PATCH）；一个按钮都没找到返回 False。"""
+    wanted = set(buttons)
+    found = [
+        node
+        for node in _nodes((card.get("body") or {}).get("elements"))
+        if node.get("tag") == "button" and node.get("element_id") in wanted
+    ]
+    for node in found:
+        if not node.get("disabled"):
+            node.update(_disabled(EXPIRED_TIPS))
+    return bool(found)
+
+
+def _nodes(node: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        out.append(node)
+        for value in node.values():
+            out.extend(_nodes(value))
+    elif isinstance(node, list):
+        for item in node:
+            out.extend(_nodes(item))
+    return out
 
 
 def batch_actions(used: UsedRow, user_id: str) -> list[dict[str, Any]]:

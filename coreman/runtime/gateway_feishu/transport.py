@@ -59,7 +59,7 @@ from coreman.runtime.gateway_feishu.cards import (
 )
 from coreman.runtime.gateway_feishu.images import RemoteImages
 from coreman.runtime.gateway_feishu.reactions import clean_finished, typing
-from coreman.runtime.gateway_feishu.reply_buttons import mark_used
+from coreman.runtime.gateway_feishu.reply_buttons import expire_followups, mark_used
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # 本 bot 的出站锁：同一时刻只有一个 child 能更新它的卡片、发它的出站条目。
@@ -88,6 +88,8 @@ IMAGES_PER_REPLY = 9
 CARD_CONTENT_ERRORS = frozenset({-2, 10002, 200220, 200860, 300121, 300301, 300305, 230025, 230099})
 # 机器人无法私信该用户（用户未与机器人建立可达会话等）；真机验证时核对错误码。
 DM_UNREACHABLE = frozenset({230013})
+# 建议追问的有效期：过了这么久点了不再发出，按钮置灰。
+FOLLOWUPS_TTL_SECONDS = 30 * 60
 # 收尾时没有正文可做预览，消息列表显示这一句（盖掉流式期间的进度预览）。
 FINISHED_PREVIEW = "已回复"
 log = get_logger(__name__)
@@ -618,6 +620,7 @@ class FeishuTransport:
             await streams.mark_pushed(session, row.task_id, row.version)
             if row.is_complete:
                 await self.enqueue_cards(session, row, compiled)
+                await self.enqueue_followups_expiry(session, row, compiled, delivery.message_id)
                 await self.enqueue_interrupt_notice(session, row)
                 await streams.mark_finish_pushed(session, row.task_id)
             await session.commit()
@@ -815,6 +818,7 @@ class FeishuTransport:
                 images=images,
                 people=people,
                 requester=requester,
+                reply_expires=int(time.time()) + FOLLOWUPS_TTL_SECONDS,
             )
             if not compiled.problems:
                 return compiled
@@ -884,6 +888,39 @@ class FeishuTransport:
                 payload={"card": card, "_fallback_markdown": text, "_typing_task_id": row.task_id},
             )
         await self.enqueue_final(session, row, "", start=0)
+
+    async def enqueue_followups_expiry(
+        self,
+        session: AsyncSession,
+        row: TaskStream,
+        compiled: Compiled | None,
+        message_id: str | None,
+    ) -> None:
+        """建议追问到期时把按钮置灰：排一条到点才发的出站。
+
+        按钮在主卡上就按主卡的消息 ID 改；在续卡上，续卡此刻还没发出，记下它的出站去重键，
+        到点再查它的消息 ID。过期本身由网关应答时按按钮里的时刻判定，置灰只是让人看得出来。
+        """
+        if compiled is None or compiled.followups is None:
+            return
+        index, buttons = compiled.followups
+        target: dict[str, Any] = {"chat_id": row.reply_context.get("chat_id")}
+        if index == 0:
+            if not message_id:
+                return
+            target["message_id"] = message_id
+        else:
+            target["outbox_dedupe"] = f"{row.task_id}:more:{index}"
+        await outbox.add(
+            session,
+            bot_id=row.bot_id,
+            platform="feishu",
+            kind="card_update",
+            dedupe_key=f"{row.task_id}:followups-expire",
+            target=target,
+            payload={"_followups_expire": list(buttons)},
+            not_before=datetime.now(UTC) + timedelta(seconds=FOLLOWUPS_TTL_SECONDS),
+        )
 
     async def enqueue_interrupt_notice(self, session: AsyncSession, row: TaskStream) -> None:
         """中断了（失联、读超时、硬超时、恢复补的终态）：群里 @ 提问人一次。
@@ -1097,6 +1134,9 @@ class FeishuTransport:
                 **item.payload,
                 "_feishu_message_id": await self.send_new_session(item),
             }
+            return
+        if item.kind == "card_update" and "_followups_expire" in item.payload:
+            await expire_followups(self, item)
             return
         if item.kind == "card_update" and "_reply_used" in item.payload:
             await mark_used(self, item)
