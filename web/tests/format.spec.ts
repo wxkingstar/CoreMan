@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatDateTime, resetCountdown } from '@/utils/format'
+import { formatBytes, formatDateTime, resetCountdown, secondsBetween, secondsParts } from '@/utils/format'
 
 describe('formatDateTime', () => {
   it('renders in Asia/Shanghai regardless of host timezone', () => {
@@ -47,5 +47,34 @@ describe('resetCountdown', () => {
   it('handles empty or invalid values', () => {
     expect(resetCountdown(null, now)).toBe(null)
     expect(resetCountdown('not a date', now)).toBe(null)
+  })
+})
+
+describe('secondsParts', () => {
+  it('keeps at most two decimals and drops trailing zeros', () => {
+    expect(secondsParts(12.3456)).toEqual({ whole: '12', fraction: '.35' })
+    expect(secondsParts(1.5)).toEqual({ whole: '1', fraction: '.5' })
+    expect(secondsParts(2.004)).toEqual({ whole: '2', fraction: '' })
+    expect(secondsParts(0.05)).toEqual({ whole: '0', fraction: '.05' })
+    expect(secondsParts(1234)).toEqual({ whole: '1234', fraction: '' })
+  })
+  it('handles empty, invalid or negative values', () => {
+    expect(secondsParts(null)).toBeNull()
+    expect(secondsParts(undefined)).toBeNull()
+    expect(secondsParts(Number.NaN)).toBeNull()
+    expect(secondsParts(-1)).toBeNull()
+  })
+})
+
+describe('secondsBetween', () => {
+  it('measures the seconds between two instants', () => {
+    expect(secondsBetween('2026-10-01T00:00:00Z', '2026-10-01T00:00:01.250Z')).toBe(1.25)
+    expect(secondsBetween('2026-10-01T00:00:00.123456+00:00', '2026-10-01T00:00:00.456789+00:00')).toBeCloseTo(0.333, 3)
+  })
+  it('handles a missing, invalid or reversed range', () => {
+    expect(secondsBetween(null, '2026-10-01T00:00:00Z')).toBeNull()
+    expect(secondsBetween('2026-10-01T00:00:00Z', null)).toBeNull()
+    expect(secondsBetween('nope', '2026-10-01T00:00:00Z')).toBeNull()
+    expect(secondsBetween('2026-10-01T00:00:01Z', '2026-10-01T00:00:00Z')).toBeNull()
   })
 })

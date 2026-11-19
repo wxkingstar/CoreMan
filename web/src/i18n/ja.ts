@@ -554,7 +554,7 @@ export default {
     title: '一括書き込み操作',
     hint: '進行中のバッチがある間は 5 秒ごとに自動更新し、すべて終了すると停止します。',
     empty: '一括書き込み操作はありません。バッチは終了から 24 時間後に削除されるため、ここには直近のものだけが表示されます。',
-    createdAt: '依頼日時', bot: 'AI スタッフ', requester: '依頼者', operation: 'システム · 操作', progress: '進捗', result: '結果',
+    createdAt: '依頼日時', bot: 'AI スタッフ', requester: '依頼者', operation: 'システム · 操作', progress: '進捗', result: '結果', duration: '所要時間（秒）',
     stopping: '停止処理中', stop: '停止', stopRequested: '停止を依頼しました',
     stopConfirm: '停止すると、未実行の {n} 件は実行されません。実行済みの分は取り消されず、依頼者に通知されます。このバッチを停止しますか？',
     phase: { awaiting: '確認待ち', running: '実行中', paused: '一時停止中', finished: '終了', not_started: '未開始', cancelled: 'キャンセル済み', expired: '期限切れ' },

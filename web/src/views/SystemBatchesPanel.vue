@@ -6,6 +6,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { systemBatches, type SystemBatch, type SystemBatchPhase } from '@/api/infrastructure'
 import { formatDateTime } from '@/utils/format'
+import DurationSeconds from '@/components/DurationSeconds.vue'
 import SystemBatchItemsDrawer from '@/views/SystemBatchItemsDrawer.vue'
 
 // active：所在的 tab 是否正在显示；切走后不再定时刷新，切回来立即刷新一次。
@@ -199,6 +200,18 @@ onBeforeUnmount(() => { alive = false; clearTimeout(timer) })
               </el-tag>
             </template>
           </div>
+        </template>
+      </el-table-column>
+      <el-table-column
+        width="110"
+        align="right"
+        :label="t('systemBatches.duration')"
+      >
+        <template #default="{ row }: { row: SystemBatch }">
+          <DurationSeconds
+            :data-test="'batch-duration-' + row.id"
+            :value="row.duration_seconds"
+          />
         </template>
       </el-table-column>
       <el-table-column

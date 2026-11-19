@@ -553,7 +553,7 @@ export default {
     title: '批量写操作',
     hint: '有进行中的批次时每 5 秒自动刷新，全部结束后停止。',
     empty: '暂无批量写操作。批次在结束 24 小时后清理，这里只显示近期的。',
-    createdAt: '发起时间', bot: 'AI 员工', requester: '发起人', operation: '系统 · 操作', progress: '进度', result: '结果',
+    createdAt: '发起时间', bot: 'AI 员工', requester: '发起人', operation: '系统 · 操作', progress: '进度', result: '结果', duration: '耗时（秒）',
     stopping: '正在停止', stop: '停止', stopRequested: '已请求停止',
     stopConfirm: '停止后，还没执行的 {n} 项不会再执行，已经执行的不会撤回，发起人会收到通知。确定停止这个批次吗？',
     phase: { awaiting: '等待确认', running: '执行中', paused: '已暂停', finished: '已结束', not_started: '未开始', cancelled: '已取消', expired: '已过期' },

@@ -74,14 +74,24 @@ async def _out(
 ) -> list[dict[str, Any]]:
     ids = [row.id for row in rows]
     counts: dict[uuid.UUID, dict[str, int]] = {identity: {} for identity in ids}
+    # 耗时：已出结果的各项从发出到出结果的秒数之和（不含项与项之间的间隔和暂停）；还没有就是 None。
+    durations: dict[uuid.UUID, float] = {}
     if ids:
+        elapsed = func.extract("epoch", SystemBatchItem.finished_at - SystemBatchItem.started_at)
         found = await session.execute(
-            select(SystemBatchItem.batch_id, SystemBatchItem.status, func.count())
+            select(
+                SystemBatchItem.batch_id,
+                SystemBatchItem.status,
+                func.count(),
+                func.sum(elapsed),
+            )
             .where(SystemBatchItem.batch_id.in_(ids))
             .group_by(SystemBatchItem.batch_id, SystemBatchItem.status)
         )
-        for batch_id, status, n in found.all():
+        for batch_id, status, n, seconds in found.all():
             counts[batch_id][status] = int(n)
+            if seconds is not None:
+                durations[batch_id] = durations.get(batch_id, 0.0) + float(seconds)
     bot_ids = {row.bot_id for row in rows}
     user_ids = {uuid.UUID(str(row.state["user_id"])) for row in rows if row.state.get("user_id")}
     bots: dict[uuid.UUID, str] = {}
@@ -121,6 +131,7 @@ async def _out(
                 "unknown": tally.get("unknown", 0) + tally.get("sending", 0),
                 "skipped": tally.get("skipped", 0),
                 "pending": tally.get("pending", 0),
+                "duration_seconds": durations.get(row.id),
                 "created_at": row.created_at.isoformat(),
                 "started_at": meta.get("started_at"),
                 "finished_at": meta.get("finished_at"),
