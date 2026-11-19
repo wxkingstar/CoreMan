@@ -86,6 +86,9 @@ class WorkerService(Service):
         self._cloud_proxy_policy = settings.cloud_proxy_policy
         self._external_jwt_key = settings.external_jwt_key
         self._business_token_providers = settings.business_token_providers
+        from coreman.core.chat.transcribe import from_settings as transcriber_from_settings
+
+        self._transcriber = transcriber_from_settings(settings)
         self._engine = make_engine(settings.database_url)
         self._factory = make_session_factory(self._engine)
         self._store = SettingsStore(self._factory)
@@ -253,6 +256,7 @@ class WorkerService(Service):
             business_token_providers=self._business_token_providers,
             openuserid=self._openuserid,
             media_fetcher=self._media_fetcher,
+            transcriber=self._transcriber,
         )
         run = asyncio.create_task(self._run(ctx), name=f"task-{task.id}")
         self._running[task.id] = (run, ctx)

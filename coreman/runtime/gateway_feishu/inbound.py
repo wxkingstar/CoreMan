@@ -108,6 +108,7 @@ def _reply_click(
                 "buttons": list(click.buttons),
                 "label": click.text,
                 "requester": click.requester,
+                **({"expires": click.expires} if click.expires is not None else {}),
             },
         },
         raw=raw,
@@ -329,7 +330,11 @@ def _normalize_event(
     elif kind == "interactive" and sender_type == "bot":
         parts.append(TextPart(text=_card_text(content)))
     elif kind == "audio":
-        parts.append(AudioPart(ref={}))
+        key = content.get("file_key")
+        # 飞书语音只有音频文件，没有转写：worker 下载后交给转写服务（见 core/chat/transcribe）。
+        parts.append(
+            AudioPart(ref={"message_id": mid, "file_key": str(key), "type": "file"} if key else {})
+        )
     else:
         parts.append(VideoPart(ref={}))  # 公共 worker 的明确“不支持”回复，不送模型猜测。
     return InboundMessage(

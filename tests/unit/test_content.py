@@ -233,3 +233,57 @@ async def test_mixed_files_preserve_all_attachment_metadata(builder, fake):
     assert built.failed is None
     assert [f["filename"] for f in built.file_info["files"]] == ["one.pdf", "two.pdf"]
     assert len([p for p in built.parts if p["type"] == "file_url"]) == 2
+
+
+class _VoiceFetcher:
+    def __init__(self) -> None:
+        self.refs: list[dict] = []  # type: ignore[type-arg]
+
+    async def fetch_file(self, ref, *, filename=None):  # type: ignore[no-untyped-def]
+        from coreman.core.wecom.media import Media
+
+        self.refs.append(ref)
+        return Media(b"OggS-synthetic", "application/octet-stream", "voice.ogg")
+
+
+class _Transcriber:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+        self.calls: list[tuple[bytes, str, str]] = []
+
+    async def transcribe(self, data: bytes, *, filename: str, mime: str) -> str:
+        from coreman.core.chat.transcribe import TranscribeError
+
+        self.calls.append((data, filename, mime))
+        if self.text is None:
+            raise TranscribeError("http_500")
+        return self.text
+
+
+async def test_feishu_voice_is_transcribed_before_it_reaches_the_model() -> None:
+    ref = {"message_id": "om_1", "file_key": "file_v3_x", "type": "file"}
+    part = {"type": "audio", "ref": ref}
+    hints: list[str] = []
+    fetcher, heard = _VoiceFetcher(), _Transcriber("帮我查一下昨天的订单")
+    builder = ContentBuilder(
+        fetcher,  # type: ignore[arg-type]
+        platform="feishu",
+        on_hint=hints.append,
+        transcriber=heard,
+    )
+    built = await builder.build([part], text="")
+    assert built.failed is None and built.message_type == "voice"
+    assert built.parts == [_text("帮我查一下昨天的订单")] and built.text == "帮我查一下昨天的订单"
+    assert fetcher.refs == [ref] and heard.calls == [(b"OggS-synthetic", "voice.ogg", "audio/ogg")]
+    assert hints == [msg("voice_transcribing")]
+    # 转写失败或一个字没听出来：回「没听清」，不进模型。
+    for text in (None, ""):
+        failed = await ContentBuilder(
+            _VoiceFetcher(),  # type: ignore[arg-type]
+            platform="feishu",
+            transcriber=_Transcriber(text),
+        ).build([part], text="")
+        assert failed.failed == msg("voice_empty")
+    # 没配转写服务：照旧「暂不支持」。
+    plain = await ContentBuilder(_VoiceFetcher(), platform="feishu").build([part], text="")  # type: ignore[arg-type]
+    assert plain.failed == msg("voice_unsupported")

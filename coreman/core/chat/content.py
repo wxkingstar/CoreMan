@@ -14,12 +14,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from coreman.core.chat.transcribe import TranscribeError, Transcriber
 from coreman.core.i18n.messages import msg
 from coreman.core.wecom.media import Media, MediaError, MediaFetcher, data_uri
 
 # 能组装进 content parts 的 part 类型；其余（video 等）本期直接回「暂不支持」。
 _SUPPORTED = ("text", "audio", "voice", "image", "file")
 _AUDIO = ("audio", "voice")
+# 飞书语音是 Ogg 封装的 Opus；按 .ogg 交给转写接口。
+VOICE_FILENAME = "voice.ogg"
+VOICE_MIME = "audio/ogg"
 
 
 @dataclass(frozen=True)
@@ -98,8 +102,10 @@ class ContentBuilder:
         locale: str = "zh",
         platform: str = "wecom",
         on_hint: Callable[[str], object] | None = None,
+        transcriber: Transcriber | None = None,
     ) -> None:
         self.fetcher = fetcher
+        self.transcriber = transcriber
         self.locale = locale
         self.platform = platform
         self._on_hint = on_hint
@@ -110,6 +116,23 @@ class ContentBuilder:
         result = self._on_hint(msg(key, self.locale))
         if inspect.isawaitable(result):
             await result
+
+    async def _transcribed(self, part: dict[str, Any]) -> dict[str, Any]:
+        """飞书语音：下载音频、转成文字写进 `transcript`；失败时留空，按「没听清」回复。"""
+        if part.get("transcript"):
+            return part
+        ref = _ref_of(part)
+        if not _has_ref(ref) or self.transcriber is None:
+            return part
+        await self._hint("voice_transcribing")
+        try:
+            media = await self.fetcher.fetch_file(ref, filename=VOICE_FILENAME)
+            text = await self.transcriber.transcribe(
+                media.data, filename=VOICE_FILENAME, mime=VOICE_MIME
+            )
+        except (MediaError, TranscribeError):
+            return part
+        return {**part, "transcript": text}
 
     def _reason(self, exc: MediaError) -> str:
         """`MediaError.reason` 与 `media_reason_*` 文案键同名，缺键由 test_messages 兜住。"""
@@ -127,9 +150,21 @@ class ContentBuilder:
             )
         audio = [p for p in own if p.get("type") in _AUDIO]
         if audio and self.platform == "feishu":
-            return BuiltContent(
-                [], "", "voice", None, None, msg("voice_unsupported", self.locale), "unsupported"
-            )
+            if self.transcriber is None:
+                return BuiltContent(
+                    [],
+                    "",
+                    "voice",
+                    None,
+                    None,
+                    msg("voice_unsupported", self.locale),
+                    "unsupported",
+                )
+            own = [await self._transcribed(p) if p.get("type") in _AUDIO else p for p in own]
+            audio = [p for p in own if p.get("type") in _AUDIO]
+            heard = "\n".join(str(p.get("transcript") or "") for p in audio).strip()
+            # 飞书语音消息本身没有文字：识别出来的话就是这条消息的正文。
+            text = text if text.strip() else heard
         if audio and not any(p.get("transcript") for p in audio):
             # 企微转写失败时 transcript 为空，此时没有任何可发的内容。
             return BuiltContent(

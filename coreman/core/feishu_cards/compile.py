@@ -22,6 +22,7 @@ from coreman.core.feishu_cards.components import (
     panel,
     render_actions,
     render_callout,
+    render_followups,
     render_header,
     render_item,
     render_kpi,
@@ -44,6 +45,7 @@ from coreman.core.richtext.schema import (
     CalloutBlock,
     ChartBlock,
     ColumnsBlock,
+    FollowupsBlock,
     HeaderBlock,
     ItemBlock,
     KpiBlock,
@@ -84,6 +86,8 @@ class Compiled:
     texts: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     rich: bool = False
+    # 建议追问在第几张卡、是哪几个按钮：到期时据此置灰。
+    followups: tuple[int, tuple[str, ...]] | None = None
 
 
 def image_urls(text: str) -> list[str]:
@@ -372,6 +376,7 @@ class _Builder:
         self.ctx = ctx
         self.units: list[_Unit] = []
         self.header: dict[str, Any] | None = None
+        self.followups: _Unit | None = None
         self.rich = False
         self._half: _Unit | None = None
 
@@ -427,6 +432,11 @@ class _Builder:
                     self.add(_Unit(render_subtitle(model, self.ctx), model.subtitle))
             else:
                 self.add_markdown(text)
+            return
+        if isinstance(model, FollowupsBlock):
+            # 不管写在哪里都放到最后（只取最后一个）；没有提问人的出口不显示。
+            elements = render_followups(model, self.ctx)
+            self.followups = _Unit(elements, text) if elements else None
             return
         if isinstance(model, ColumnsBlock):
             cols = [self._children(col) for col in model.columns]
@@ -550,6 +560,7 @@ def compile_reply(
     final: bool = True,
     summary: str | None = None,
     requester: str | None = None,
+    reply_expires: int | None = None,
 ) -> Compiled:
     """一条回复 → 若干张卡。`prefix` 是放在主卡最前面的组件（思考面板）。
 
@@ -558,7 +569,12 @@ def compile_reply(
 
     编译器自身出错也不抛：返回简化卡并在 problems 里注明，调用方照常发送。
     """
-    ctx = RenderContext(images=images or {}, people=people or {}, requester=requester or None)
+    ctx = RenderContext(
+        images=images or {},
+        people=people or {},
+        requester=requester or None,
+        reply_expires=reply_expires,
+    )
     try:
         return _compile(text, prefix, ctx, final, summary)
     except Exception as exc:  # noqa: BLE001 编译器的 bug 不能让回复发不出去
@@ -581,6 +597,8 @@ def _compile(
     for seg in split(text, final=final):
         builder.segment(seg, final=final)
     builder.finish()
+    if builder.followups is not None:
+        builder.units.append(builder.followups)
     units = [piece for unit in builder.units for piece in _fit(unit, ctx)]
     packed = _pack(units, prefix)
     brief = summary if summary is not None else summary_of(text)
@@ -600,7 +618,38 @@ def _compile(
         title = (builder.header.get("title") or {}).get("content") or ""
         texts[0] = f"**{title}**\n\n{texts[0]}" if title else texts[0]
     problems = [f"card {i}: {p}" for i, card in enumerate(cards) for p in validate_card(card)]
-    return Compiled(cards, brief, texts, problems, rich=builder.rich)
+    return Compiled(
+        cards, brief, texts, problems, rich=builder.rich, followups=_followups_at(cards)
+    )
+
+
+def _followups_at(cards: list[dict[str, Any]]) -> tuple[int, tuple[str, ...]] | None:
+    """建议追问按钮在哪张卡上（按回调 value 里的过期时刻认）。"""
+    for index, card in enumerate(cards):
+        ids = tuple(
+            str(node.get("element_id"))
+            for node in _walk(card)
+            if node.get("tag") == "button"
+            and any(
+                isinstance(b, dict) and isinstance((b.get("value") or {}).get("expires"), int)
+                for b in node.get("behaviors") or []
+            )
+        )
+        if ids:
+            return index, ids
+    return None
+
+
+def _walk(node: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        out.append(node)
+        for value in node.values():
+            out.extend(_walk(value))
+    elif isinstance(node, list):
+        for item in node:
+            out.extend(_walk(item))
+    return out
 
 
 def _card_text(card: dict[str, Any]) -> str:
