@@ -8,6 +8,8 @@ from typing import Any
 
 from coreman.core.chat import stream_stop
 from coreman.core.feishu_cards.compile import card_shell, streaming_text
+from coreman.core.feishu_cards.components import bubble
+from coreman.core.feishu_cards.context import RenderContext
 from coreman.core.feishu_cards.thinking import thinking_panel
 from coreman.core.wecom.cards import clip
 
@@ -202,6 +204,40 @@ def _choice_buttons(
     }
 
 
+def _choice_bubbles(
+    card: dict[str, Any],
+    checkbox: dict[str, Any],
+    submit: dict[str, Any],
+    options: list[dict[str, Any]],
+    rich: list[Any],
+) -> list[dict[str, Any]]:
+    """飞书的单选题：每个选项一个整句换行的气泡，下面一行灰字说明，推荐项蓝框加「推荐」标签。
+
+    回调 value 与按钮版一样（task_id、event_key、题目 key、选项 id）。「其他」放在最后。
+    """
+    base = {
+        "task_id": str(card.get("task_id") or ""),
+        "event_key": str(submit.get("key") or ""),
+        "question": str(checkbox.get("question_key") or "choice_answer"),
+    }
+    ctx = RenderContext()
+    details = {str(o.get("id")): o for o in rich if isinstance(o, dict)}
+    out: list[dict[str, Any]] = []
+    for option in options:
+        oid = str(option["id"])
+        detail = details.get(oid) or {}
+        out.append(
+            bubble(
+                ctx,
+                str(detail.get("text") or option.get("text") or "…"),
+                {**base, "option": oid},
+                recommended=bool(detail.get("recommended")),
+                note=str(detail.get("description") or ""),
+            )
+        )
+    return out
+
+
 def interaction_card(card: dict[str, Any]) -> dict[str, Any]:
     if card.get("schema") == "2.0":
         return {key: value for key, value in card.items() if key != "task_id"}
@@ -214,8 +250,12 @@ def interaction_card(card: dict[str, Any]) -> dict[str, Any]:
     checkbox = card.get("checkbox") or {}
     submit = card.get("submit_button") or {}
     options = checkbox.get("option_list") or []
+    rich = card.get("rich_options")
     if checkbox and not checkbox.get("disable") and submit and _one_tap(checkbox, options):
-        elements.append(_choice_buttons(card, checkbox, submit, options))
+        if isinstance(rich, list) and rich:
+            elements.extend(_choice_bubbles(card, checkbox, submit, options, rich))
+        else:
+            elements.append(_choice_buttons(card, checkbox, submit, options))
     elif checkbox and not checkbox.get("disable") and submit:
         elements.append(
             {

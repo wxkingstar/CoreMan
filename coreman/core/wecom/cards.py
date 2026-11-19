@@ -96,8 +96,13 @@ def choice_card(
     task_id: str,
     icon_url: str,
     locale: str = "zh",
+    rich: bool = False,
 ) -> dict[str, Any]:
-    """一道待答的选择题。末尾永远追加「其他」：用户想自己打字时点它，卡片换成 waiting_card。"""
+    """一道待答的选择题。末尾永远追加「其他」：用户想自己打字时点它，卡片换成 waiting_card。
+
+    `rich`（飞书）：另带一份完整的选项（不截断的文字、说明、是否推荐），飞书卡片据此把选项画成
+    整句换行的气泡、标出推荐项；企微的模板卡片不认多余字段，所以只在飞书时带。
+    """
     options = [
         {
             "id": f"opt_{i}",
@@ -130,7 +135,37 @@ def choice_card(
         },
         "submit_button": {"text": msg("card_submit_choice", locale), "key": "submit_choice"},
         "task_id": task_id,
+        **({"rich_options": rich_options(question)} if rich else {}),
     }
+
+
+# 模型在选项标签里写的推荐标记：「（推荐）」「(Recommended)」，放在开头或结尾都认。
+_RECOMMENDED = re.compile(
+    r"^\s*[\[(（【]\s*(?:推荐|recommended)\s*[\])）】]\s*"
+    r"|\s*[\[(（【]\s*(?:推荐|recommended)\s*[\])）】]\s*$",
+    re.IGNORECASE,
+)
+
+
+def recommended_label(label: str) -> tuple[str, bool]:
+    """去掉标签里的推荐标记，返回（干净的标签, 是否推荐）。"""
+    cleaned = _RECOMMENDED.sub("", label).strip()
+    return (cleaned or label, cleaned != label.strip())
+
+
+def rich_options(question: dict[str, Any]) -> list[dict[str, Any]]:
+    out = []
+    for i, option in enumerate(question.get("options") or []):
+        label, recommended = recommended_label(str(option.get("label") or ""))
+        out.append(
+            {
+                "id": f"opt_{i}",
+                "text": label[:80],
+                "description": str(option.get("description") or "")[:120],
+                "recommended": recommended,
+            }
+        )
+    return out
 
 
 def question_brief(question: dict[str, Any], *, index: int, total: int, locale: str = "zh") -> str:

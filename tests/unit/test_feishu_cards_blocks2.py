@@ -163,3 +163,38 @@ def test_client_kind_from_user_agent() -> None:
         client_kind("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Lark/7.30") == "mobile"
     )
     assert client_kind("Mozilla/5.0 (Linux; Android 14) Feishu/7.30") == "mobile"
+
+
+def test_choice_card_marks_the_recommended_option_only_for_feishu() -> None:
+    from coreman.core.wecom.cards import choice_card, recommended_label
+    from coreman.runtime.gateway_feishu.cards import interaction_card
+
+    assert recommended_label("按退款完成时间（推荐）") == ("按退款完成时间", True)
+    assert recommended_label("(Recommended) Use the cache") == ("Use the cache", True)
+    assert recommended_label("推荐算法优化") == ("推荐算法优化", False)
+    question = {
+        "question": "退款单要按哪种口径统计？",
+        "header": "口径",
+        "options": [
+            {"label": "按退款完成时间统计（推荐）", "description": "和财务对账口径一致"},
+            {"label": "按下单时间统计", "description": "能看出哪批订单问题多"},
+        ],
+        "multiSelect": False,
+    }
+    wecom = choice_card(question, index=0, total=1, task_id="choice@x@0", icon_url="")
+    assert "rich_options" not in wecom
+    feishu = interaction_card(
+        choice_card(question, index=0, total=1, task_id="choice@x@0", icon_url="", rich=True)
+    )
+    bubbles = [n for n in _walk(feishu) if n.get("tag") == "interactive_container"]
+    assert len(bubbles) == 3  # 两个选项加「其他」
+    first = bubbles[0]["elements"][0]["content"]
+    assert "推荐" in first and "按退款完成时间统计" in first and "（推荐）" not in first
+    assert "和财务对账口径一致" in first and bubbles[0]["border_color"] == "blue"
+    assert bubbles[1]["border_color"] == "grey"
+    assert bubbles[0]["behaviors"][0]["value"] == {
+        "task_id": "choice@x@0",
+        "event_key": "submit_choice",
+        "question": "choice_answer",
+        "option": "opt_0",
+    }

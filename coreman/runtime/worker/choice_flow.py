@@ -131,6 +131,7 @@ async def advance_choice(
                     task_id=question_task_id(st.task_id_prefix or "", nxt),
                     icon_url=icon_url,
                     locale=ctx.locale,
+                    rich=bot.platform == "feishu",
                 )
             },
         )
