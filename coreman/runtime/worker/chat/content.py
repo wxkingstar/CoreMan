@@ -90,12 +90,7 @@ class ContentStage(ChatStageBase):
             await pre.writer.flush(force=True)
 
         try:
-            transcriber = None
-            if pre.intake.bot.platform == "feishu":
-                from coreman.core.chat.transcribe import from_settings
-                from coreman.core.config import get_settings
-
-                transcriber = from_settings(get_settings())
+            transcriber = ctx.transcriber if pre.intake.bot.platform == "feishu" else None
             builder = ContentBuilder(
                 fetcher,
                 locale=ctx.locale,
