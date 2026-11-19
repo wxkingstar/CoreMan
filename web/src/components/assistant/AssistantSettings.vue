@@ -89,6 +89,9 @@ defineExpose({ form, save, load, range })
       class="assistant-settings"
       @submit.prevent
     >
+      <h4 class="settings-section">
+        {{ t('assistant.settings.sections.schedule') }}
+      </h4>
       <el-form-item
         :label="t('assistant.settings.timezone')"
         :error="fieldError('timezone')"
@@ -190,6 +193,9 @@ defineExpose({ form, save, load, range })
           {{ fieldError('workdays') }}
         </div>
       </el-form-item>
+      <h4 class="settings-section">
+        {{ t('assistant.settings.sections.notify') }}
+      </h4>
       <el-form-item
         :label="t('assistant.settings.digestTimes')"
         :error="fieldError('digest_times')"
@@ -253,6 +259,9 @@ defineExpose({ form, save, load, range })
           {{ fieldError('quiet_hours') }}
         </div>
       </el-form-item>
+      <h4 class="settings-section">
+        {{ t('assistant.settings.sections.chats') }}
+      </h4>
       <el-form-item
         :label="t('assistant.settings.focusChats')"
         :error="fieldError('focus_chats')"
@@ -373,6 +382,9 @@ defineExpose({ form, save, load, range })
           >{{ t('assistant.settings.rangeLink') }}</a>
         </div>
       </el-form-item>
+      <h4 class="settings-section">
+        {{ t('assistant.settings.sections.usage') }}
+      </h4>
       <el-form-item
         :label="t('assistant.settings.budget')"
         :error="fieldError('daily_turn_budget')"
@@ -417,7 +429,8 @@ defineExpose({ form, save, load, range })
       >
         {{ props.runtime ?? t('assistant.settings.runtimeNone') }}
       </el-form-item>
-      <el-form-item>
+      <!-- 表单很长：保存按钮贴在底部，改完哪一项都不用滚回去找。 -->
+      <div class="settings-footer">
         <el-button
           type="primary"
           :loading="saving"
@@ -426,7 +439,7 @@ defineExpose({ form, save, load, range })
         >
           {{ t('assistant.settings.save') }}
         </el-button>
-      </el-form-item>
+      </div>
     </el-form>
     <AssistantAccessLog />
     <el-alert
@@ -457,4 +470,8 @@ defineExpose({ form, save, load, range })
 .range-button { margin-left: 16px; }
 .quiet-dash { margin: 0 8px; color: var(--el-text-color-secondary); }
 .danger-zone { margin-top: 24px; max-width: 760px; }
+.settings-section { margin: 24px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--el-border-color-lighter); font-size: 14px; font-weight: 600; color: var(--el-text-color-primary); }
+.settings-section:first-child { margin-top: 0; }
+.settings-footer { position: sticky; bottom: 0; z-index: 2; padding: 12px 0 12px 160px; background: var(--cm-surface, var(--el-bg-color)); border-top: 1px solid var(--el-border-color-lighter); }
+@media (max-width: 767px) { .settings-footer { padding-left: 0; } }
 </style>

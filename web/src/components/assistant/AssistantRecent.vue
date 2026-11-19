@@ -29,59 +29,79 @@ defineExpose({ load })
       :error="error"
       @retry="load"
     />
-    <p
-      v-if="items && !items.length"
-      class="muted"
+    <section
+      v-if="items"
+      class="ma-group"
+      :class="{ 'is-empty': !items.length }"
     >
-      {{ t('assistant.recent.empty') }}
-    </p>
-    <ul v-if="items && items.length">
-      <li
-        v-for="item in items"
-        :key="item.id"
-        :data-test="'settled-' + item.id"
+      <header class="ma-group__head">
+        <h3>{{ t('assistant.page.tabs.recent') }}</h3>
+        <span class="ma-count">{{ items.length }}</span>
+        <span
+          v-if="!items.length"
+          class="ma-empty"
+        >{{ t('assistant.recent.empty') }}</span>
+      </header>
+      <ul
+        v-if="items.length"
+        class="ma-list"
       >
-        <el-tag
-          size="small"
-          :type="tags[item.status]"
+        <li
+          v-for="item in items"
+          :key="item.id"
+          class="ma-row"
+          :data-test="'settled-' + item.id"
         >
-          {{ t('assistant.recent.statuses.' + item.status) }}
-        </el-tag>
-        <strong>{{ item.summary ?? t('assistant.page.lockedText') }}</strong>
-        <el-tag
-          v-if="item.tool === DISPATCH_TOOL"
-          size="small"
-          type="warning"
-        >
-          {{ t('assistant.recent.dispatch') }}
-        </el-tag>
-        <el-tag
-          v-if="PROXIED_TOOLS[item.tool]"
-          size="small"
-          type="warning"
-        >
-          {{ t('assistant.recent.' + PROXIED_TOOLS[item.tool]) }}
-        </el-tag>
-        <span class="muted">{{ item.tool }}</span>
-        <span
-          v-if="item.executed_at"
-          class="muted"
-        >{{ t('assistant.recent.executedAt', { time: formatDateTime(item.executed_at) }) }}</span>
-        <span
-          v-else-if="item.decided_at"
-          class="muted"
-        >{{ t('assistant.recent.decidedAt', { time: formatDateTime(item.decided_at) }) }}</span>
-        <span
-          v-if="item.error"
-          class="muted"
-        >{{ t('assistant.recent.error', { detail: item.error }) }}</span>
-        <span v-if="item.reason">{{ t('assistant.recent.reason') }}：{{ item.reason }}</span>
-      </li>
-    </ul>
+          <div class="ma-row__main">
+            <el-tag
+              size="small"
+              :type="tags[item.status]"
+              class="recent-status"
+            >
+              {{ t('assistant.recent.statuses.' + item.status) }}
+            </el-tag>
+            <!-- 工具名是给排查用的：鼠标停在标题上才显示。 -->
+            <span
+              class="ma-title"
+              :title="item.tool"
+            >
+              {{ item.summary ?? t('assistant.page.lockedText') }}
+              <el-tag
+                v-if="item.tool === DISPATCH_TOOL"
+                size="small"
+                type="warning"
+              >
+                {{ t('assistant.recent.dispatch') }}
+              </el-tag>
+              <el-tag
+                v-if="PROXIED_TOOLS[item.tool]"
+                size="small"
+                type="warning"
+              >
+                {{ t('assistant.recent.' + PROXIED_TOOLS[item.tool]) }}
+              </el-tag>
+            </span>
+          </div>
+          <div class="ma-meta">
+            <span v-if="item.executed_at">{{ t('assistant.recent.executedAt', { time: formatDateTime(item.executed_at) }) }}</span>
+            <span v-else-if="item.decided_at">{{ t('assistant.recent.decidedAt', { time: formatDateTime(item.decided_at) }) }}</span>
+            <span
+              v-if="item.error"
+              class="ma-danger"
+            >{{ t('assistant.recent.error', { detail: item.error }) }}</span>
+          </div>
+          <div
+            v-if="item.reason"
+            class="ma-callout"
+            :class="{ 'is-danger': item.status === 'rejected' }"
+          >
+            {{ t('assistant.recent.reason') }}：{{ item.reason }}
+          </div>
+        </li>
+      </ul>
+    </section>
   </section>
 </template>
 <style scoped>
-.assistant-section ul { list-style: none; padding: 0; }
-.assistant-section li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--el-border-color-lighter); }
-.muted { color: var(--el-text-color-secondary); }
+.recent-status { flex-shrink: 0; margin-top: 2px; }
 </style>
