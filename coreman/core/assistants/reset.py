@@ -2,10 +2,11 @@
 
 清掉的：未结（含推后）的待跟进记为不再需要；进行中的子任务与调度取消，已经结束、还没投回主会话
 的结论不再投回；待批的审批单撤回（审批系统里同步撤）；还没交回助理的收件箱条目作废；还没发出的
-摘要语句丢掉。
+摘要语句丢掉；未解决的能力缺口删掉，上面在途的业务系统权限申请撤回（不记成「不开」：那是粘滞
+状态，以后同一个缺口就报不出来了；删掉之后真缺的下次会重新登记）。
 
-留着的：主会话与子任务的历史对话、转录、知识页（含口吻页）、设置、能力缺口（缺什么权限是事实，
-清了下次还会再报）、已经落地的审批流水。清完给助理入一条提醒：之前的事项已经清掉，历史只作背景。
+留着的：主会话与子任务的历史对话、转录、知识页（含口吻页）、设置、已经解决或不开的缺口、已经
+落地的审批流水。清完给助理入一条提醒：之前的事项已经清掉，历史只作背景。
 
 一个事务里做完，调用方提交。
 """
@@ -19,9 +20,15 @@ from datetime import datetime
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import approvals, delivery_checks, digest, followups, jobs
+from coreman.core.assistants import approvals, delivery_checks, digest, followups, gaps, jobs
 from coreman.core.assistants.watch_inbox import void_all
-from coreman.core.db.models import AssistantFollowup, AssistantJob, AssistantReport
+from coreman.core.db.models import (
+    AssistantFollowup,
+    AssistantGap,
+    AssistantJob,
+    AssistantReport,
+    SystemAccessRequest,
+)
 from coreman.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -38,9 +45,32 @@ class Cleared:
     approvals: int
     inbox: int
     reports: int
+    gaps: int
 
     def payload(self) -> dict[str, int]:
         return asdict(self)
+
+
+async def _drop_gaps(session: AsyncSession, bot_id: uuid.UUID, now: datetime) -> int:
+    """未解决的缺口：在途的权限申请撤回，缺口行删掉（挂着它的待跟进、申请的 gap_id 随之置空）。
+
+    加锁顺序与 `access_requests` 相同：咨询锁 → 申请行 → 缺口行。
+    """
+    await gaps.lock(session, bot_id)
+    live = select(AssistantGap.id).where(
+        AssistantGap.bot_id == bot_id, AssistantGap.status.in_(gaps.LIVE)
+    )
+    await session.execute(
+        update(SystemAccessRequest)
+        .where(SystemAccessRequest.gap_id.in_(live), SystemAccessRequest.status == "pending")
+        .values(status="withdrawn", decided_at=now)
+    )
+    found = await session.execute(
+        delete(AssistantGap).where(
+            AssistantGap.bot_id == bot_id, AssistantGap.status.in_(gaps.LIVE)
+        )
+    )
+    return int(getattr(found, "rowcount", 0) or 0)
 
 
 async def _drop_followups(session: AsyncSession, bot_id: uuid.UUID, now: datetime) -> int:
@@ -82,6 +112,8 @@ async def _skip_unreported(session: AsyncSession, bot_id: uuid.UUID, now: dateti
 
 async def start_fresh(session: AsyncSession, bot_id: uuid.UUID, now: datetime) -> Cleared:
     """清掉这位助理积压的事项，并告诉助理从此刻起重新开始。返回各清了多少。"""
+    # 先清缺口：登记缺口时先拿缺口的锁再锁待跟进，这里同一顺序。
+    gap_count = await _drop_gaps(session, bot_id, now)
     dropped = await _drop_followups(session, bot_id, now)
     cancelled = await jobs.cancel_all(session, bot_id, CODE, now=now)
     await _skip_unreported(session, bot_id, now)
@@ -98,6 +130,7 @@ async def start_fresh(session: AsyncSession, bot_id: uuid.UUID, now: datetime) -
         approvals=withdrawn,
         inbox=voided,
         reports=int(getattr(reports, "rowcount", 0) or 0),
+        gaps=gap_count,
     )
     # 先作废再入：这条提醒本身不能被上面的作废带走。
     await delivery_checks.add_reminder(

@@ -199,7 +199,7 @@ describe('My assistant page', () => {
   })
 
   it('starts fresh after confirming, reports what was cleared and reloads', async () => {
-    vi.mocked(myAssistant.reset).mockReset().mockResolvedValue({ followups: 5, jobs: 2, approvals: 1, inbox: 7, reports: 0 })
+    vi.mocked(myAssistant.reset).mockReset().mockResolvedValue({ followups: 5, jobs: 2, approvals: 1, inbox: 7, reports: 0, gaps: 3 })
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
     const success = vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
     const wrapper = render(); await flushPromises()
@@ -209,7 +209,7 @@ describe('My assistant page', () => {
     confirm.mockResolvedValueOnce('confirm' as never)
     await wrapper.get('[data-test="assistant-reset"]').trigger('click'); await flushPromises()
     expect(myAssistant.reset).toHaveBeenCalledTimes(1)
-    expect(success).toHaveBeenCalledWith(t('assistant.page.resetDone', { n: 5, count: 2, total: 1, value: 7 }))
+    expect(success).toHaveBeenCalledWith(t('assistant.page.resetDone', { n: 5, count: 2, total: 1, value: 7, detail: 3 }))
     expect(myAssistant.overview).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
