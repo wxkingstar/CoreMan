@@ -38,6 +38,10 @@ def _walk(node: Any):
             yield from _walk(value)
 
 
+def _bubbles(card: dict[str, Any]) -> list[dict[str, Any]]:
+    return [n for n in _walk(card) if n.get("tag") == "interactive_container"]
+
+
 def _buttons(card: dict[str, Any]) -> list[dict[str, Any]]:
     return [n for n in _walk(card) if n.get("tag") == "button"]
 
@@ -220,11 +224,11 @@ def test_followups_go_last_with_an_expiry_and_only_for_the_requester() -> None:
     compiled = compile_reply(FOLLOWUPS, requester="u_1", reply_expires=1_900_000_000)
     assert compiled.problems == []
     elements = compiled.cards[0]["body"]["elements"]
-    # 写在开头也放到卡片最后：标题一行 + 一组竖排按钮。
-    assert "你可能还想问" in elements[-2]["content"]
-    buttons = _buttons(elements[-1])
-    assert [b["text"]["content"] for b in buttons] == ["按品类拆开看", "和上周比呢"]
-    assert all(b["width"] == "fill" for b in buttons)
+    # 写在开头也放到卡片最后：分割线、标题一行、一组整句换行的气泡。
+    assert elements[-3]["tag"] == "hr" and "你可能还想问" in elements[-2]["content"]
+    buttons = _bubbles(elements[-1])
+    assert [b["elements"][0]["content"] for b in buttons] == ["按品类拆开看", "和上周比呢"]
+    assert all(b["width"] == "fill" and b["has_border"] for b in buttons)
     values = [b["behaviors"][0]["value"] for b in buttons]
     assert {v["expires"] for v in values} == {1_900_000_000}
     assert values[0]["row"] == elements[-1]["element_id"]
@@ -260,8 +264,9 @@ def test_expire_card_disables_only_the_followups() -> None:
     _index, ids = compiled.followups
     card = copy.deepcopy(compiled.cards[0])
     assert expire_card(card, ids)
-    disabled = [b["element_id"] for b in _buttons(card) if b.get("disabled")]
+    disabled = [b["element_id"] for b in _bubbles(card) if b.get("disabled")]
     assert disabled == list(ids)
+    assert not any(b.get("disabled") for b in _buttons(card))
     assert not expire_card(card, ["nope_1"])
     actions = expire_actions(ids)
     assert [a["params"]["element_id"] for a in actions] == list(ids)

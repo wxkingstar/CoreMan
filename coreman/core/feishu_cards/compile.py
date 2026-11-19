@@ -654,7 +654,7 @@ def _followups_at(cards: list[dict[str, Any]]) -> tuple[int, tuple[str, ...]] | 
         ids = tuple(
             str(node.get("element_id"))
             for node in _walk(card)
-            if node.get("tag") == "button"
+            if node.get("tag") in ("button", "interactive_container")
             and any(
                 isinstance(b, dict) and isinstance((b.get("value") or {}).get("expires"), int)
                 for b in node.get("behaviors") or []

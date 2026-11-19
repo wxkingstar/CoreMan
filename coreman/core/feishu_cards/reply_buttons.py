@@ -26,6 +26,8 @@ ACTION = "reply"
 MAX_LABEL_CHARS = 40
 MAX_BUTTONS = 6
 USED_TIPS = "这组按钮已经用过了"
+# 能点的组件：按钮和气泡（可点的容器）；置灰、到期都按这两种找。
+CLICKABLE = frozenset({"button", "interactive_container"})
 EXPIRED_TIPS = "建议已过期，直接发消息就好"
 USER_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
@@ -225,7 +227,7 @@ def expire_card(card: dict[str, Any], buttons: Sequence[str]) -> bool:
     found = [
         node
         for node in _nodes((card.get("body") or {}).get("elements"))
-        if node.get("tag") == "button" and node.get("element_id") in wanted
+        if node.get("tag") in CLICKABLE and node.get("element_id") in wanted
     ]
     for node in found:
         if not node.get("disabled"):
@@ -307,7 +309,7 @@ def _find_parent(elements: Any, element_id: str) -> tuple[list[Any], int] | None
 
 def _disable(node: Any, wanted: set[str]) -> None:
     if isinstance(node, dict):
-        if node.get("tag") == "button" and node.get("element_id") in wanted:
+        if node.get("tag") in CLICKABLE and node.get("element_id") in wanted:
             node.update(_disabled())
         for value in node.values():
             _disable(value, wanted)

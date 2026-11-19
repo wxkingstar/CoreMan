@@ -76,7 +76,9 @@ def reply_values(card):
     return [
         n["behaviors"][0]["value"]
         for n in walk(card)
-        if n.get("tag") == "button" and n["behaviors"][0]["type"] == "callback"
+        if n.get("tag") in ("button", "interactive_container")
+        and n.get("behaviors")
+        and n["behaviors"][0]["type"] == "callback"
     ]
 
 

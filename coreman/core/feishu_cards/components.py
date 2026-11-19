@@ -636,49 +636,67 @@ SOURCES_TITLE = "来源"
 # 表单单行、多行输入的字数上限：提交的内容整段作为一句话发给模型，不能太长。
 FORM_TEXT_CHARS = 500
 FOLLOWUPS_TITLE = "你可能还想问"
+RECOMMENDED_TAG = "推荐"
+
+
+def bubble(
+    ctx: RenderContext,
+    text: str,
+    value: dict[str, Any],
+    *,
+    element_id: str | None = None,
+    recommended: bool = False,
+    note: str = "",
+) -> Element:
+    """可点的气泡：圆角描边的容器包一段文字。按钮只能显示一行、长了就截断，气泡整句换行。
+
+    推荐项用蓝框浅蓝底、前面一个「推荐」标签；`note` 是下面一行灰字说明。
+    """
+    body = _inline(text)
+    if recommended:
+        body = f"<text_tag color='blue'>{RECOMMENDED_TAG}</text_tag> **{body}**"
+    if note:
+        body += "\n" + _font(_inline(note), "grey")
+    return {
+        "tag": "interactive_container",
+        "element_id": element_id or ctx.new_id("bubble"),
+        "width": "fill",
+        "has_border": True,
+        "border_color": "blue" if recommended else "grey",
+        "background_style": "blue-50" if recommended else "default",
+        "corner_radius": style.RADIUS,
+        "padding": "8px 12px",
+        "behaviors": [{"type": "callback", "value": value}],
+        "elements": [{"tag": "markdown", "content": body, "text_size": style.TEXT_BODY}],
+    }
 
 
 def render_followups(block: FollowupsBlock, ctx: RenderContext) -> list[Element]:
-    """建议追问：卡片最底部一列整宽按钮，点一下就是提问人把这句话发给机器人。
+    """建议追问：卡片最底部，分割线下一行灰色「你可能还想问」，下面每句一个整句换行的气泡。
 
-    和选择题（一排实心按钮）在样式上分开：上面一行灰色小标题，按钮竖排、描边、撑满宽度。
-    只在提问人自己的对话回复里渲染（`ctx.requester`），value 带过期时刻；其余出口不渲染。
+    点一下就是提问人把这句话发给机器人（回复按钮同一套）。只在提问人自己的对话回复里渲染
+    （`ctx.requester`），value 带过期时刻；其余出口不渲染。
     """
     requester = ctx.requester
     if not requester:
         return []
     row = ctx.new_id("cols")
-    ids = [ctx.new_id("btn") for _ in block.questions]
-    buttons: list[Element] = [
-        {
-            "tag": "button",
-            "element_id": bid,
-            "type": "default",
-            "width": "fill",
-            "text": {"tag": "plain_text", "content": question},
-            "behaviors": [
-                {
-                    "type": "callback",
-                    "value": reply_buttons.reply_value(
-                        question,
-                        requester=requester,
-                        row=row,
-                        buttons=ids,
-                        expires=ctx.reply_expires,
-                    ),
-                }
-            ],
-        }
+    ids = [ctx.new_id("bubble") for _ in block.questions]
+    bubbles = [
+        bubble(
+            ctx,
+            question,
+            reply_buttons.reply_value(
+                question, requester=requester, row=row, buttons=ids, expires=ctx.reply_expires
+            ),
+            element_id=bid,
+        )
         for bid, question in zip(ids, block.questions, strict=True)
     ]
-    column = _column(ctx, buttons, vertical_spacing="6px")
+    column = _column(ctx, bubbles, vertical_spacing="6px")
     return [
-        _md(
-            ctx,
-            _font(FOLLOWUPS_TITLE, "grey"),
-            size=style.TEXT_NOTE,
-            icon=style.icon("chat_outlined", "grey"),
-        ),
+        {"tag": "hr", "element_id": ctx.new_id("hr")},
+        _md(ctx, _font(FOLLOWUPS_TITLE, "grey"), size=style.TEXT_NOTE),
         _column_set(ctx, [column], flex_mode="none", spacing="0px", element_id=row),
     ]
 
