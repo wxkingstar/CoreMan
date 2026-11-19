@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { myAssistant, type AssistantAbsent, type AssistantOverview } from '@/api/myAssistant'
@@ -65,6 +65,22 @@ async function shift(state: 'on' | 'off' | 'auto') {
   } catch (e) { ElMessage.error(errorMessage(e)) }
   finally { switching.value = false }
 }
+/** 从现在开始：清掉试用期间攒下的事项，历史对话留着做背景。先确认；清完重新取概览、刷新各分区。 */
+const resetting = ref(false), resetKey = ref(0)
+async function startFresh() {
+  if (resetting.value) return
+  try {
+    await ElMessageBox.confirm(t('assistant.page.resetConfirm'), t('assistant.page.resetTitle'), { type: 'warning' })
+  } catch { return }
+  resetting.value = true
+  try {
+    const done = await myAssistant.reset()
+    ElMessage.success(t('assistant.page.resetDone', { n: done.followups, count: done.jobs, total: done.approvals, value: done.inbox }))
+    resetKey.value += 1
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+  finally { resetting.value = false }
+}
 onMounted(load)
 defineExpose({ tab, load, refresh })
 </script>
@@ -81,14 +97,27 @@ defineExpose({ tab, load, refresh })
           data-test="assistant-story"
         >{{ t('assistant.page.story') }}</a>
       </p>
-      <el-button
-        :loading="loading"
-        :icon="Refresh"
-        data-test="refresh"
-        @click="refresh"
-      >
-        {{ t('assistant.page.refresh') }}
-      </el-button>
+      <!-- 页头右侧只有一格：两个按钮放进同一个容器，免得叠在一起。 -->
+      <div class="ma-header-actions">
+        <el-button
+          :loading="loading"
+          :icon="Refresh"
+          data-test="refresh"
+          @click="refresh"
+        >
+          {{ t('assistant.page.refresh') }}
+        </el-button>
+        <el-button
+          v-if="mine?.state === 'active'"
+          type="warning"
+          plain
+          :loading="resetting"
+          data-test="assistant-reset"
+          @click="startFresh"
+        >
+          {{ t('assistant.page.reset') }}
+        </el-button>
+      </div>
     </div>
     <LoadState
       :loading="loading && !data"
@@ -257,6 +286,7 @@ defineExpose({ tab, load, refresh })
       />
       <!-- lazy：没点开的分区不取数。 -->
       <el-tabs
+        :key="resetKey"
         v-model="tab"
         class="ma-tabs"
       >
@@ -313,6 +343,8 @@ defineExpose({ tab, load, refresh })
 </template>
 <style scoped>
 .how-to { text-align: left; display: inline-block; }
+.ma-header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.ma-header-actions .el-button + .el-button { margin-left: 0; }
 .ma-tabs :deep(.el-tabs__header) { margin-bottom: 16px; }
 /* el-tabs 默认裁掉溢出：放开，设置页底部的保存栏才能贴住视口。 */
 .ma-tabs :deep(.el-tabs__content) { overflow: visible; }

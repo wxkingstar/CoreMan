@@ -41,6 +41,7 @@ REMINDERS = {
     "gap_declined": "所有者不开这个权限",
     "gap_rejected": "权限申请被拒绝",
     "gap_approved_short": "权限申请批了，但还不够用",
+    "owner_reset": "所有者从现在开始正式启用",
 }
 WITHDRAW_REASONS = {
     "owner_replied": "所有者已经在这个会话里亲自回复",
@@ -150,6 +151,13 @@ def _reminder(data: dict[str, Any]) -> list[str]:
         return [
             f"所有者明确不开缺口 {gap}（{what}）：{stuck_labels} 这条路走不通。"
             "换别的办法，或在备注里写明办不成；不要再为它登记缺口或提醒所有者。"
+        ]
+    if kind == "owner_reset":
+        return [
+            "所有者在「我的助理」页点了「从现在开始」，正式启用你：之前的待跟进都已关闭（不再需要）、"
+            "进行中的子任务与调度已取消、待批的审批单已撤回、还没交给你的消息已作废。",
+            "从这一刻起重新开始：之前的对话与知识页只作背景，不要再跟进、提醒或重新提交之前的事项，"
+            "除非所有者重新提起；之后的新消息照常处理。这条不用回复所有者。",
         ]
     if kind in ("morning_brief", "weekly_review"):
         return ["按「交回事项」里对这类条目的说明做。"]

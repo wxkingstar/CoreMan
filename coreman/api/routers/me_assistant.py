@@ -40,6 +40,7 @@ from coreman.core.assistants import (
     jobs,
     message_range,
     owner_view,
+    reset,
     sealed,
     voice,
     watch,
@@ -151,6 +152,13 @@ VOICE_ERRORS: dict[str, tuple[int, str]] = {
     ),
     "assistant_unavailable": (409, "个人助理现在跑不了这一轮，稍后再试"),
 }
+
+
+class ResetIn(BaseModel):
+    """清掉的事项找不回来：必须明确带上 `confirm: true`。"""
+
+    model_config = ConfigDict(extra="forbid")
+    confirm: StrictBool
 
 
 class DeprovisionIn(BaseModel):
@@ -605,6 +613,19 @@ async def shift(
     data = await owner_view.preferences(session, row, now)
     await session.commit()
     return {"code": 0, "data": data}
+
+
+@router.post("/reset")
+async def start_fresh(
+    body: ResetIn, own: Mine = Depends(writable), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """从现在开始：关掉未结的待跟进、取消子任务、撤回待批的审批单、作废还没交回的消息；
+    历史对话与知识页留着做背景。返回各清了多少。"""
+    if body.confirm is not True:
+        raise ApiError(422, 422, "清掉的事项找不回来，请带上 confirm: true")
+    cleared = await reset.start_fresh(session, own.bot.id, utcnow())
+    await session.commit()
+    return {"code": 0, "data": cleared.payload()}
 
 
 @router.post("/voice/regenerate")
