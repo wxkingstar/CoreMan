@@ -22,6 +22,7 @@ from coreman.core.richtext.schema import (
     CalloutBlock,
     ChartBlock,
     ColumnsBlock,
+    FollowupsBlock,
     HeaderBlock,
     ItemBlock,
     KpiBlock,
@@ -89,6 +90,8 @@ def block_to_markdown(kind: str, model: BaseModel) -> str:
             return f"_注：{_one_line(model.text)}_"
         case ActionsBlock():
             return _actions(model)
+        case FollowupsBlock():
+            return ""  # 建议追问只在飞书卡片里能点；别的出口点不了，不显示
         case RawBlock():
             return model.fallback or ""
         case MarkdownChild():

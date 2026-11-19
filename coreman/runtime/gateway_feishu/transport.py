@@ -46,17 +46,20 @@ from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.platforms.feishu_content import bounded, sent_text
 from coreman.runtime.gateway_feishu.cards import (
+    NEW_SESSION_LABEL_CHARS,
     STREAMING_CONFIG,
     interaction_card,
+    new_session_card,
     post_content,
     remote_images_as_links,
     split_utf8,
+    stop_button,
     stream_card,
     visible_parts,
 )
 from coreman.runtime.gateway_feishu.images import RemoteImages
 from coreman.runtime.gateway_feishu.reactions import clean_finished, typing
-from coreman.runtime.gateway_feishu.reply_buttons import mark_used
+from coreman.runtime.gateway_feishu.reply_buttons import expire_followups, mark_used
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # 本 bot 的出站锁：同一时刻只有一个 child 能更新它的卡片、发它的出站条目。
@@ -85,6 +88,10 @@ IMAGES_PER_REPLY = 9
 CARD_CONTENT_ERRORS = frozenset({-2, 10002, 200220, 200860, 300121, 300301, 300305, 230025, 230099})
 # 机器人无法私信该用户（用户未与机器人建立可达会话等）；真机验证时核对错误码。
 DM_UNREACHABLE = frozenset({230013})
+# 建议追问的有效期：过了这么久点了不再发出，按钮置灰。
+FOLLOWUPS_TTL_SECONDS = 30 * 60
+# 收尾时没有正文可做预览，消息列表显示这一句（盖掉流式期间的进度预览）。
+FINISHED_PREVIEW = "已回复"
 log = get_logger(__name__)
 
 
@@ -126,6 +133,8 @@ class FeishuTransport:
         self._last_call = 0.0
         # 每张卡最后推上去的状态行，和下次最早可以重试的时刻（推失败时退避）。
         self._headings: dict[int, tuple[str, float]] = {}
+        # 流式期间推上去的消息列表预览：变了才改。
+        self._previews: dict[int, str] = {}
         # 常驻连接（子进程的应用独占锁连接，AUTOCOMMIT）：出站锁在它上面以会话级锁拿一次，
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
@@ -307,6 +316,9 @@ class FeishuTransport:
             self._headings = {
                 key: value for key, value in self._headings.items() if key in active_ids
             }
+            self._previews = {
+                key: value for key, value in self._previews.items() if key in active_ids
+            }
             for row in rows:
                 try:
                     await self.push(row)
@@ -387,6 +399,27 @@ class FeishuTransport:
             return title
         self._headings[row.task_id] = (title, 0.0)
         return title
+
+    async def update_preview(self, row: TaskStream, card_id: str) -> None:
+        """流式期间把消息列表的预览换成最后动作（「⏳ 运行命令：…」），不打开会话也看得到进展。
+
+        变了才改；没有动作时不动，保留飞书默认的「[生成中...]」。改不上只记一笔，不影响正文。
+        """
+        text = liveness.preview(row.activity, datetime.now(UTC))
+        if not text or self._previews.get(row.task_id) == text:
+            return
+        try:
+            await self.call(
+                "PATCH",
+                f"/open-apis/cardkit/v1/cards/{card_id}/settings",
+                json={
+                    "sequence": await self.sequence(row.task_id),
+                    "settings": card_json({"config": {"summary": {"content": text}}}),
+                },
+            )
+        except FeishuError as exc:
+            log.warning("feishu_preview_update_failed", code=exc.code, task_id=row.task_id)
+        self._previews[row.task_id] = text
 
     @staticmethod
     def status_heading(row: TaskStream) -> str:
@@ -475,6 +508,7 @@ class FeishuTransport:
                             "",
                             session_url=row.session_url,
                             heading=self.status_heading(row),
+                            stop_task=_stop_task(row),
                         ),
                         ensure_ascii=False,
                     ),
@@ -498,6 +532,8 @@ class FeishuTransport:
                 await session.merge(delivery)
                 await session.commit()
         heading = await self.update_heading(row, card_id)
+        if not row.is_complete and not delivery.is_static:
+            await self.update_preview(row, card_id)
         if row.version <= row.pushed_version and not row.is_complete:
             return
         answer = (
@@ -536,6 +572,8 @@ class FeishuTransport:
             )
         if row.is_complete and not delivery.is_static:
             config: dict[str, Any] = {"streaming_mode": False}
+            # 流式期间可能写过进度预览（「⏳ …」）：没有可做预览的正文时也要盖掉。
+            summary = summary or FINISHED_PREVIEW
             if summary:
                 # 关流式不会改写自定义摘要，消息列表的预览要在这里一起写上。
                 config["summary"] = {"content": summary}
@@ -582,6 +620,7 @@ class FeishuTransport:
             await streams.mark_pushed(session, row.task_id, row.version)
             if row.is_complete:
                 await self.enqueue_cards(session, row, compiled)
+                await self.enqueue_followups_expiry(session, row, compiled, delivery.message_id)
                 await self.enqueue_interrupt_notice(session, row)
                 await streams.mark_finish_pushed(session, row.task_id)
             await session.commit()
@@ -616,7 +655,10 @@ class FeishuTransport:
         if units and not state.get("paused"):
             layout = state["units"] if "units" in state else list(INITIAL_LAYOUT)
             shell = stream_card(thinking, "", session_url=row.session_url, heading=heading)
-            shell["body"]["elements"] = _prefix(thinking, row.session_url, heading, row.plan)
+            shell["body"]["elements"] = [
+                *_prefix(thinking, row.session_url, heading, row.plan),
+                *_suffix(row),
+            ]
             steps = plan(
                 layout,
                 units,
@@ -677,7 +719,7 @@ class FeishuTransport:
             show=remote_images_as_links,
         )
         elements = [e for action in steps.actions for e in action["params"].get("elements") or []]
-        shell["body"]["elements"] = [*prefix, *elements]
+        shell["body"]["elements"] = [*prefix, *elements, *_suffix(row)]
         shell["config"]["streaming_mode"] = True
         await self.put_card(row.task_id, card_id, shell)
         steps.actions, steps.texts = [], []
@@ -776,6 +818,7 @@ class FeishuTransport:
                 images=images,
                 people=people,
                 requester=requester,
+                reply_expires=int(time.time()) + FOLLOWUPS_TTL_SECONDS,
             )
             if not compiled.problems:
                 return compiled
@@ -845,6 +888,39 @@ class FeishuTransport:
                 payload={"card": card, "_fallback_markdown": text, "_typing_task_id": row.task_id},
             )
         await self.enqueue_final(session, row, "", start=0)
+
+    async def enqueue_followups_expiry(
+        self,
+        session: AsyncSession,
+        row: TaskStream,
+        compiled: Compiled | None,
+        message_id: str | None,
+    ) -> None:
+        """建议追问到期时把按钮置灰：排一条到点才发的出站。
+
+        按钮在主卡上就按主卡的消息 ID 改；在续卡上，续卡此刻还没发出，记下它的出站去重键，
+        到点再查它的消息 ID。过期本身由网关应答时按按钮里的时刻判定，置灰只是让人看得出来。
+        """
+        if compiled is None or compiled.followups is None:
+            return
+        index, buttons = compiled.followups
+        target: dict[str, Any] = {"chat_id": row.reply_context.get("chat_id")}
+        if index == 0:
+            if not message_id:
+                return
+            target["message_id"] = message_id
+        else:
+            target["outbox_dedupe"] = f"{row.task_id}:more:{index}"
+        await outbox.add(
+            session,
+            bot_id=row.bot_id,
+            platform="feishu",
+            kind="card_update",
+            dedupe_key=f"{row.task_id}:followups-expire",
+            target=target,
+            payload={"_followups_expire": list(buttons)},
+            not_before=datetime.now(UTC) + timedelta(seconds=FOLLOWUPS_TTL_SECONDS),
+        )
 
     async def enqueue_interrupt_notice(self, session: AsyncSession, row: TaskStream) -> None:
         """中断了（失联、读超时、硬超时、恢复补的终态）：群里 @ 提问人一次。
@@ -1053,6 +1129,26 @@ class FeishuTransport:
             )
             item.payload = {**item.payload, "_feishu_message_id": mid}
             return
+        if isinstance(item.payload.get("_file"), dict):
+            # 回复里链接的本地文件：worker 已上传换好 file_key，这里引用提问发一条文件消息。
+            mid = await self.send(
+                str(item.target.get("chat_id") or ""),
+                {"file_key": str(item.payload["_file"].get("file_key") or "")},
+                kind="file",
+                key=f"outbox:{item.id}",
+                reply_to=item.target.get("message_id"),
+            )
+            item.payload = {**item.payload, "_feishu_message_id": mid}
+            return
+        if isinstance(item.payload.get("_new_session"), dict):
+            item.payload = {
+                **item.payload,
+                "_feishu_message_id": await self.send_new_session(item),
+            }
+            return
+        if item.kind == "card_update" and "_followups_expire" in item.payload:
+            await expire_followups(self, item)
+            return
         if item.kind == "card_update" and "_reply_used" in item.payload:
             await mark_used(self, item)
             return
@@ -1137,6 +1233,41 @@ class FeishuTransport:
             text = str(item.payload.get("markdown") or item.payload.get("text") or "…")
             await self.send_posts(chat, text, f"outbox:{item.id}")
 
+    async def send_new_session(self, item: OutboxItem) -> str:
+        """重置会话的回执。私聊：系统消息「新会话」分割线并清屏（飞书只允许发到私聊，需要
+        `im:message:send_sys_msg` 权限；发不出就改回文字回执）。群里：引用那条命令回一张灰色的
+        分隔小卡片。"""
+        meta = item.payload["_new_session"]
+        chat = str(item.target.get("chat_id") or "")
+        label = str(meta.get("label") or "")[:NEW_SESSION_LABEL_CHARS]
+        if meta.get("single"):
+            try:
+                return await self.send(
+                    chat,
+                    {
+                        "type": "divider",
+                        "params": {"divider_text": {"text": label}},
+                        "options": {"need_rollup": True},
+                    },
+                    kind="system",
+                    key=f"outbox:{item.id}",
+                )
+            except FeishuError as exc:
+                log.warning("feishu_new_session_divider_failed", code=exc.code, item_id=item.id)
+                return await self.send(
+                    chat,
+                    {"text": str(item.payload.get("text") or label)},
+                    kind="text",
+                    key=f"outbox:{item.id}:text",
+                )
+        return await self.send(
+            chat,
+            new_session_card(label, str(meta.get("hint") or "")),
+            kind="interactive",
+            key=f"outbox:{item.id}",
+            reply_to=item.target.get("message_id"),
+        )
+
     async def send_posts(self, chat: str, markdown: str, key: str) -> None:
         for index, chunk in enumerate(split_utf8(markdown)):
             await self.send(
@@ -1182,6 +1313,18 @@ def _card_markdown(card: dict[str, Any]) -> str:
         for e in (card.get("body") or {}).get("elements") or []
         if e.get("tag") == "markdown" and e.get("element_id") != "thinking"
     )
+
+
+def _stop_task(row: TaskStream) -> int | None:
+    """有提问人的对话回复才放「停止」按钮（定时任务、主动推送等没有人可停）。"""
+    requester = row.reply_context.get("requester_user_id")
+    return row.task_id if isinstance(requester, str) and requester else None
+
+
+def _suffix(row: TaskStream) -> list[dict[str, Any]]:
+    """流式卡片最后面的固定组件：停止按钮（正文单元都插在它前面）。"""
+    task = _stop_task(row)
+    return [stop_button(task)] if task is not None else []
 
 
 def _prefix(

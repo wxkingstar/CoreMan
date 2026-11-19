@@ -24,6 +24,7 @@ from coreman.core.settings_store import SettingsStore
 
 if TYPE_CHECKING:  # 只用于类型标注，避免 worker 启动时连带拉起企微与解析器模块。
     from coreman.core.chat.openuserid import OpenUseridResolver
+    from coreman.core.chat.transcribe import Transcriber
     from coreman.core.cloud_proxy.risk_policy import CloudProxyPolicy
     from coreman.core.wecom.media import MediaFetcher
 
@@ -53,6 +54,8 @@ class TaskContext:
     # 两个共享依赖由 WorkerService 建一份传下来：解析器的缓存、媒体客户端的连接池都靠这份复用。
     openuserid: OpenUseridResolver | None = None
     media_fetcher: MediaFetcher | None = None
+    # 飞书语音转文字；部署没配 OPENAI_API_KEY 时为 None（语音照旧回「暂不支持」）。
+    transcriber: Transcriber | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_reason: str | None = None
     stream_id: str | None = None

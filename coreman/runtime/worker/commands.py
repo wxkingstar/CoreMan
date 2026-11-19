@@ -7,12 +7,12 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.bus import tasks
+from coreman.core.bus import outbox, tasks
 from coreman.core.chat import interactions, sessions, topics
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_feishu_event_speaker, resolve_speaker
 from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
-from coreman.core.db.models import Bot, BotAllowedUser
+from coreman.core.db.models import Bot, BotAllowedUser, InboundEvent
 from coreman.core.i18n.messages import msg
 from coreman.core.personal_credentials.service import RESUME_KIND
 from coreman.runtime.worker.context import TaskContext
@@ -97,6 +97,41 @@ async def do_reset(
         ctx.log.warning("session_reset_failed")
         return msg("session_reset_failed", ctx.locale)
     return msg("session_reset_ok", ctx.locale)
+
+
+async def new_session_reply(
+    session: AsyncSession,
+    ctx: TaskContext,
+    *,
+    bot: Bot | None,
+    inbound: InboundEvent,
+    chat_type: str,
+    text: str,
+) -> bool:
+    """飞书重置成功后的回执：私聊是「新会话」分割线并清屏，群里是一张灰色的分隔小卡片。
+
+    由网关出站发送（飞书的系统消息只能发到私聊）；分割线发不出时网关改回文字回执 `text`。
+    不是飞书或重置失败返回假，调用方照旧回文字。
+    """
+    if bot is None or bot.platform != "feishu" or text != msg("session_reset_ok", ctx.locale):
+        return False
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"new-session:{ctx.task.id}",
+        target={"chat_id": inbound.chat_id, "message_id": inbound.reply_context.get("message_id")},
+        payload={
+            "_new_session": {
+                "single": chat_type == "single",
+                "label": msg("new_session_divider", ctx.locale),
+                "hint": msg("new_session_hint", ctx.locale),
+            },
+            "text": text,
+        },
+    )
+    return True
 
 
 async def do_stop(
@@ -208,6 +243,14 @@ class CommandHandler:
                 text = await do_stop(session, ctx, ctx.task.bot_id, key, pid)
             else:
                 text = msg("help", ctx.locale)
-            await reply_once(session, ctx, reply_context=inbound.reply_context, text=text)
+            if command != "reset" or not await new_session_reply(
+                session,
+                ctx,
+                bot=bot,
+                inbound=inbound,
+                chat_type=inbound.chat_type,
+                text=text,
+            ):
+                await reply_once(session, ctx, reply_context=inbound.reply_context, text=text)
             await tasks.finish(session, ctx.task.id, status="succeeded")
             await session.commit()

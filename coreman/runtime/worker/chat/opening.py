@@ -550,11 +550,14 @@ class OpenStage(ChatStageBase):
                     delivered=frozenset() if origin == "dispatch" else access.delivered,
                 )
             )
-        from coreman.core.prompting.rich_cards import with_reply_images
+        from coreman.core.prompting.rich_cards import with_reply_files, with_reply_images
+        from coreman.runtime.worker.chat.reply_files import ReplyFiles
 
         # 交给平台解析的回答（helper、个人助理调度来的一轮）不会发到聊天里，图片说明用不上。
         if not self._structured_reply(ctx):
             extra = with_reply_images(extra, intake.bot.platform, backend)
+            if ReplyFiles.applies(intake.bot) and origin not in ("observe", "dispatch"):
+                extra = with_reply_files(extra)
         tag = identity_tag(ctx.cipher, info.relay_session_id)
         system_prompt = await self._system_prompt(
             ctx,

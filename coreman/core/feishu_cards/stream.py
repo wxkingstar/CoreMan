@@ -30,7 +30,7 @@ from coreman.core.feishu_cards.context import RenderContext
 from coreman.core.feishu_cards.sanitize import validate_card
 from coreman.core.logging import get_logger
 from coreman.core.richtext.blocks import split
-from coreman.core.richtext.schema import HeaderBlock
+from coreman.core.richtext.schema import FollowupsBlock, HeaderBlock
 
 log = get_logger(__name__)
 # 第一段正文沿用流式卡片创建时的 answer 组件。
@@ -146,8 +146,8 @@ def stream_units(text: str) -> list[StreamUnit]:
             units.append(StreamUnit("text", (_text_id(len(units)),), text=seg.text))
             continue
         if seg.kind == "pending":
-            if seg.block and "header".startswith(seg.block):
-                continue  # 标题栏流式期间不显示，也不闪占位
+            if seg.block and any(k.startswith(seg.block) for k in ("header", "followups")):
+                continue  # 标题栏、建议追问流式期间不显示，也不闪占位
             flush_half()
             label = PENDING_LABELS.get(seg.block or "", "⏳ 正在生成…")
             add_block(
@@ -165,7 +165,11 @@ def stream_units(text: str) -> list[StreamUnit]:
             content = f"```json\n{seg.text}\n```"[:TEXT_LIMIT]
             add_block([{"tag": "markdown", "element_id": "x", "content": content}])
             continue
-        if seg.model is None or not seg.block or isinstance(seg.model, HeaderBlock):
+        if (
+            seg.model is None
+            or not seg.block
+            or isinstance(seg.model, HeaderBlock | FollowupsBlock)
+        ):
             continue
         elements, is_half = _block_elements(seg.block, seg.model, seg.text, ctx)
         if not elements:

@@ -1,6 +1,7 @@
 """飞书卡片交互：回复按钮的点击判定、置灰与身份核验，people 块的人员解析。"""
 
 import json
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -528,3 +529,76 @@ async def test_confirm_card_toast_knows_whether_the_initiator_clicked(db_session
         (await click(factory, bot, confirm("confirm", "e4", task_id="personal:999999")))[0],
     ]
     assert outcomes == ["write_confirm", "write_cancel", "not_initiator", None]
+
+
+async def test_stop_button_toast_knows_whether_the_requester_clicked(db_session, db_engine):
+    bot, _cipher = await feishu_worker_bot(db_session)
+    await add_member(db_session, login="alice", feishu_id=ASKER)
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+    await click(factory, bot, click_event(value_for(), "om_card", chat_id="oc_chat"))
+    origin = (await db_session.scalars(select(Task))).one()
+
+    def stop(event_id, user_id=ASKER, task_id=f"stop@{origin.id}"):
+        value = {"task_id": task_id, "event_key": "stream_stop"}
+        return click_event(value, "om_stream", user_id=user_id, event_id=event_id)
+
+    outcomes = [
+        (await click(factory, bot, stop("s1")))[0],
+        (await click(factory, bot, stop("s2", user_id="someone")))[0],
+        (await click(factory, bot, stop("s3", task_id="stop@999999")))[0],
+    ]
+    await db_session.execute(update(Task).where(Task.id == origin.id).values(status="succeeded"))
+    await db_session.commit()
+    outcomes.append((await click(factory, bot, stop("s4")))[0])
+    assert outcomes == ["stream_stop", "stream_stop_denied", None, "stream_stop_late"]
+    # 每次点击都入队交给 worker 核对（toast 只是提示）。
+    kinds = [t.kind for t in (await db_session.scalars(select(Task))).all()]
+    assert kinds.count("card_action") == 4
+
+
+FOLLOWUP_ANSWER = (
+    '退款主要集中在手袋。\n\n```card:followups\n{"questions": ["按品类拆开看", "和上周比呢"]}\n```'
+)
+
+
+async def test_followups_expire_after_half_an_hour(db_session, db_engine):
+    """建议追问：30 分钟内点了照常发出；到点按钮置灰，之后再点只提示过期、不入队。"""
+    from coreman.runtime.gateway_feishu import transport as transport_module
+
+    api = FakeAPI()
+    bot, row, factory, transport = await _answered(db_session, db_engine, api, FOLLOWUP_ANSWER)
+    [final] = card_puts(api)
+    values = reply_values(final)
+    assert [v["text"] for v in values] == ["按品类拆开看", "和上周比呢"]
+    expires = values[0]["expires"]
+    assert abs(expires - (time.time() + transport_module.FOLLOWUPS_TTL_SECONDS)) < 60
+    async with factory() as session:
+        mid = (await session.get(FeishuDelivery, row.task_id)).message_id
+        item = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == f"{row.task_id}:followups-expire")
+        )
+        assert item.target["message_id"] == mid and item.status == "pending"
+        assert item.payload["_followups_expire"] == values[0]["buttons"]
+    # 有效期内点：照常入队。
+    outcome, _ = await click(factory, bot, click_event(values[0], mid, event_id="f1"))
+    assert outcome == "queued"
+    # 到点：置灰。
+    async with factory() as session:
+        await session.execute(
+            update(OutboxItem).where(OutboxItem.id == item.id).values(not_before=datetime.now(UTC))
+        )
+        await session.commit()
+    api.calls.clear()
+    await transport.round()
+    [batch] = [b for _, p, b in api.calls if p == "/open-apis/cardkit/v1/cards/card1/batch_update"]
+    actions = json.loads(batch["actions"])
+    assert [a["params"]["element_id"] for a in actions] == values[0]["buttons"]
+    assert all(a["params"]["partial_element"]["disabled"] for a in actions)
+    # 过期后点另一条：不入队，提示直接发消息。
+    expired = {**values[1], "expires": int(time.time()) - 1}
+    outcome, _ = await click(factory, bot, click_event(expired, mid, event_id="f2"))
+    assert outcome == "reply_expired"
+    async with factory() as session:
+        chats = [t for t in (await session.scalars(select(Task))).all() if t.kind == "chat"]
+    assert len(chats) == 2  # 回答本身那一轮 + 有效期内的那次点击

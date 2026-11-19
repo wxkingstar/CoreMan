@@ -426,6 +426,28 @@ class ActionsBlock(_Model):
         return {"buttons": value} if isinstance(value, list) else value
 
 
+class FollowupsBlock(_Model):
+    """建议追问：提问人接下来很可能问的 1–3 句话，点一下就作为他的下一句发出。
+
+    不管写在哪里都放到卡片最后；只在提问人自己的对话回复里可点，30 分钟后过期。
+    """
+
+    questions: list[str] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bare_list(cls, value: Any) -> Any:
+        return {"questions": value} if isinstance(value, list) else value
+
+    @field_validator("questions")
+    @classmethod
+    def _short(cls, value: list[str]) -> list[str]:
+        out = [q.strip() for q in value if q.strip()]
+        if not out or any(len(q) > 40 for q in out):
+            raise ValueError("每条追问 1–40 个字")
+        return out
+
+
 class RawBlock(_Model):
     elements: list[dict[str, Any]] = Field(min_length=1, max_length=50)
     # 非飞书出口展示的文字；不给就在降级时整块省略。
@@ -481,6 +503,7 @@ BLOCK_MODELS: dict[str, type[_Model]] = {
     "people": PeopleBlock,
     "note": NoteBlock,
     "actions": ActionsBlock,
+    "followups": FollowupsBlock,
     "raw": RawBlock,
 }
 BLOCK_KINDS: frozenset[str] = frozenset(BLOCK_MODELS)

@@ -28,6 +28,8 @@ class RenderContext:
     images: Mapping[str, str] = field(default_factory=dict)
     people: Mapping[str, str] = field(default_factory=dict)
     requester: str | None = None
+    # 建议追问的过期时刻（epoch 秒）：写进按钮回调，网关过了这个时刻就不再收。
+    reply_expires: int | None = None
     tables: int = 0
     charts: int = 0
     _seq: dict[str, int] = field(default_factory=dict)

@@ -15,17 +15,25 @@
 from __future__ import annotations
 
 import copy
+import time
 import uuid
 from typing import TYPE_CHECKING, Literal, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.chat import busy_choice
+from coreman.core.bus import tasks
+from coreman.core.chat import busy_choice, stream_stop
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
 from coreman.core.db.models import FeishuDelivery, InboundEvent, OutboxItem, Task, TaskStream
-from coreman.core.feishu_cards.reply_buttons import UsedRow, batch_actions, mark_card
+from coreman.core.feishu_cards.reply_buttons import (
+    UsedRow,
+    batch_actions,
+    expire_actions,
+    expire_card,
+    mark_card,
+)
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuError
 from coreman.core.wecom.messages import InboundMessage
@@ -70,6 +78,12 @@ Outcome = Literal[
     "switch_wait",
     # 确认卡（写操作、定时任务）由发起人以外的人点了。
     "not_initiator",
+    # 流式卡片上的「停止」：已收下、不是提问人、这条已经结束。
+    "stream_stop",
+    "stream_stop_denied",
+    "stream_stop_late",
+    # 建议追问超过有效期。
+    "reply_expired",
 ]
 _BUSY_KEYS = frozenset(
     {
@@ -208,6 +222,24 @@ async def _initiator_clicked(
     return event.sender_platform_user_id == message.sender.platform_user_id
 
 
+async def _stop_click(
+    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
+) -> Outcome | None:
+    """流式卡片上的「停止」：只为选 toast，真正的核对和停止在 worker。"""
+    action = message.card_action or {}
+    target_id = stream_stop.parse_card_task_id(str(action.get("task_id") or ""))
+    if message.kind != "card_action" or target_id is None:
+        return None
+    target = await session.get(Task, target_id)
+    if target is None or target.bot_id != bot_id:
+        return None
+    if str(target.payload.get("platform_user_id") or "") != message.sender.platform_user_id:
+        return "stream_stop_denied"
+    if target.status not in tasks.OPEN or target.cancel_requested_at is not None:
+        return "stream_stop_late"
+    return "stream_stop"
+
+
 async def admit(
     session: AsyncSession,
     bot: InboundBot,
@@ -220,9 +252,18 @@ async def admit(
     其他卡片按钮的点击返回点的是哪类按钮（认不出为 None），其余事件返回 None。调用方负责提交。"""
     if not await settle(session, bot.id, message, single=single):
         return "not_requester"
+    meta = clicked(message.reply_context) if message.kind == "message" else None
+    expires = meta.get("expires") if meta else None
+    if isinstance(expires, int) and time.time() > expires:
+        # 建议追问过期了：不入队，告诉他直接发消息。
+        return "reply_expired"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
-        outcome = _busy_click(message) or _card_click(message)
+        outcome = (
+            _busy_click(message)
+            or _card_click(message)
+            or await _stop_click(session, bot.id, message)
+        )
         if outcome in _INITIATOR_ONLY:
             initiator = await _initiator_clicked(session, bot.id, message)
             if initiator is None:
@@ -289,3 +330,77 @@ async def mark_used(transport: FeishuTransport, item: OutboxItem) -> None:
         if exc.code not in CARD_CONTENT_ERRORS:
             raise
         log.warning("feishu_reply_used_rejected", code=exc.code, item_id=item.id)
+
+
+async def expire_followups(transport: FeishuTransport, item: OutboxItem) -> None:
+    """建议追问到期：把那组按钮置灰。主卡按投递记录局部更新，续卡整卡 PATCH。
+
+    续卡的消息 ID 到点才查（排这条时续卡还没发出）；续卡被拒改发了普通消息、投递记录已经
+    清理时什么也不做。只是外观：过期由应答回调时按按钮里的时刻判定。
+    """
+    from coreman.runtime.gateway_feishu.transport import CARD_CONTENT_ERRORS, api_id, card_json
+
+    raw = item.payload.get("_followups_expire")
+    buttons = [b for b in raw if isinstance(b, str)] if isinstance(raw, list) else []
+    if not buttons:
+        return
+    async with transport.factory() as session:
+        mid = item.target.get("message_id")
+        dedupe = item.target.get("outbox_dedupe")
+        if not mid and isinstance(dedupe, str):
+            sent = await session.scalar(
+                select(OutboxItem).where(
+                    OutboxItem.bot_id == transport.bot_id,
+                    OutboxItem.dedupe_key == dedupe,
+                    OutboxItem.status == "sent",
+                )
+            )
+            mid = sent.payload.get("_feishu_message_id") if sent is not None else None
+        if not isinstance(mid, str) or not mid:
+            return
+        mid = api_id(mid)
+        delivery = await session.scalar(
+            select(FeishuDelivery)
+            .join(TaskStream, TaskStream.task_id == FeishuDelivery.task_id)
+            .where(TaskStream.bot_id == transport.bot_id, FeishuDelivery.message_id == mid)
+        )
+    try:
+        if delivery is not None:
+            if delivery.card_id and delivery.is_static:
+                await transport.call(
+                    "POST",
+                    f"/open-apis/cardkit/v1/cards/{api_id(delivery.card_id)}/batch_update",
+                    json={
+                        "sequence": await transport.sequence(delivery.task_id),
+                        "actions": card_json(expire_actions(buttons)),
+                    },
+                )
+            return
+        async with transport.factory() as session:
+            sent = await session.scalar(
+                select(OutboxItem)
+                .where(
+                    OutboxItem.bot_id == transport.bot_id,
+                    OutboxItem.status == "sent",
+                    OutboxItem.payload["_feishu_message_id"].astext == mid,
+                )
+                .order_by(OutboxItem.id.desc())
+                .limit(1)
+            )
+            card = sent.payload.get("card") if sent is not None else None
+            if sent is None or not isinstance(card, dict) or card.get("schema") != "2.0":
+                return
+            updated = copy.deepcopy(card)
+            if not expire_card(updated, buttons):
+                return
+            await transport.call(
+                "PATCH",
+                f"/open-apis/im/v1/messages/{mid}",
+                json={"content": card_json({k: v for k, v in updated.items() if k != "task_id"})},
+            )
+            sent.payload = {**sent.payload, "card": updated}
+            await session.commit()
+    except FeishuError as exc:
+        if exc.code not in CARD_CONTENT_ERRORS:
+            raise
+        log.warning("feishu_followups_expire_rejected", code=exc.code, item_id=item.id)

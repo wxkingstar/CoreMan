@@ -1678,3 +1678,201 @@ async def test_answer_streams_below_the_plan(db_session, db_engine):
     await stream_steps(factory, transport, row, ["结论。", f"结论。\n\n{chart}\n\n后文"])
     assert api.roots[:2] == ["thinking_panel", "plan_box"]
     assert len(api.roots) > 3
+
+
+async def test_stream_card_has_a_stop_button_only_for_a_requester(db_session, db_engine):
+    """有提问人的对话回复：流式卡片底部有「停止」，正文单元插在它前面；终稿里没有。"""
+    bot, row, generation = await seed(db_session)
+    await db_session.execute(
+        sa_update(TaskStream)
+        .where(TaskStream.task_id == row.task_id)
+        .values(reply_context={**row.reply_context, "requester_user_id": "u1"})
+    )
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    (created,) = [b for _, p, b in api.calls if p == "/open-apis/cardkit/v1/cards"]
+    elements = json.loads(created["data"])["body"]["elements"]
+    stop = elements[-1]
+    assert stop["element_id"] == "stop_button"
+    assert stop["behaviors"][0]["value"] == {
+        "task_id": f"stop@{row.task_id}",
+        "event_key": "stream_stop",
+    }
+    await streams.update(db_session, row.task_id, pending_text="hello\n\n```card:note\n")
+    await db_session.commit()
+    await transport.round()
+    inserts = [
+        a["params"]
+        for _, p, b in api.calls
+        if p.endswith("/batch_update")
+        for a in json.loads(b["actions"])
+        if a["action"] == "add_elements"
+    ]
+    assert all(i["type"] == "insert_after" for i in inserts)
+    assert all(i["target_element_id"] != "stop_button" for i in inserts)
+    await streams.complete(db_session, row.task_id, final_text="done")
+    await db_session.commit()
+    await transport.round()
+    final = [b for _, p, b in api.calls if p == "/open-apis/cardkit/v1/cards/card1"][-1]
+    assert "stop_button" not in final["card"]["data"]
+
+
+async def test_stream_card_without_requester_has_no_stop_button(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    (created,) = [b for _, p, b in api.calls if p == "/open-apis/cardkit/v1/cards"]
+    assert "stop_button" not in created["data"]
+
+
+def _previews(api):
+    return [
+        json.loads(body["settings"])["config"].get("summary", {}).get("content")
+        for _, path, body in api.calls
+        if path.endswith("/settings")
+    ]
+
+
+async def test_message_list_preview_follows_the_last_action(db_session, db_engine):
+    """流式期间预览换成最后动作，没变不再改；收尾换成结论。"""
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    assert _previews(api) == []  # 还没有动作：保留飞书默认的「生成中」
+    await streams.update(
+        db_session,
+        row.task_id,
+        activity={"at": liveness.iso(datetime.now(UTC)), "label": "查网页：订单接口文档"},
+    )
+    await db_session.commit()
+    await transport.round()
+    await transport.round()
+    assert _previews(api) == ["⏳ 查网页：订单接口文档"]
+    await streams.complete(db_session, row.task_id, final_text="订单接口已经查好了。")
+    await db_session.commit()
+    await transport.round()
+    assert _previews(api)[-1] == "订单接口已经查好了。"
+
+
+async def test_final_without_text_overrides_the_progress_preview(db_session, db_engine):
+    bot, row, generation = await seed(db_session)
+    await streams.update(
+        db_session,
+        row.task_id,
+        activity={"at": liveness.iso(datetime.now(UTC)), "label": "运行命令：跑测试"},
+    )
+    await db_session.commit()
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    await streams.complete(db_session, row.task_id, final_text="")
+    await db_session.commit()
+    await transport.round()
+    assert _previews(api)[0] == "⏳ 运行命令：跑测试"
+    assert _previews(api)[-1] == "已回复"
+
+
+async def _new_session_round(db_session, db_engine, api, *, single):
+    bot, _row, generation = await seed(db_session)
+    factory = make_session_factory(db_engine)
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="new-session:1",
+            target={"chat_id": "oc1", "message_id": "om_cmd"},
+            payload={
+                "_new_session": {
+                    "single": single,
+                    "label": "新会话",
+                    "hint": "之前的对话不再作为上下文",
+                },
+                "text": "✅ 会话已重置，开始新的对话。",
+            },
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+
+
+async def test_new_session_in_private_chat_is_a_system_divider(db_session, db_engine):
+    api = FakeAPI()
+    await _new_session_round(db_session, db_engine, api, single=True)
+    (body,) = [b for _, p, b in api.calls if p == "/open-apis/im/v1/messages"]
+    assert body["msg_type"] == "system" and body["receive_id"] == "oc1"
+    assert json.loads(body["content"]) == {
+        "type": "divider",
+        "params": {"divider_text": {"text": "新会话"}},
+        "options": {"need_rollup": True},
+    }
+
+
+async def test_new_session_divider_refused_falls_back_to_text(db_session, db_engine):
+    class NoSystem(FakeAPI):
+        async def call(self, method, path, **kwargs):
+            if (kwargs.get("json") or {}).get("msg_type") == "system":
+                self.calls.append((method, path, kwargs.get("json")))
+                raise FeishuError(99991672)
+            return await super().call(method, path, **kwargs)
+
+    api = NoSystem()
+    await _new_session_round(db_session, db_engine, api, single=True)
+    sent = [b for _, p, b in api.calls if p == "/open-apis/im/v1/messages"]
+    assert [b["msg_type"] for b in sent] == ["system", "text"]
+    assert json.loads(sent[-1]["content"]) == {"text": "✅ 会话已重置，开始新的对话。"}
+    async with make_session_factory(db_engine)() as session:
+        item = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == "new-session:1")
+        )
+        assert item.status == "sent"
+
+
+async def test_new_session_in_group_is_a_grey_card_quoting_the_command(db_session, db_engine):
+    api = FakeAPI()
+    await _new_session_round(db_session, db_engine, api, single=False)
+    target = f"/open-apis/im/v1/messages/{api_id('om_cmd')}/reply"
+    (body,) = [b for _, p, b in api.calls if p == target]
+    assert body["msg_type"] == "interactive"
+    card = json.loads(body["content"])
+    assert card["config"]["summary"] == {"content": "新会话"}
+    assert "—— 新会话 ——" in card["body"]["elements"][0]["content"]
+
+
+async def test_reply_file_is_sent_as_a_file_message_quoting_the_question(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="7:file:0",
+            target={"chat_id": "oc1", "message_id": "om_q"},
+            payload={"_file": {"file_key": "file_v3_abc", "name": "a.csv", "size": 3}},
+        )
+        await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    target = f"/open-apis/im/v1/messages/{api_id('om_q')}/reply"
+    (body,) = [b for _, p, b in api.calls if p == target]
+    assert body["msg_type"] == "file"
+    assert json.loads(body["content"]) == {"file_key": "file_v3_abc"}

@@ -95,6 +95,10 @@ TOASTS: dict[str, dict[str, str]] = {
     "switch_runtime": {"type": "info", "content": "正在切换运行时…"},
     "switch_wait": {"type": "info", "content": "好的，继续等额度恢复"},
     "not_initiator": {"type": "warning", "content": "只有发起人可以确认"},
+    "stream_stop": {"type": "info", "content": "正在停止…"},
+    "stream_stop_denied": {"type": "warning", "content": "只有提问人可以停止"},
+    "stream_stop_late": {"type": "info", "content": "这条已经结束了"},
+    "reply_expired": {"type": "info", "content": "这条建议已过期，直接发消息问我就好"},
 }
 # 认不出的点击（新加的卡片漏配也一样）：至少说一句收到了，不只是一个对勾。
 DEFAULT_TOAST = {"type": "info", "content": "已收到"}

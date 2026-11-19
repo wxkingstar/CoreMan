@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from coreman.core.chat import stream_stop
 from coreman.core.feishu_cards.compile import card_shell, streaming_text
 from coreman.core.feishu_cards.thinking import thinking_panel
 from coreman.core.wecom.cards import clip
@@ -82,6 +83,32 @@ STREAMING_CONFIG: dict[str, Any] = {
 }
 
 
+# 「停止」按钮放在卡片最后：正文单元总是插在上一个单元之后，按钮一直留在底部。
+STOP_BUTTON_ID = "stop_button"
+# 飞书系统消息分割线的文字上限。
+NEW_SESSION_LABEL_CHARS = 10
+
+
+def stop_button(task_id: int) -> dict[str, Any]:
+    """流式期间的「停止」按钮；收尾整卡替换成终稿时它就没了。"""
+    return {
+        "tag": "button",
+        "element_id": STOP_BUTTON_ID,
+        "type": "default",
+        "size": "small",
+        "text": {"tag": "plain_text", "content": "⏹ 停止"},
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {
+                    "task_id": stream_stop.card_task_id(task_id),
+                    "event_key": stream_stop.EVENT_KEY,
+                },
+            }
+        ],
+    }
+
+
 def stream_card(
     thinking: str,
     answer: str,
@@ -89,21 +116,37 @@ def stream_card(
     streaming: bool = True,
     session_url: str | None = None,
     heading: str = "🤔 思考过程",
+    stop_task: int | None = None,
 ) -> dict[str, Any]:
-    """流式卡片：思考面板 + 一个 answer markdown。
+    """流式卡片：思考面板 + 一个 answer markdown（+ 给了 `stop_task` 时底部的停止按钮）。
 
     正文里的 card: 块先显示成可读的 Markdown、没写完的块显示占位，终稿时整卡换成富卡片；
     外壳与终稿一致（宽度、留白、配色），替换时不会跳动。
     """
     thinking, answer = visible_parts(thinking, answer)
     content = remote_images_as_links(split_utf8(streaming_text(answer))[0]) or "…"
+    elements = [
+        thinking_panel(thinking, session_url=session_url, heading=heading),
+        {"tag": "markdown", "element_id": "answer", "content": content},
+    ]
+    if stop_task is not None and streaming:
+        elements.append(stop_button(stop_task))
+    return card_shell(elements, streaming=streaming, streaming_config=STREAMING_CONFIG)
+
+
+def new_session_card(label: str, hint: str) -> dict[str, Any]:
+    """群里重置会话的回执：一张灰色的分隔小卡片（群里发不了系统分割线）。"""
+    lines = f"—— {label} ——" + (f"\n{hint}" if hint else "")
     return card_shell(
         [
-            thinking_panel(thinking, session_url=session_url, heading=heading),
-            {"tag": "markdown", "element_id": "answer", "content": content},
+            {
+                "tag": "markdown",
+                "content": f"<font color='grey'>{lines}</font>",
+                "text_align": "center",
+                "text_size": "notation",
+            }
         ],
-        streaming=streaming,
-        streaming_config=STREAMING_CONFIG,
+        summary=label,
     )
 
 

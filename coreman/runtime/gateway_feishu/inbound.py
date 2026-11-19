@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from coreman.core.chat import busy_choice, topics
+from coreman.core.chat import busy_choice, stream_stop, topics
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_reply
@@ -108,6 +108,7 @@ def _reply_click(
                 "buttons": list(click.buttons),
                 "label": click.text,
                 "requester": click.requester,
+                **({"expires": click.expires} if click.expires is not None else {}),
             },
         },
         raw=raw,
@@ -171,6 +172,7 @@ def _normalize_event(
             and not re.fullmatch(r"personal:[1-9][0-9]{0,18}", task_id)
             and busy_choice.parse_card_task_id(task_id) is None
             and topics.parse_card_task_id(task_id) is None
+            and stream_stop.parse_card_task_id(task_id) is None
         ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")
@@ -328,7 +330,11 @@ def _normalize_event(
     elif kind == "interactive" and sender_type == "bot":
         parts.append(TextPart(text=_card_text(content)))
     elif kind == "audio":
-        parts.append(AudioPart(ref={}))
+        key = content.get("file_key")
+        # 飞书语音只有音频文件，没有转写：worker 下载后交给转写服务（见 core/chat/transcribe）。
+        parts.append(
+            AudioPart(ref={"message_id": mid, "file_key": str(key), "type": "file"} if key else {})
+        )
     else:
         parts.append(VideoPart(ref={}))  # 公共 worker 的明确“不支持”回复，不送模型猜测。
     return InboundMessage(

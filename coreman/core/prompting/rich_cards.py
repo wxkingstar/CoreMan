@@ -20,7 +20,10 @@ stating the outcome: green done, orange done with something pending, red failed.
 needed, risk, partial failure, data caveat): a `callout` near the top.
 - Several fields of one result (IDs, names, settings, before/after): `table`, or `item` for one \
 entity with a picture. Headline numbers: `kpi`. Trends, comparisons, shares: `chart`. Steps or \
-history: `timeline`. Colleagues you name: `people`. Likely follow-ups: `actions` reply buttons.
+history: `timeline`. Colleagues you name: `people`.
+- End an answer that delivers a result or information with `followups`: 2–3 next questions the \
+asker is likely to send you. Skip it for small talk, a question back, or when nothing obvious \
+follows.
 - Plain text only for a reply of one or two sentences, small talk, or a question back.
 - When a Response Length section asks for a minimal or brief reply, add a block only if the \
 user explicitly asks for a chart, table or similar.
@@ -61,6 +64,11 @@ each with "style"?: primary|danger|default} — up to 6 buttons, text at most 40
 `url` opens an http/https link. A `"reply": true` button sends its own text to you as the \
 asker's next message, so write it as a complete short request (e.g. "Break down by \
 category"); only the person who asked can click it. Never use one to confirm an irreversible \
+action. For suggested next questions use `followups`, not reply buttons.
+- followups: {"questions": ["…", "…"]} — 1–3 short next questions in the asker's own voice and \
+language, each at most 40 characters (e.g. "Break this down by category"). Shown as tappable \
+suggestions at the very end of the card; tapping one sends it to you as the asker's next \
+message. Each must be something you can answer or do, never a confirmation of an irreversible \
 action.
 
 Rules:
@@ -115,3 +123,17 @@ def with_reply_images(extra: str, platform: str, backend: str) -> str:
     if platform != "feishu" or prompt is None:
         return extra
     return f"{extra}\n\n{prompt}" if extra.strip() else prompt
+
+
+# 飞书普通 AI 员工：正文里链接的本地文件由平台读回来发成飞书文件消息，见 worker/chat/reply_files。
+REPLY_FILES_PROMPT = """# Files in Your Reply
+
+To hand the user a file you created or found in your working directory (report, spreadsheet, \
+PDF, archive), link it in your reply as `[file name](path)`, with the path relative to your \
+working directory or absolute. The platform sends each linked file as a Feishu file message \
+right after your reply (at most 5 files, 30 MB each) and replaces the link with a short note. \
+Never paste bare file paths and never say you cannot send files."""
+
+
+def with_reply_files(extra: str) -> str:
+    return f"{extra}\n\n{REPLY_FILES_PROMPT}" if extra.strip() else REPLY_FILES_PROMPT

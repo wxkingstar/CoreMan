@@ -247,3 +247,51 @@ async def test_stop_counts_a_queued_credential_resume_as_something_to_stop(
     assert stream.final_text == msg("stopped")
     resume = await tasks.get(db_session, resume.id)
     assert resume and resume.cancel_requested_at is not None
+
+
+async def test_feishu_reset_reply_is_a_new_session_divider(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """飞书重置成功：回执交给网关发「新会话」分割线（私聊）或分隔卡片（群）；失败照旧回文字。"""
+    from coreman.core.db.models import OutboxItem
+    from coreman.runtime.worker.commands import new_session_reply
+
+    bot, _relay, _cipher = await seed_bot(db_session)
+    bot.platform = "feishu"
+    task = await _command_task(db_session, bot, "reset")
+    inbound = await db_session.get(InboundEvent, task.inbound_event_id)
+    assert inbound
+    inbound.reply_context = {**inbound.reply_context, "message_id": "om_cmd"}
+    ctx = build_ctx(db_engine, task)
+    assert not await new_session_reply(
+        db_session,
+        ctx,
+        bot=bot,
+        inbound=inbound,
+        chat_type="single",
+        text=msg("session_reset_failed"),
+    )
+    for chat_type in ("single", "group"):
+        assert await new_session_reply(
+            db_session,
+            ctx,
+            bot=bot,
+            inbound=inbound,
+            chat_type=chat_type,
+            text=msg("session_reset_ok"),
+        )
+    await db_session.commit()
+    (item,) = (await db_session.execute(select(OutboxItem))).scalars().all()  # 同一轮只排一次
+    assert item.target == {"chat_id": inbound.chat_id, "message_id": "om_cmd"}
+    assert item.payload == {
+        "_new_session": {
+            "single": True,
+            "label": msg("new_session_divider"),
+            "hint": msg("new_session_hint"),
+        },
+        "text": msg("session_reset_ok"),
+    }
+    bot.platform = "wecom"
+    assert not await new_session_reply(
+        db_session, ctx, bot=bot, inbound=inbound, chat_type="single", text=msg("session_reset_ok")
+    )

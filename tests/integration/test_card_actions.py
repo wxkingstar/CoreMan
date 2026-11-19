@@ -467,3 +467,50 @@ async def test_feishu_callback_requires_actual_sent_card(db_engine, db_session, 
     assert len(updates) == int(bound)
     if bound:
         assert updates[0].target["message_id"] == "om_card"
+
+
+@pytest.mark.parametrize(
+    ("clicker", "card_message", "expected"),
+    [
+        ("zs", "om_stream", "stopped"),
+        ("ls", "om_stream", "not_requester"),
+        ("zs", "om_other", "ignored"),
+    ],
+)
+async def test_feishu_stream_stop_button(db_engine, db_session, clicker, card_message, expected):
+    """流式卡片的「停止」：只有提问人、只对这条任务自己的卡片有效。"""
+    from coreman.core.bus import streams
+    from coreman.core.db.models import FeishuDelivery
+
+    bot, _, _ = await seed_bot(db_session)
+    bot.platform = "feishu"
+    running = await tasks.enqueue(
+        db_session,
+        NewTask(bot_id=bot.id, kind="chat", payload={"platform_user_id": "zs"}, session_key="oc1"),
+    )
+    assert running
+    await streams.create(
+        db_session,
+        task_id=running.id,
+        bot_id=bot.id,
+        platform="feishu",
+        stream_id="s",
+        reply_context={"chat_id": "oc1"},
+        lease_generation=0,
+        running_since=datetime.now(UTC),
+    )
+    db_session.add(FeishuDelivery(task_id=running.id, bot_id=bot.id, message_id="om_stream"))
+    await db_session.commit()
+    task, event = await _card_task(
+        db_session, bot, task_id=f"stop@{running.id}", selected={}, user=clicker
+    )
+    event.platform = "feishu"
+    event.reply_context = {**event.reply_context, "message_id": card_message}
+    await db_session.commit()
+    await CardActionHandler().run(build_ctx(db_engine, task))
+    row = await tasks.get(db_session, task.id)
+    assert row and row.status == "succeeded" and row.result == {"card": expected}
+    target = await tasks.get(db_session, running.id)
+    assert target
+    assert (target.cancel_reason == "user_stop") == (expected == "stopped")
+    assert await _outbox(db_session) == []
