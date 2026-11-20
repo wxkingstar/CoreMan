@@ -16,6 +16,7 @@ pytestmark = pytest.mark.usefixtures("assistant_master")
 INDEX, PAGE = f"{URL}/notes", f"{URL}/notes/page"
 # 路径本身是个人内容：读与删把它放在请求体里，不进网址（也就不进访问日志）。
 READ, DELETE = f"{URL}/notes/read", f"{URL}/notes/delete"
+LINKS, RENAME = f"{URL}/notes/links", f"{URL}/notes/rename"
 PATH = "规则/口吻"
 STORED = (
     "SELECT string_agg(path_enc || title_enc || summary_enc || body_enc, chr(32))"
@@ -243,3 +244,34 @@ async def test_after_the_key_is_destroyed_the_index_is_locked(
     ):
         assert response.status_code == 409 and code(response) == "content_locked"
         assert SECRET not in response.text
+
+
+async def test_the_owner_sees_backlinks_and_renames_with_links_following(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _ = await owned(client, db_session)
+    await notes.write(db_session, bot.id, "人/李四.md", body="采购", summary="")
+    await notes.write(db_session, bot.id, "项目/报价.md", body="找 [[李四]]", summary="")
+    await db_session.commit()
+    found = await client.post(LINKS, json={"path": "[[李四]]"})
+    assert found.status_code == 200, found.text
+    assert found.json()["data"] == {
+        "path": "人/李四.md",
+        "linked_from": ["项目/报价.md"],
+        "links_to": [],
+        "unresolved": [],
+    }
+    renamed = await client.post(RENAME, json={"path": "人/李四.md", "new_path": "人/老李.md"})
+    assert renamed.status_code == 200, renamed.text
+    data = renamed.json()["data"]
+    assert (data["path"], data["updated_by"], data["links_updated_in"]) == (
+        "人/老李.md",
+        "owner",
+        ["项目/报价.md"],
+    )
+    page = await client.post(READ, json={"path": "项目/报价.md"})
+    assert page.json()["data"]["body"] == "找 [[老李]]"
+    missing = await client.post(LINKS, json={"path": "人/李四.md"})
+    assert missing.status_code == 404
+    clash = await client.post(RENAME, json={"path": "人/老李.md", "new_path": "项目/报价"})
+    assert clash.status_code == 409

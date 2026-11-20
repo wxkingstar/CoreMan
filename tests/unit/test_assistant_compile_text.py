@@ -111,5 +111,5 @@ def test_the_first_compile_of_a_week_adds_the_check_up() -> None:
     head, rest = text.split(compiling.WEEKLY)
     assert compiling.INSTRUCTIONS.format(day=DAY.isoformat()) in head
     assert rest.lstrip("\n").startswith("今天的活动")
-    for word in ("notes_index", "合并", "待核实", "followup_add", "14 天"):
+    for word in ("notes_index", "notes_links", "合并", "待核实", "followup_add", "14 天"):
         assert word in compiling.WEEKLY, word

@@ -1,7 +1,7 @@
-"""「我的助理」页的知识库：索引、读一页、新建或整页替换、删除。
+"""「我的助理」页的知识库：索引、读一页、链接（反链与出链）、新建或整页替换、改名、删除。
 
 路径本身是个人内容：读、写、删都把它放在请求体里，不放进网址（网址会进反向代理与应用的访问
-日志）。所以读与删是 `POST /notes/read`、`POST /notes/delete`，索引也不收目录参数。
+日志）。所以读、链接、改名与删都是 POST，索引也不收目录参数。
 
 这是所有者看见「置顶了什么」并修改置顶页的唯一界面：写入一律 `owner_present=True`、
 `updated_by="owner"`。核心逻辑在 `coreman/core/assistants/notes.py`。
@@ -48,6 +48,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "content_locked": (409, "加密保存的个人内容已不可读取"),
     "assistant_only": (404, "你还没有个人助理"),
     "pin_requires_owner": (409, "置顶页只能由所有者本人修改"),
+    "ambiguous_name": (409, "有几页同名，请写全路径"),
 }
 
 
@@ -83,10 +84,16 @@ class PageIn(BaseModel):
 
 
 class PathIn(BaseModel):
-    """读与删只带一个路径。"""
+    """读、链接与删只带一个路径。"""
 
     model_config = ConfigDict(extra="forbid")
     path: str = Field(min_length=1, max_length=PATH_INPUT)
+
+
+class RenameIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=PATH_INPUT)
+    new_path: str = Field(min_length=1, max_length=PATH_INPUT)
 
 
 @router.get("")
@@ -124,6 +131,23 @@ async def read(
     return {"code": 0, "data": data}
 
 
+@router.post("/links")
+async def links(
+    body: PathIn, own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """哪些页链到这一页、它链到哪些页、它里面哪些双链找不到页。要读全部正文，记一次读取。"""
+    try:
+        found = await notes.links(session, own.bot.id, body.path)
+    except NotesError as exc:
+        raise _refuse(exc) from None
+    if found is None:
+        raise refuse("page_not_found", ERRORS)
+    await access_log.record(session, own.bot.id, own.actor.id, "notes.read", "links")
+    data = asdict(found)
+    await session.commit()
+    return {"code": 0, "data": data}
+
+
 @router.put("/page")
 async def write(
     body: PageIn, own: Mine = Depends(writable), session: AsyncSession = Depends(get_session)
@@ -145,6 +169,23 @@ async def write(
         await session.rollback()
         raise _refuse(exc) from None
     data = _entry(entry)
+    await session.commit()
+    return {"code": 0, "data": data}
+
+
+@router.post("/rename")
+async def rename(
+    body: RenameIn, own: Mine = Depends(writable), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """改路径；别的页里链到它的双链一并改掉，返回改了哪些页。"""
+    try:
+        entry, relinked = await notes.rename(
+            session, own.bot.id, body.path, body.new_path, updated_by="owner", owner_present=True
+        )
+    except NotesError as exc:
+        await session.rollback()
+        raise _refuse(exc) from None
+    data = {**_entry(entry), "links_updated_in": relinked}
     await session.commit()
     return {"code": 0, "data": data}
 

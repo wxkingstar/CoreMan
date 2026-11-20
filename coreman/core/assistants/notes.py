@@ -72,8 +72,14 @@ _SLASHES = re.compile(r"/+")
 SUFFIX = ".md"
 # Obsidian 式双链：`[[名字]]`、`[[路径|显示名]]`、`[[名字#小节]]`，前面可以有嵌入的 `!`。
 _LINK = re.compile(r"^!?\[\[(.+?)\]\]$")
+# 正文里的一处双链：可选的 `!`、目标、可选的 `#小节`、可选的 `|显示名`。
+_LINKS = re.compile(r"(!?)\[\[([^\[\]\n|#]*)(#[^\[\]\n|]*)?(\|[^\[\]\n]*)?\]\]")
+# 代码里的不算双链：围栏代码块与行内代码（与 Obsidian 一致）。
+_CODE = re.compile(r"```.*?(?:```|\Z)|~~~.*?(?:~~~|\Z)|`[^`\n]*`", re.DOTALL)
 # 按页名找到多页时，最多列出这么多条候选。
 MAX_CANDIDATES = 10
+# 体检报告里孤立页、断链各最多列这么多条。
+MAX_REPORT_ITEMS = 200
 # 置顶与改动置顶页只在所有者发起的轮次里做。
 PIN_REQUIRES_OWNER = "pin_requires_owner"
 
@@ -223,9 +229,43 @@ async def read(session: AsyncSession, bot_id: uuid.UUID, path: str) -> Page | No
     return Page(**asdict(_entry(row)), body=row.body_enc)
 
 
-def _name(path: str) -> str:
-    """页名：路径最后一段，去掉 `.md`、折叠大小写。"""
-    return path.rsplit("/", 1)[-1].casefold().removesuffix(SUFFIX)
+def _target(ref: str) -> str:
+    """路径或双链里的目标：去掉 `[[ ]]`、`|显示名`、`#小节`。"""
+    target = ref.strip()
+    linked = _LINK.match(target)
+    if linked is not None:
+        target = linked.group(1).split("|", 1)[0].split("#", 1)[0]
+    return target
+
+
+def _keys(rows: list[AssistantPage]) -> dict[str, str]:
+    """各页判断同一页用的键 → 路径，按路径排序。"""
+    return {same_page(row.path_enc): row.path_enc for row in _by_path(rows)}
+
+
+def _resolve(keys: dict[str, str], target: str) -> list[str]:
+    """双链目标指向哪些页（路径）：键完全一样的那一页；没有时取路径以「/目标」结尾的各页。
+
+    与 Obsidian 一样，`[[名字]]` 按页名找，`[[目录/名字]]` 按路径结尾找。恰好一页才算链上。
+    """
+    try:
+        key = same_page(target)
+    except NotesError:
+        return []
+    if key in keys:
+        return [keys[key]]
+    tail = "/" + key
+    return [path for found, path in keys.items() if found.endswith(tail)]
+
+
+def _links_in(body: str) -> list[re.Match[str]]:
+    """正文里的双链，跳过代码里的与只有小节的（`[[#小节]]`）。"""
+    code = [found.span() for found in _CODE.finditer(body)]
+    return [
+        link
+        for link in _LINKS.finditer(body)
+        if link.group(2).strip() and not any(start <= link.start() < end for start, end in code)
+    ]
 
 
 async def lookup(
@@ -234,25 +274,17 @@ async def lookup(
     """按路径或双链找一页：（找到的页, 找不到时同名的候选路径）。
 
     `ref` 可以是路径，也可以是 `[[名字]]`、`[[路径|显示名]]`、`[[名字#小节]]` 这样的双链。先按
-    路径找（带不带 `.md` 都算）；找不到再按页名（路径最后一段）在全部页面里找，恰好一页同名时
-    就是它，多页同名时返回候选，由调用方选。
+    路径找（带不带 `.md` 都算）；找不到再按路径结尾找（`[[名字]]`、`[[目录/名字]]`，见
+    `_resolve`），恰好一页时就是它，多页时返回候选，由调用方选。
 
     Raises:
         NotesError: `invalid_path`、`content_locked`、`assistant_only`
     """
-    target = ref.strip()
-    linked = _LINK.match(target)
-    if linked is not None:
-        target = linked.group(1).split("|", 1)[0].split("#", 1)[0]
+    target = _target(ref)
     page = await read(session, bot_id, target)
     if page is not None:
         return page, []
-    name = _name(normalize(target)[0])
-    same = [
-        row.path_enc
-        for row in _by_path(await _rows(session, bot_id, bodies=False))
-        if _name(row.path_enc) == name
-    ]
+    same = _resolve(_keys(await _rows(session, bot_id, bodies=False)), target)
     if len(same) == 1:
         return await read(session, bot_id, same[0]), []
     return None, same[:MAX_CANDIDATES]
@@ -440,6 +472,191 @@ async def delete(
         .returning(AssistantPage.id)
     )
     return gone.first() is not None
+
+
+@dataclass(frozen=True)
+class Links:
+    """一页的链接：`linked_from` 链到它的页，`links_to` 它链到的页，`unresolved` 它里面找不到
+    唯一一页的双链目标（没有这一页，或多页同名）。都按路径排序。"""
+
+    path: str
+    linked_from: list[str]
+    links_to: list[str]
+    unresolved: list[str]
+
+
+@dataclass(frozen=True)
+class Report:
+    """全库的链接体检：`orphans` 不链别的页、也没有页链到它的页；`broken` 找不到唯一一页的双链，
+    每条是（所在页, 双链目标）。各最多 `MAX_REPORT_ITEMS` 条，`*_total` 是全部的数目。"""
+
+    orphans: list[str]
+    orphans_total: int
+    broken: list[tuple[str, str]]
+    broken_total: int
+
+
+def _graph(rows: list[AssistantPage]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """（每页链到的页, 每页里找不到唯一一页的双链目标），键是路径，不含链到自己的。"""
+    keys = _keys(rows)
+    out: dict[str, list[str]] = {}
+    broken: dict[str, list[str]] = {}
+    for row in _by_path(rows):
+        found: dict[str, None] = {}
+        missing: dict[str, None] = {}
+        for link in _links_in(row.body_enc):
+            target = link.group(2).strip()
+            hit = _resolve(keys, target)
+            if len(hit) == 1:
+                if hit[0] != row.path_enc:
+                    found[hit[0]] = None
+            else:
+                missing[target] = None
+        out[row.path_enc] = list(found)
+        broken[row.path_enc] = list(missing)
+    return out, broken
+
+
+async def links(session: AsyncSession, bot_id: uuid.UUID, path: str) -> Links | None:
+    """一页的反链与出链；没有这一页返回 None。要把全部正文解密一遍，与检索同样的开销。
+
+    `path` 与 `lookup` 一样也可以是双链或页名。
+
+    Raises:
+        NotesError: `invalid_path`、`ambiguous_name`（多页同名，带候选）、`content_locked`、
+            `assistant_only`
+    """
+    target = _target(path)
+    normalize(target)
+    rows = await _rows(session, bot_id, bodies=True)
+    found = _resolve(_keys(rows), target)
+    if not found:
+        return None
+    if len(found) > 1:
+        raise NotesError("ambiguous_name", candidates=found[:MAX_CANDIDATES])
+    page = found[0]
+    out, broken = _graph(rows)
+    return Links(
+        path=page,
+        linked_from=[source for source, targets in out.items() if page in targets],
+        links_to=sorted(out[page], key=str.casefold),
+        unresolved=broken[page],
+    )
+
+
+async def report(session: AsyncSession, bot_id: uuid.UUID) -> Report:
+    """全库的孤立页与断链：每周体检用。"""
+    out, broken = _graph(await _rows(session, bot_id, bodies=True))
+    linked = {target for targets in out.values() for target in targets}
+    orphans = [path for path, targets in out.items() if not targets and path not in linked]
+    pairs = [(path, target) for path, targets in broken.items() for target in targets]
+    return Report(
+        orphans=orphans[:MAX_REPORT_ITEMS],
+        orphans_total=len(orphans),
+        broken=pairs[:MAX_REPORT_ITEMS],
+        broken_total=len(pairs),
+    )
+
+
+def _strip_suffix(path: str) -> str:
+    return path[: -len(SUFFIX)] if path.casefold().endswith(SUFFIX) else path
+
+
+def _target_for(keys: dict[str, str], dest: str, *, short: bool) -> str:
+    """链到 `dest` 用的目标：原来写的是页名、现在页名仍唯一时写页名，否则写不带 `.md` 的全路径。"""
+    name = _strip_suffix(dest.rsplit("/", 1)[-1])
+    if short and _resolve(keys, name) == [dest]:
+        return name
+    return _strip_suffix(dest)
+
+
+def _relink(body: str, old: dict[str, str], new: dict[str, str], moved: tuple[str, str]) -> str:
+    """改名之后重写一页里的双链：原来唯一指向的页，改完要么改了名、要么撞上了同名的页，这样的
+    双链换成仍指向那一页的写法；小节与显示名照旧。原来就找不到唯一一页的不动。"""
+    pieces: list[str] = []
+    last = 0
+    for link in _links_in(body):
+        target = link.group(2).strip()
+        was = _resolve(old, target)
+        if len(was) != 1:
+            continue
+        dest = moved[1] if was[0] == moved[0] else was[0]
+        if _resolve(new, target) == [dest]:
+            continue
+        fixed = _target_for(new, dest, short="/" not in target)
+        pieces += [body[last : link.start()], link.group(1), "[[", fixed]
+        pieces += [link.group(3) or "", link.group(4) or "", "]]"]
+        last = link.end()
+    return "".join(pieces) + body[last:] if pieces else body
+
+
+async def rename(
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    path: str,
+    new_path: str,
+    *,
+    updated_by: str = "assistant",
+    owner_present: bool = True,
+) -> tuple[Entry, list[str]]:
+    """给一页改路径，并把别的页里链到它的双链一并改掉：（改名后的条目, 改了双链的其他页）。
+
+    改名还可能让别的双链撞上同名页（`[[名字]]` 原来唯一，改完有两页叫这个名字），这些也换成
+    写全路径，仍指向原来那一页。标题还是旧路径最后一段的，跟着换成新的。
+
+    Args:
+        owner_present: False 时（见 `write`）这一页或要改双链的页里有置顶页就拒绝
+
+    Raises:
+        NotesError: `invalid_path`、`invalid_page`、`page_not_found`、`page_exists`、
+            `page_too_large`、`notes_full`、`content_locked`、`assistant_only`、
+            `pin_requires_owner`
+    """
+    shown, new_key = normalize(new_path)
+    _, key = normalize(path)
+    if updated_by not in PAGE_AUTHORS:
+        raise NotesError("invalid_page")
+    await _serialize(session, bot_id)
+    _, row = await _find(session, bot_id, key)
+    if row is None:
+        raise NotesError("page_not_found")
+    _, other = await _find(session, bot_id, new_key)
+    if other is not None and other.id != row.id:
+        raise NotesError("page_exists", current_version=other.version)
+    if shown == row.path_enc:
+        return _entry(row), []
+    rows = await _rows(session, bot_id, bodies=True)
+    old = _keys(rows)
+    new = {k: v for k, v in old.items() if v != row.path_enc}
+    new[same_page(shown)] = shown
+    new = dict(sorted(new.items(), key=lambda item: item[1].casefold()))
+    bodies = {page.id: _relink(page.body_enc, old, new, (row.path_enc, shown)) for page in rows}
+    changed = [page for page in rows if bodies[page.id] != page.body_enc]
+    if not owner_present and (row.pinned or any(page.pinned for page in changed)):
+        raise NotesError(PIN_REQUIRES_OWNER)
+    sizes = {page.id: len(bodies[page.id].encode("utf-8")) for page in changed}
+    for size in sizes.values():
+        if size > MAX_PAGE_BYTES:
+            raise NotesError("page_too_large", limit_bytes=MAX_PAGE_BYTES, size_bytes=size)
+    total = sum(sizes.get(page.id, page.size) for page in rows)
+    if total > MAX_TOTAL_BYTES:
+        raise NotesError("notes_full", limit_bytes=MAX_TOTAL_BYTES)
+    now: datetime = (await session.execute(select(func.now()))).scalar_one()
+    for page in {*changed, row}:
+        if page.id in sizes:
+            page.body_enc = bodies[page.id]
+            page.size = sizes[page.id]
+        page.version += 1
+        page.updated_by = updated_by
+        page.updated_at = now
+    if row.title_enc == _default_title(row.path_enc):
+        row.title_enc = _default_title(shown)
+    row.path_hmac = await _path_key(session, bot_id, new_key)
+    row.path_enc = shown
+    await session.flush()
+    return _entry(row), sorted(
+        (page.path_enc for page in changed if page.id != row.id), key=str.casefold
+    )
 
 
 async def _rows(

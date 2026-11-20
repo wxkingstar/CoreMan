@@ -1,4 +1,4 @@
-"""个人知识库的六个工具：登记在助理工具注册表的 knowledge 组。
+"""个人知识库的八个工具：登记在助理工具注册表的 knowledge 组。
 
 knowledge 组不受飞书授权代数影响，子任务也能用；分派时只认这一轮核验过的助理记录
 （`scope.bot`），路径之外没有别的寻址方式，读写不到别人的页。
@@ -88,6 +88,19 @@ class Edit(Arguments):
     )
 
 
+class Rename(Arguments):
+    path: PagePath
+    new_path: PagePath = Field(description="The new path; links in other pages follow it")
+
+
+class LinksArgs(Arguments):
+    path: Annotated[str, StringConstraints(max_length=2 * notes.MAX_PATH_CHARS)] = Field(
+        default="",
+        description="A page path: which pages link to it and where it links. Omit for the"
+        " whole knowledge base: isolated pages and links that lead nowhere",
+    )
+
+
 class Delete(Arguments):
     path: PagePath
 
@@ -119,6 +132,17 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
         "Change one part of a page: replace the exact text old, which must occur exactly once,"
         " with new; the rest of the page stays as it is. Prefer this to notes_write for adding"
         " a line or correcting a passage in an existing page.",
+    ),
+    "notes_rename": (
+        Rename,
+        "Move or rename a page. [[links]] to it in other pages are rewritten to the new"
+        " name, so nothing breaks; use this instead of writing a copy and deleting the old one.",
+    ),
+    "notes_links": (
+        LinksArgs,
+        "Links between pages. With path: the pages that link to it (backlinks), the pages it"
+        " links to, and its links that find no single page. Without path: pages with no links"
+        " in or out, and every link that finds no single page.",
     ),
     "notes_delete": (Delete, "Delete one page by path."),
 }
@@ -201,6 +225,38 @@ async def _edit(session: AsyncSession, scope: Scope, args: Edit) -> dict[str, An
     return {"status": "saved", "path": entry.path, "version": entry.version, "pinned": entry.pinned}
 
 
+async def _rename(session: AsyncSession, scope: Scope, args: Rename) -> dict[str, Any]:
+    entry, relinked = await notes.rename(
+        session,
+        scope.bot.id,
+        args.path,
+        args.new_path,
+        updated_by="assistant",
+        owner_present=not scope.unattended,
+    )
+    return {
+        "status": "renamed",
+        "path": entry.path,
+        "version": entry.version,
+        "links_updated_in": relinked,
+    }
+
+
+async def _links(session: AsyncSession, scope: Scope, args: LinksArgs) -> dict[str, Any]:
+    if not args.path.strip():
+        found = await notes.report(session, scope.bot.id)
+        return {
+            "orphans": found.orphans,
+            "orphans_total": found.orphans_total,
+            "broken": [{"page": page, "link": link} for page, link in found.broken],
+            "broken_total": found.broken_total,
+        }
+    links = await notes.links(session, scope.bot.id, args.path)
+    if links is None:
+        return {"error": "page_not_found"}
+    return asdict(links)
+
+
 async def _delete(session: AsyncSession, scope: Scope, args: Delete) -> dict[str, Any]:
     if await notes.delete(session, scope.bot.id, args.path, owner_present=not scope.unattended):
         return {"status": "deleted"}
@@ -213,6 +269,8 @@ _RUN: dict[str, Callable[[AsyncSession, Scope, Any], Awaitable[dict[str, Any]]]]
     "notes_search": _search,
     "notes_write": _write,
     "notes_edit": _edit,
+    "notes_rename": _rename,
+    "notes_links": _links,
     "notes_delete": _delete,
 }
 

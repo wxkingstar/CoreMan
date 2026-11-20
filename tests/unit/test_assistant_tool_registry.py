@@ -33,6 +33,8 @@ NOTES_TOOLS = [
     "notes_search",
     "notes_write",
     "notes_edit",
+    "notes_rename",
+    "notes_links",
     "notes_delete",
 ]
 SETTINGS_TOOLS = ["assistant_settings_get", "assistant_settings_update"]

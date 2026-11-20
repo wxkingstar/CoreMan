@@ -188,6 +188,9 @@ export interface NoteEntry {
 }
 export interface NotePage extends NoteEntry { body: string }
 export interface NoteIndex { items: NoteEntry[]; locked: boolean }
+/** 一页的链接：哪些页链到它、它链到哪些页、它里面哪些双链找不到唯一一页。 */
+export interface NoteLinks { path: string; linked_from: string[]; links_to: string[]; unresolved: string[] }
+export interface NoteRenamed extends NoteEntry { links_updated_in: string[] }
 /** `version` 是读到的版本，0 表示新建；`pinned` 省略表示保持原样。 */
 export interface NoteIn { path: string; body: string; summary: string; title?: string | null; pinned?: boolean | null; version: number }
 
@@ -296,8 +299,10 @@ export const myAssistant = {
   supplementFollowup: (id: string, text: string) => call<Followup>(http.post(`${root}/followups/${id}/feedback`, { text })),
   recentApprovals: () => call<{ items: SettledApproval[] }>(http.get(`${root}/approvals/recent`)),
   notes: () => call<NoteIndex>(http.get(`${root}/notes`)),
-  // 路径本身是个人内容：读与删都放请求体，不进网址（网址会进访问日志）。
+  // 路径本身是个人内容：读、链接、改名与删都放请求体，不进网址（网址会进访问日志）。
   page: (path: string) => call<NotePage>(http.post(`${root}/notes/read`, { path })),
+  pageLinks: (path: string) => call<NoteLinks>(http.post(`${root}/notes/links`, { path })),
+  renamePage: (path: string, newPath: string) => call<NoteRenamed>(http.post(`${root}/notes/rename`, { path, new_path: newPath })),
   savePage: (body: NoteIn) => call<NoteEntry>(http.put(`${root}/notes/page`, body)),
   deletePage: (path: string) => call<{ deleted: boolean }>(http.post(`${root}/notes/delete`, { path })),
   settings: () => call<AssistantPrefs>(http.get(`${root}/settings`)),

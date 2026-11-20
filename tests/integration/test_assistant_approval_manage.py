@@ -52,6 +52,8 @@ def test_own_tools_are_listed_for_assistants() -> None:
         "notes_search",
         "notes_write",
         "notes_edit",
+        "notes_rename",
+        "notes_links",
         "notes_delete",
         "followup_add",
         "followup_update",
