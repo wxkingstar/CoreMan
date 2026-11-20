@@ -202,6 +202,39 @@ otherwise tell the user and ask before touching it.
 
 If the working directory is not such a worktree, this section does not apply."""
 
+# 开发模式的追加段：节点开了开发环境预览（心跳声明 dev_preview_v1）才给。
+DEV_PREVIEW_RULE = """# Development Preview
+
+This node can run your worktree as a development environment and give it a URL the user can
+open. It connects directly to the test environment's database (data changes only, no schema
+changes) and Redis, and uses the systems' default login, not single sign-on.
+
+1. After each round of changes, run the project's checks and relevant tests, then run
+   `coreman-dev up` in the worktree root. It builds and starts `dev/compose.yaml`, checks
+   the entry, and prints the URL. Running it again after more changes refreshes the same URL.
+2. If the repository has no `dev/` directory, create it and commit it with your change:
+   `dev/compose.yaml` with only this repository's services plus one entry service
+   listening on `127.0.0.1:${DEV_PORT}` that routes paths the way the test environment
+   does; every service reads settings from `env_file: ${DEV_ENV_FILE}` and has a
+   healthcheck; reuse the repository's Dockerfiles. Never write credentials into the
+   repository. Turn off automatic schema migration, message queue consumers and scheduled
+   jobs. When `dev/` no longer matches the code, fix it.
+3. When `coreman-dev up` succeeds, open the pages and endpoints your change touches
+   yourself and confirm they work. Then reply with the URL so the user can test. If
+   anything fails, read `coreman-dev logs`, fix it and run `up` again; never hand over a
+   URL you have not seen working.
+4. Push the branch and open the pull request only after the user confirms the development
+   environment works, or asks you to. This replaces "when a change is ready" in step 2
+   above.
+5. If the change alters the database schema, skip the development environment: tell the
+   user the migration has to go through a test environment release first, and that later
+   changes without schema changes can come back here.
+6. If the change concerns single sign-on, skip the development environment and tell the
+   user it has to be verified in the test or staging environment.
+7. `coreman-dev status`, `coreman-dev logs [service]`, `coreman-dev down` and
+   `coreman-dev list` show and stop environments. Idle environments are stopped
+   automatically."""
+
 # 固定段，只给非开发模式的员工：规则文档按 AGENTS.md 索引 + docs/ 分篇存放，用到时再读。
 # 根目录自己就是带远端的 Git 仓库时由那个仓库的约定说了算，所以留给 agent 自己判断。
 RULES_LAYOUT_RULE = """# Rule Documents

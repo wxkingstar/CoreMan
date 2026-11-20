@@ -309,6 +309,27 @@ def test_dev_mode_section_only_when_enabled_and_before_custom_prompt() -> None:
     out = build(True)
     assert out.index("# Date and Time") < out.index("# Development Mode") < out.index("你是开发")
     assert "Never push to or rebase the default branch" in out
+
+
+def test_dev_preview_section_only_with_dev_mode_and_node_support() -> None:
+    def build(dev_mode: bool, dev_preview: bool) -> str:
+        return build_system_prompt(
+            segments=SEG,
+            backend="codex",
+            verbosity_level=4,
+            bot_prompt="你是开发",
+            tag=TAG,
+            dev_mode=dev_mode,
+            dev_preview=dev_preview,
+        )
+
+    assert "# Development Preview" not in build(True, False)
+    assert "# Development Preview" not in build(False, True)
+    out = build(True, True)
+    assert (
+        out.index("# Development Mode") < out.index("# Development Preview") < out.index("你是开发")
+    )
+    assert "coreman-dev up" in out
     assert "never a shared one" in out
     assert "checks that\n   person's own authorization" in out
     assert "git switch <branch>" in out
