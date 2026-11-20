@@ -201,3 +201,20 @@ def test_docker_path_expands_home(tmp_path, monkeypatch):
     settings = make_settings(tmp_path, docker="~/.local/bin/docker")
     assert settings.docker == str(tmp_path / ".local/bin/docker")
     assert make_settings(tmp_path).docker == "docker"
+
+
+def test_project_env_file_is_merged_after_the_shared_one(tmp_path):
+    settings = make_settings(tmp_path)
+    assert devpreview.preview_env_file(settings, "shop", "shop-abc123") == settings.env_file
+
+    extra = settings.project_env_file("shop")
+    extra.parent.mkdir()
+    extra.write_text("SHOP_KEY=k1\n")
+    merged = devpreview.preview_env_file(settings, "shop", "shop-abc123")
+    assert merged.read_text() == "DEV_MYSQL_HOST=db\nSHOP_KEY=k1\n"
+    assert merged.stat().st_mode & 0o777 == 0o600
+    assert devpreview.preview_env_file(settings, "other", "other-abc123") == settings.env_file
+
+    extra.unlink()
+    assert devpreview.preview_env_file(settings, "shop", "shop-abc123") == settings.env_file
+    assert not merged.exists()

@@ -64,7 +64,7 @@ Runtime 节点（云上的 Linux 和办公室的 Mac）内存充足，可以直�
 要求：
 
 - 所有服务都写 `healthcheck`，`docker compose up --wait` 能判断启动完成。
-- 环境变量从节点下发的环境文件读取（`env_file: ${DEV_ENV_FILE}`），仓库里不出现任何凭据。
+- 环境变量从节点下发的环境文件读取（`env_file: ${DEV_ENV_FILE}`），仓库里不出现任何凭据。某个仓库独有的值（如它自己的加密密钥）由管理员放进节点环境文件同目录的 `projects/<仓库名>.env`，`coreman-dev up` 拼进同一份文件。
 - 启动时自动建表、改表的逻辑（如 ORM 的 AutoMigrate）在开发配置里关掉。账号本来也没有 DDL 权限，开着会启动失败。
 - MQ 消费者、定时任务默认关闭。
 - 镜像要能在 arm64 和 amd64 上原生构建，基础镜像选多架构的。

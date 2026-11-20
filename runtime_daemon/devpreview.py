@@ -120,6 +120,10 @@ class Settings:
     def frpc_config(self) -> Path:
         return self.data_dir / "frpc.toml"
 
+    def project_env_file(self, repo: str) -> Path:
+        """仓库独有的变量（如它自己的密钥）放在公共环境文件旁的 projects/<仓库名>.env。"""
+        return self.env_file.parent / "projects" / f"{repo}.env"
+
 
 def toml_str(value: object) -> str:
     # JSON 字符串的转义是 TOML 基本字符串的子集。
@@ -174,6 +178,18 @@ def repo_name(tree: Path) -> str:
         )
         name = Path(common.strip()).parent.name
     return name
+
+
+def preview_env_file(settings: Settings, repo: str, pid: str) -> Path:
+    """有仓库专属变量时，把公共文件和它拼成一份给这个预览用（同名以仓库专属的为准）。"""
+    extra = settings.project_env_file(repo)
+    merged = settings.data_dir / "env" / f"{pid}.env"
+    if not extra.is_file():
+        merged.unlink(missing_ok=True)
+        return settings.env_file
+    base = settings.env_file.read_text()
+    write_private(merged, base.rstrip("\n") + "\n" + extra.read_text())
+    return merged
 
 
 def port_free(port: int) -> bool:
@@ -279,6 +295,7 @@ def stop_preview(settings: Settings, state: dict, key: str, *, remove: bool = Fa
         compose(settings, pid, *args, timeout=300)
     (settings.proxies_dir / f"{pid}.toml").unlink(missing_ok=True)
     if remove:
+        (settings.data_dir / "env" / f"{pid}.env").unlink(missing_ok=True)
         del state["previews"][key]
     else:
         entry["running"] = False
@@ -301,8 +318,9 @@ def cmd_up(settings: Settings, path: str) -> int:
     if not settings.env_file.is_file():
         raise PreviewError(f"节点缺少开发环境变量文件 {settings.env_file}，请联系管理员")
     key = str(tree)
+    repo = repo_name(tree)
     with locked_state(settings) as state:
-        pid = preview_id(settings, tree, repo_name(tree))
+        pid = preview_id(settings, tree, repo)
         port = allocate_port(settings, state, key)
         running = [
             (e.get("last_up", 0), k)
@@ -322,7 +340,10 @@ def cmd_up(settings: Settings, path: str) -> int:
     url = url_of(settings, pid)
     env = dict(os.environ)
     env.update(
-        DEV_PORT=str(port), DEV_ENV_FILE=str(settings.env_file), DEV_URL=url, DEV_PREVIEW_ID=pid
+        DEV_PORT=str(port),
+        DEV_ENV_FILE=str(preview_env_file(settings, repo, pid)),
+        DEV_URL=url,
+        DEV_PREVIEW_ID=pid,
     )
     print(f"启动 {pid}（端口 {port}）……", flush=True)
     try:
