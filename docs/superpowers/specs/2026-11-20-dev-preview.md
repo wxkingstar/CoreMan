@@ -68,6 +68,9 @@ Runtime 节点（云上的 Linux 和办公室的 Mac）内存充足，可以直�
 - 启动时自动建表、改表的逻辑（如 ORM 的 AutoMigrate）在开发配置里关掉。账号本来也没有 DDL 权限，开着会启动失败。
 - MQ 消费者、定时任务默认关闭。
 - 镜像要能在 arm64 和 amd64 上原生构建，基础镜像选多架构的。
+- 以开发模式运行，目标是改代码几秒内可见：源码挂进容器（`../` 相对 `dev/`），后端用自带的热重载（如 `uvicorn --reload`、Go 的 `air`），前端用 dev server（如 Vite）而不是打包后的静态文件；依赖留在镜像或具名卷里，不被挂载遮住。只有依赖、Dockerfile、`dev/` 或环境变量变了才重新 `coreman-dev up`。
+- 文件监听一律开轮询（如 `WATCHFILES_FORCE_POLLING=true`、Vite `server.watch.usePolling`）：实测 macOS 上 colima（vz + virtiofs）的挂载目录不会把宿主机的文件变化事件传进容器。
+- 页面经入口以 `${DEV_URL}`（HTTPS）访问：dev server 要放行这个主机名（Vite `server.allowedHosts`），热更新的 WebSocket 要走 443 回连（Vite `server.hmr.clientPort: 443`）。
 
 ## 节点侧
 

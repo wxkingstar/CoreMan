@@ -209,20 +209,36 @@ This node can run your worktree as a development environment and give it a URL t
 open. It connects directly to the test environment's database (data changes only, no schema
 changes) and Redis, and uses the systems' default login, not single sign-on.
 
-1. After each round of changes, run the project's checks and relevant tests, then run
-   `coreman-dev up` in the worktree root. It builds and starts `dev/compose.yaml`, checks
-   the entry, and prints the URL. Running it again after more changes refreshes the same URL.
-2. If the repository has no `dev/` directory, create it and commit it with your change:
-   `dev/compose.yaml` with only this repository's services plus one entry service
+1. Run `coreman-dev up` in the worktree root once your first change builds and its checks
+   pass. It builds and starts `dev/compose.yaml`, checks the entry, and prints the URL.
+   After that, code changes go live by themselves through hot reload, usually within a few
+   seconds: edit, wait for the reload, check the page. Run `coreman-dev up` again only when
+   dependencies, Dockerfiles, `dev/` or the services' environment change; it keeps the
+   same URL.
+2. If the repository has no `dev/` directory, create it and commit it with your change.
+   `dev/compose.yaml` holds only this repository's services plus one entry service
    listening on `127.0.0.1:${DEV_PORT}` that routes paths the way the test environment
-   does; every service reads settings from `env_file: ${DEV_ENV_FILE}` and has a
-   healthcheck; reuse the repository's Dockerfiles. Never write credentials into the
-   repository. Turn off automatic schema migration, message queue consumers and scheduled
-   jobs. When `dev/` no longer matches the code, fix it.
+   does. Every service reads settings from `env_file: ${DEV_ENV_FILE}` and has a
+   healthcheck. Never write credentials into the repository. Turn off automatic schema
+   migration, message queue consumers and scheduled jobs. Run services in development
+   mode, not as production images:
+   - Bind-mount the source (`../` relative to `dev/`) into the containers and start each
+     service with its hot reload: the backend's reload mode (for example
+     `uvicorn --reload`, `air` for Go, `nodemon`) and the frontend's dev server (for
+     example Vite) instead of a built bundle. Keep dependencies inside the image or a
+     named volume (for example `node_modules`) so the mount does not hide them.
+   - File change events may not reach containers on this node, so turn on polling in
+     every watcher (for example `WATCHFILES_FORCE_POLLING=true`, Vite
+     `server.watch.usePolling`), set only from `dev/` or development-only settings.
+   - The page is served at `${DEV_URL}` over HTTPS through the entry: allow that host in
+     the dev server (Vite `server.allowedHosts`) and make hot module replacement connect
+     back through it (Vite `server.hmr.clientPort: 443`).
+   - A small dev Dockerfile under `dev/` is fine when the repository's Dockerfiles only
+     build production images. When `dev/` no longer matches the code, fix it.
 3. When `coreman-dev up` succeeds, open the pages and endpoints your change touches
    yourself and confirm they work. Then reply with the URL so the user can test. If
-   anything fails, read `coreman-dev logs`, fix it and run `up` again; never hand over a
-   URL you have not seen working.
+   anything fails, read `coreman-dev logs` and fix it (run `up` again only if the fix needs
+   a rebuild); never hand over a URL you have not seen working.
 4. Push the branch and open the pull request only after the user confirms the development
    environment works, or asks you to. This replaces "when a change is ready" in step 2
    above.

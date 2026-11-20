@@ -45,6 +45,6 @@ AI 员工编辑页 →「更多设置」→ 体验 →「开发模式」，默�
 - **节点**：`config.json` 加 `dev_preview` 段（字段见 `runtime_daemon/README.md`），本机装好 Docker 与 Compose（macOS 用 colima）。守护进程下载并常驻 frpc，经 wss 连到网关后面的 frps；隧道在跑才声明 `dev_preview_v1`。
 - **平台**：员工开了开发模式、且所在节点声明了 `dev_preview_v1`，开发模式说明后面多一段「Development Preview」：每轮改完跑 `coreman-dev up`、自己验证后回复链接、用户确认后再开 PR；改表结构、单点登录相关的改动不走开发环境。没有这项能力的节点照旧「改动就绪就开 PR」。
 - **命令**：在 worktree 根目录执行 `coreman-dev up|down|status|logs|list`。`up` 用 `docker compose -p <项目>-<id> -f dev/compose.yaml up -d --build --wait` 启动，注入 `DEV_PORT`、`DEV_ENV_FILE`、`DEV_URL`、`DEV_PREVIEW_ID`（仓库独有的变量放在环境文件同目录的 `projects/<仓库名>.env`，会拼进 `DEV_ENV_FILE`），先查本机入口、再经开发域名查一遍，都通了才输出地址。地址是 `https://<仓库名>-<6 位>.<domain>`，同一节点同一 worktree 固定。
-- **仓库约定**：`dev/compose.yaml` 只放本仓库的服务和一个入口（监听 `127.0.0.1:${DEV_PORT}`），环境变量从 `${DEV_ENV_FILE}` 读，服务都写 healthcheck；关掉自动迁移、MQ 消费者和定时任务；仓库里不放凭据。由 AI 员工生成和维护。
+- **仓库约定**：`dev/compose.yaml` 只放本仓库的服务和一个入口（监听 `127.0.0.1:${DEV_PORT}`），环境变量从 `${DEV_ENV_FILE}` 读，服务都写 healthcheck；关掉自动迁移、MQ 消费者和定时任务；仓库里不放凭据。服务以开发模式运行：源码挂进容器，后端用自带的热重载、前端用 dev server，改代码几秒内生效，只有依赖、Dockerfile、`dev/` 或环境变量变了才要重新 `up`；监听一律开轮询（macOS 上 colima 的挂载目录不会把文件变化事件传进容器）。由 AI 员工生成和维护。
 - **回收**：守护进程每 30 分钟检查一次：worktree 已删的预览删容器、卷和本地构建的镜像；闲置超过 `idle_hours` 的停容器（下次 `up` 再起）；每天清一次 72 小时前的镜像与构建缓存。状态在数据目录的 `dev-preview/` 下。
 
