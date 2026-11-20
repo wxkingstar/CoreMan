@@ -264,7 +264,10 @@ def url_of(settings: Settings, pid: str) -> str:
 
 
 def probe(url: str, timeout: float) -> tuple[bool, str]:
-    """2xx–4xx 都算服务起来了（登录页、401 也是正常页面）；frps 自己的 404 说明隧道还没接上。"""
+    """2xx–4xx 都算服务起来了（登录页、401 也是正常页面）；frps 自己的 404 说明隧道还没接上。
+
+    403 例外：多半是开发服务器没放行开发域名（如 Vite allowedHosts），直接报出来。
+    """
     import httpx
 
     deadline = time.monotonic() + timeout
@@ -273,6 +276,8 @@ def probe(url: str, timeout: float) -> tuple[bool, str]:
         try:
             response = httpx.get(url, timeout=10, follow_redirects=False)
             text = response.text[:2000]
+            if response.status_code == 403:
+                return False, "HTTP 403（多半是开发服务器没放行这个主机名，或入口没转发 Host 头）"
             if response.status_code < 500 and "fatedier/frp" not in text:
                 return True, str(response.status_code)
             last = f"HTTP {response.status_code}" + (
@@ -353,6 +358,8 @@ def cmd_up(settings: Settings, path: str) -> int:
             "up",
             "-d",
             "--build",
+            # 只改了挂载进容器的配置文件时 compose 认为没变化、不会重建，旧配置会一直生效。
+            "--force-recreate",
             "--wait",
             "--wait-timeout",
             "600",

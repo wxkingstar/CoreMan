@@ -97,7 +97,7 @@ Runtime 节点（云上的 Linux 和办公室的 Mac）内存充足，可以直�
 
 | 子命令 | 做什么 |
 |---|---|
-| `up` | 分配或复用端口 → `docker compose -p <项目>-<id> -f dev/compose.yaml up -d --build --wait` → 写入 frpc 代理配置并热重载 → 经网关访问一次健康检查路径 → 输出开发地址。失败时输出出错的那一步和最后几十行容器日志 |
+| `up` | 分配或复用端口 → `docker compose -p <项目>-<id> -f dev/compose.yaml up -d --build --force-recreate --wait` → 写入 frpc 代理配置并热重载 → 经网关访问一次健康检查路径 → 输出开发地址。失败时输出出错的那一步和最后几十行容器日志 |
 | `down` | 停止容器，注销子域名，保留镜像缓存 |
 | `status` | 本 worktree 的地址、容器状态、最近一次启动时间 |
 | `logs [服务]` | 查看容器日志 |

@@ -181,6 +181,14 @@ def test_probe_treats_frps_404_as_not_connected(monkeypatch):
     assert devpreview.probe("https://x.dev.example.com/", 30) == (True, "302")
 
 
+def test_probe_reports_403_at_once(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: NS(status_code=403, text="Blocked request"))
+    ok, detail = devpreview.probe("http://127.0.0.1:42000/", 30)
+    assert not ok and "403" in detail
+
+
 def test_command_script_runs_release_python(tmp_path):
     script = devpreview.command_script(tmp_path / "config.json", tmp_path / "release")
     assert script.startswith("#!/bin/sh")
