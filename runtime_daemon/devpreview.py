@@ -611,7 +611,7 @@ class DevPreview:
         binary = install_frpc(settings)
         settings.proxies_dir.mkdir(parents=True, exist_ok=True)
         stale = settings.data_dir / "frpc.pid"
-        with contextlib.suppress(OSError, ValueError, ProcessLookupError, PermissionError):
+        with contextlib.suppress(OSError, ValueError, PreviewError):
             # 守护进程上次异常退出留下的 frpc：先停掉，免得两份抢同一批子域名。
             old = int(stale.read_text())
             if "frpc" in run(["ps", "-o", "command=", "-p", str(old)]):
