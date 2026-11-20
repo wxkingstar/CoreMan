@@ -17,7 +17,7 @@ class HealthObservation(BaseModel):
     status: Literal["healthy", "down", "auth_fail", "timeout", "unknown"]
     detail: str | None = Field(default=None, max_length=255)
     latency_ms: int | None = Field(default=None, ge=0, le=3600000)
-    check_kind: Literal["legacy", "driver", "model", "conversation"] = "legacy"
+    check_kind: Literal["legacy", "driver", "model", "conversation", "connection"] = "legacy"
     observed_at: datetime | None = None
     model: str | None = Field(default=None, max_length=150)
     requested_model: str | None = Field(default=None, max_length=150)
@@ -83,6 +83,7 @@ async def save_health(
             ).model_dump(mode="json")
     field = {
         "driver": "driver_health",
+        "connection": "connection_health",
         "model": "model_health",
         "conversation": "model_health",
     }.get(observation.check_kind)
@@ -93,7 +94,9 @@ async def save_health(
         values[field] = data
         if field == "model_health" and observation.status in ("down", "auth_fail", "timeout"):
             values["last_model_failure"] = data
-    if relay.health_checked_at is None or relay.health_checked_at <= at:
+    if observation.check_kind != "connection" and (
+        relay.health_checked_at is None or relay.health_checked_at <= at
+    ):
         values.update(
             health_status=observation.status,
             health_detail=observation.detail,
@@ -113,6 +116,7 @@ def telemetry_view(relay: RelayServer) -> dict[str, Any]:
     """Old rows retain legacy fields; absent typed observations remain absent."""
     return {
         "driver_health": relay.driver_health,
+        "connection_health": relay.connection_health,
         "model_health": relay.model_health,
         "last_model_failure": relay.last_model_failure,
         "quota_observation": relay.quota_observation

@@ -49,3 +49,31 @@ Each window retains its own `observed_at`. Refreshing weekly usage does not refr
 4. Verify a real conversation, provider-specific idle fallback, failed/empty/partial quota reads, driver success after model failure, omitted legacy seats and explicit mismatched-seat rejection. Distinguish fixtures from production verification.
 
 Downgrade removes observation columns/history; follow existing backup/rollback policy. Host PSI boot configuration is unrelated and requires separate root-authorized maintenance.
+
+### Runtime transport and request validation
+
+`connection_health` is an independent, bounded observation (`check_kind=connection`).
+Worker transport errors and node connection/control loss update it without replacing
+`model_health` or `last_model_failure`. A response event or a server-initiated
+`/health` request that reaches the driver proves connectivity; a node's local driver
+heartbeat alone does not clear a connection incident. Local request rejection,
+queueing and cancellation never count as model failure. Seat changes discard the
+previous seat's connection observation. The nullable JSONB column is added by
+migration 0116; deploy the API migration before the new workers and Console.
+
+The runtime envelope limit remains 64 MiB **after JSON and Base64 encoding**.
+A 66,296,816-byte file expands to 88,395,756 Base64 bytes before JSON overhead and
+is rejected before queueing. A local rejection returns
+`runtime_request_too_large` with a request-size explanation rather than a generic
+connection message. It does not update any health observation or trigger a
+machine/model outage alert. Users must shrink or split the attachments.
+
+`task_failed` includes the runtime/relay IDs, requested model and a bounded
+`exception_chain`: exception types/modules, errno and TLS verification codes,
+stack locations, and local validation code/request_bytes/limit_bytes. Health and
+model-directory transport errors also include this provenance. Arbitrary exception
+text, URLs, headers, frame locals, prompts, credentials and Base64 attachments are
+not logged. These fields retain the original failure's location and safe low-level
+codes even when the outward message is shortened. Historical generic
+`model_request_failed` rows are preserved; their underlying cause is not guessed
+or retroactively reported as recovered.

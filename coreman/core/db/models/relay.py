@@ -80,6 +80,7 @@ class RelayServer(TimestampMixin, Base):
     health_latency_ms: Mapped[int | None] = mapped_column(Integer)
     health_fail_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     driver_health: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    connection_health: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     model_health: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     last_model_failure: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     relay_version: Mapped[str | None] = mapped_column(Text)

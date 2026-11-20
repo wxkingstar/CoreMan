@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from coreman.core.relay.client import RelayClient
+from coreman.core.runtime_nodes.errors import RuntimeRequestRejected
 from coreman.core.runtime_nodes.transport import NODE_ERRORS
 
 
@@ -324,6 +325,14 @@ class FakeRelay:
             )
         if self.scenario == "connect_error":
             raise httpx.ConnectError("refused", request=request)
+        if self.scenario == "request_too_large":
+            raise RuntimeRequestRejected(
+                "runtime_request_too_large",
+                "请求（含附件编码）超过运行时通道 64 MiB 上限，请缩小附件或拆分后重试。",
+                request=request,
+                request_bytes=88_400_000,
+                limit_bytes=64 * 1024 * 1024,
+            )
         if self.scenario == "http_500":
             return httpx.Response(500, text="boom")
         body = json.loads(request.content or b"{}")

@@ -9,6 +9,7 @@ from coreman.core.bus import outbox
 from coreman.core.chat import dispatch, group_observe
 from coreman.core.db.models import Task
 from coreman.core.i18n.messages import msg
+from coreman.core.relay.diagnostics import exception_details
 from coreman.core.relay.sse import (
     ActualModelEvent,
     AskUserQuestionEvent,
@@ -139,7 +140,14 @@ class ConverseStage(ChatStageBase):
                 if out.ask_user:
                     return out
         except Exception as exc:  # noqa: BLE001 任何异常都只算这一轮失败，统一进 _classify
-            ctx.log.warning("task_failed", error=type(exc).__name__)
+            ctx.log.warning(
+                "task_failed",
+                error=type(exc).__name__,
+                relay_id=str(getattr(pre.relay, "id", None)),
+                runtime_node_id=str(getattr(pre.relay, "runtime_node_id", None)),
+                model=pre.request.model,
+                **exception_details(exc),
+            )
             out.error = exc
             return out
         finally:

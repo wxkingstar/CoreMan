@@ -13,10 +13,12 @@ let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => { timer = setInterval(() => { now.value = Date.now() }, 30000) })
 onUnmounted(() => clearInterval(timer))
 const model = computed(() => modelHealth(props.backend.model_health, now.value))
+const connection = computed(() => observedRecently(props.backend.connection_health?.observed_at, now.value, 900) ? props.backend.connection_health?.status : 'unknown')
 const driver = computed(() => observedRecently(props.backend.driver_health?.observed_at, now.value, 7320) ? props.backend.driver_health?.status : 'unknown')
 </script>
 <template>
   <div class="runtime-telemetry">
+    <span v-if="backend.connection_health">{{ t('runtimeMonitor.connection') }} <HealthTag :status="connection ?? 'unknown'" /> · {{ formatDateTime(backend.connection_health.observed_at) }}</span>
     <span>{{ t('runtimeMonitor.driver') }} <HealthTag :status="driver ?? 'unknown'" /></span>
     <span>{{ t('runtimeMonitor.model') }} <HealthTag :status="model" /></span>
     <small>{{ t('runtimeMonitor.observedAt') }} {{ formatDateTime(backend.model_health?.observed_at ?? null) }}</small>

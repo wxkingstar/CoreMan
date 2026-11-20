@@ -11,7 +11,7 @@ from coreman.core.db.models import ModelCatalog, RelayServer
 from coreman.core.logging import get_logger
 from coreman.core.relay.client import RelayClient, RelayError, RelayHealth
 from coreman.core.relay.models import known_effort_flags
-from coreman.core.relay.observations import HealthObservation
+from coreman.core.relay.observations import HealthObservation, save_health
 
 log = get_logger(__name__)
 
@@ -38,6 +38,18 @@ async def probe_relay(
         (health, added_models)：本次探测结果与新写入目录的模型名
     """
     health = await client.health()
+    await save_health(
+        session,
+        relay.id,
+        HealthObservation(
+            status=health.status if health.connection_error else "healthy",
+            check_kind="connection",
+            error_code=health.connection_error,
+            detail="运行时连接检查失败" if health.connection_error else None,
+        ),
+    )
+    if health.connection_error:
+        return health, []
     values = dict(
         health_status=health.status,
         health_detail=health.detail,

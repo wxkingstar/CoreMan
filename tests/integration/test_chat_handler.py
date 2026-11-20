@@ -860,3 +860,35 @@ async def test_a_resumed_turn_reruns_the_same_message(
     row = await tasks.get(db_session, again.id)
     assert row and row.status == "succeeded"
     assert (await stream_of(db_session, again.id)).is_complete
+
+
+@pytest.mark.parametrize("scenario", ["connect_error", "request_too_large"])
+async def test_runtime_connection_and_local_rejection_never_replace_model_result(
+    db_engine, db_session, scenario
+):
+    bot, relay, _ = await seed_bot(db_session)
+    await save_health(
+        db_session,
+        relay.id,
+        HealthObservation(status="auth_fail", check_kind="model", error_code="session_expired"),
+    )
+    await db_session.commit()
+    await db_session.refresh(relay)
+    before = (relay.model_health, relay.last_model_failure)
+    task = await chat_task(db_session, bot, "a")
+    await run(db_engine, task, FakeRelay(scenario))
+    await db_session.refresh(relay)
+    assert (relay.model_health, relay.last_model_failure) == before
+    log = (await db_session.execute(select(ChatLog).where(ChatLog.task_id == task.id))).scalar_one()
+    if scenario == "connect_error":
+        assert log.error_code == "runtime_connection_failed"
+        assert relay.connection_health["status"] == "down"
+        # A driver heartbeat cannot clear this; a real subsequent call can.
+        retry = await chat_task(db_session, bot, "b")
+        await run(db_engine, retry, FakeRelay("normal"))
+        await db_session.refresh(relay)
+        assert relay.connection_health["status"] == "healthy"
+    else:
+        assert relay.connection_health is None
+        assert log.error_code == "runtime_request_too_large"
+        assert "附件" in (await stream_of(db_session, task.id)).final_text
