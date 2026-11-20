@@ -62,6 +62,9 @@ export interface FollowupIn {
   due_on?: string | null
 }
 export type FollowupPatch = Partial<FollowupIn>
+/** 所有者关闭一条时选的原因：已当面沟通、已经解决、别人已处理、无需处理、其他。 */
+export const CLOSE_REASONS = ['talked', 'resolved', 'others_done', 'not_needed', 'other'] as const
+export type CloseReason = typeof CLOSE_REASONS[number]
 
 export interface AssistantJob {
   id: string
@@ -107,7 +110,16 @@ export interface SettledApproval {
   executed_at: string | null
   locked: boolean
 }
-export type BoardGroup = 'owner' | 'stalled' | 'working' | 'others' | 'gap' | 'scheduled'
+/** 五种状态，页面上按这个顺序排。 */
+export const BOARD_GROUPS = ['owner', 'working', 'others', 'scheduled', 'stalled'] as const
+export type BoardGroup = typeof BOARD_GROUPS[number]
+/** 一条为什么在这一组（后端 `board.classify` 的原因代码）。 */
+export type BoardReason =
+  | 'gap' | 'approval' | 'decide' | 'info' | 'remind' | 'self' | 'job_blocked'
+  | 'job_running' | 'job_queued' | 'assistant'
+  | 'gap_requested' | 'waiting' | 'nudge_due'
+  | 'snoozed' | 'review'
+  | 'gap_admin' | 'stuck_how' | 'stuck_who' | 'stuck_failed' | 'no_reply' | 'job_failed' | 'idle'
 export type GapKind = 'feishu_scope' | 'business_system' | 'cloud_product' | 'credential' | 'node_tool' | 'other'
 export type GapFix = 'authorize' | 'credential' | 'self_grant' | 'request' | 'admin' | 'node_admin' | 'none'
 /** 这个缺口最近的一张权限申请（不论状态）。理由是所有者写给平台管理员的明文。 */
@@ -130,6 +142,8 @@ export interface BoardGap {
   hint: string
   followups: string[]
   request: GapRequest | null
+  /** 列在哪一组：所有者自己能开的在等你，已申请的在等别人，要找管理员的在停滞。 */
+  stage: BoardGroup
   locked?: boolean
 }
 export interface BoardItem extends Followup {
@@ -139,10 +153,14 @@ export interface BoardItem extends Followup {
   handler_name: string | null
   job_id: string | null
   progress_at: string
-  stage: Exclude<BoardGroup, 'stalled'>
-  stalled: boolean
+  stage: BoardGroup
+  reason: BoardReason
   idle_days: number
   suggestion: string | null
+  /** 助理要所有者补的信息（备注里「需要你：」那一行）。 */
+  need: string | null
+  stuck: 'how' | 'who' | 'failed' | null
+  nudges: number
   job: AssistantJob | null
   gap: string | null
   /** 挂在这一条下面、等所有者批的单。 */
@@ -271,8 +289,11 @@ export const myAssistant = {
   followups: () => call<FollowupList>(http.get(`${root}/followups`)),
   addFollowup: (body: FollowupIn) => call<Followup>(http.post(`${root}/followups`, body)),
   updateFollowup: (id: string, body: FollowupPatch) => call<Followup>(http.patch(`${root}/followups/${id}`, body)),
-  closeFollowup: (id: string, dropped = false) => call<Followup>(http.post(`${root}/followups/${id}/close`, { dropped })),
-  snoozeFollowup: (id: string, until: string) => call<Followup>(http.post(`${root}/followups/${id}/snooze`, { until })),
+  closeFollowup: (id: string, reason: CloseReason, note?: string) =>
+    call<Followup>(http.post(`${root}/followups/${id}/close`, { reason, ...(note ? { note } : {}) })),
+  rescheduleFollowup: (id: string, until: string, note?: string) =>
+    call<Followup>(http.post(`${root}/followups/${id}/snooze`, { until, ...(note ? { note } : {}) })),
+  supplementFollowup: (id: string, text: string) => call<Followup>(http.post(`${root}/followups/${id}/feedback`, { text })),
   recentApprovals: () => call<{ items: SettledApproval[] }>(http.get(`${root}/approvals/recent`)),
   notes: () => call<NoteIndex>(http.get(`${root}/notes`)),
   // 路径本身是个人内容：读与删都放请求体，不进网址（网址会进访问日志）。

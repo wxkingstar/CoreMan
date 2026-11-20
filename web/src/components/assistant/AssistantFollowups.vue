@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { FOLLOWUP_CATEGORIES, myAssistant, type Followup, type FollowupCategory, type FollowupList } from '@/api/myAssistant'
 import LoadState from '@/components/LoadState.vue'
-import { askSnoozeDate } from '@/utils/assistantFollowups'
+import FollowupActionDialog, { type FollowupAction } from '@/components/assistant/FollowupActionDialog.vue'
 import { errorMessage } from '@/utils/errors'
 
 const { t } = useI18n()
@@ -33,15 +33,9 @@ async function add() {
     form.title = ''; form.due_on = ''
   }, 'assistant.followups.added')
 }
-const finish = (item: Followup) => act(() => myAssistant.closeFollowup(item.id, false), 'assistant.followups.closed')
-const drop = (item: Followup) => act(async () => {
-  await ElMessageBox.confirm(t('assistant.followups.dropConfirm', { name: item.id }), t('assistant.followups.drop'), { type: 'warning' })
-  await myAssistant.closeFollowup(item.id, true)
-}, 'assistant.followups.closed')
-const snooze = (item: Followup) => act(async () => {
-  const value = await askSnoozeDate(t, data.value?.today ?? '')
-  await myAssistant.snoozeFollowup(item.id, value)
-}, 'assistant.followups.snoozed')
+/** 补充、改期、关闭（选原因）：和总表共用一个对话框，做完重新取列表。 */
+const dialog = ref<InstanceType<typeof FollowupActionDialog> | null>(null)
+const open = (action: FollowupAction, item: Followup) => dialog.value?.open(action, item)
 /** 备注默认露两行，长的点开看全文。 */
 const expanded = reactive(new Set<string>())
 function toggle(id: string) { if (expanded.has(id)) expanded.delete(id); else expanded.add(id) }
@@ -127,17 +121,17 @@ defineExpose({ form, add, recategorize, load })
             :data-test="'item-' + item.id"
           >
             <div class="ma-row__main">
-              <!-- 勾上即办完：受控为未勾选，办完后这一条随列表刷新消失。 -->
+              <!-- 勾上即打开关闭对话框选原因：受控为未勾选，关闭后这一条随列表刷新消失。 -->
               <el-tooltip
-                :content="t('assistant.followups.done')"
+                :content="t('assistant.actions.close.button')"
                 placement="top"
               >
                 <el-checkbox
                   :model-value="false"
                   :disabled="busy"
-                  :aria-label="t('assistant.followups.done')"
+                  :aria-label="t('assistant.actions.close.button')"
                   :data-test="'done-' + item.id"
-                  @change="finish(item)"
+                  @change="open('close', item)"
                 />
               </el-tooltip>
               <span class="ma-id">{{ item.id }}</span>
@@ -177,19 +171,26 @@ defineExpose({ form, add, recategorize, load })
                   link
                   type="primary"
                   size="small"
-                  :data-test="'snooze-' + item.id"
-                  @click="snooze(item)"
+                  :data-test="'supplement-' + item.id"
+                  @click="open('supplement', item)"
                 >
-                  {{ t('assistant.followups.snooze') }}
+                  {{ t('assistant.actions.supplement.button') }}
                 </el-button>
                 <el-button
                   link
-                  type="danger"
                   size="small"
-                  :data-test="'drop-' + item.id"
-                  @click="drop(item)"
+                  :data-test="'reschedule-' + item.id"
+                  @click="open('reschedule', item)"
                 >
-                  {{ t('assistant.followups.drop') }}
+                  {{ t('assistant.actions.reschedule.button') }}
+                </el-button>
+                <el-button
+                  link
+                  size="small"
+                  :data-test="'close-' + item.id"
+                  @click="open('close', item)"
+                >
+                  {{ t('assistant.actions.close.button') }}
                 </el-button>
               </span>
             </div>
@@ -227,6 +228,11 @@ defineExpose({ form, add, recategorize, load })
         </ul>
       </section>
     </template>
+    <FollowupActionDialog
+      ref="dialog"
+      :today="data?.today ?? ''"
+      @done="load"
+    />
   </section>
 </template>
 <style scoped>

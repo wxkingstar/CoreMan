@@ -151,6 +151,37 @@ async def followups_due(
     return added
 
 
+async def nudges_due(
+    session: AsyncSession, bot_id: uuid.UUID, prefs: AssistantSettings, now: datetime
+) -> int:
+    """等别人的事到了催办时间：各入一条提醒交回助理起草催办，每一轮催办至多一次；返回新入了几条。"""
+    # 函数内引入：总表依赖面大，模块层引入会成环。
+    from coreman.core.assistants import board
+
+    result = await board.build(session, bot_id, prefs, now)
+    added = 0
+    for item in result.groups["others"]:
+        row = item.row
+        if item.reason != "nudge_due" or sealed.is_locked(row):
+            continue
+        added += await add_reminder(
+            session,
+            bot_id,
+            f"nudge:{row.id}:{row.nudges or 0}",
+            level="batch",
+            now=now,
+            summary={
+                "reminder": "followup_nudge",
+                "label": followups.label(row.seq),
+                "nudges": row.nudges or 0,
+                "handler_name": row.handler_name_enc,
+                "due_on": row.due_on.isoformat() if row.due_on else None,
+                "title": row.title_enc,
+            },
+        )
+    return added
+
+
 # 每日例行在当天第一个摘要时点之前这么久起生成，第一轮摘要带得上；每周例行在最后一个时点之前。
 MORNING_LEAD = timedelta(minutes=30)
 WEEKLY_LEAD = timedelta(minutes=60)
@@ -511,6 +542,7 @@ async def sweep(
     today = assistant_settings.local_today(prefs, now)
     counts = {
         "assistant_followups_due": await followups_due(session, bot.id, today, now),
+        "assistant_followups_nudge": await nudges_due(session, bot.id, prefs, now),
         "assistant_marks_stale": await stale_marks(session, bot.id, today, now),
         "assistant_reauth_reminded": await remind_reauth(session, bot, prefs, row, now),
         "assistant_approvals_auto_withdrawn": 0,

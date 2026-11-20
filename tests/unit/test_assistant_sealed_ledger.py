@@ -62,6 +62,8 @@ ENTITY_SELECTS = {
     "coreman/core/assistants/jobs.py": 3,
     # 知识库：按路径摘要取一页、列出各页；都显式还原，读不出来的行报错或跳过
     "coreman/core/assistants/notes.py": 2,
+    # 所有者反馈：编译时列出窗口里的反馈，显式还原，读不出来的不给原话
+    "coreman/core/assistants/owner_feedback.py": 1,
     # 「我的助理」页的审批单：显式还原，且只对所有者本人（viewer）还原
     "coreman/core/assistants/owner_view.py": 1,
     # 盯消息：认领一行是 session.scalar（自动还原上一轮的会话顺序与游标）
@@ -181,6 +183,8 @@ WRITE_STATEMENTS = {
     "coreman/core/assistants/jobs.py": 1,
     # 知识库：经 ORM 新建（flush 钩子封存）；改写同样经 ORM
     "coreman/core/assistants/notes.py": 1,
+    # 所有者反馈：经 ORM 新建（flush 钩子封存原话）
+    "coreman/core/assistants/owner_feedback.py": 1,
     # 从现在开始：已结束子任务记为不必投回，只写投回状态与时间
     "coreman/core/assistants/reset.py": 1,
     "coreman/core/assistants/settings.py": 1,  # 按默认值建行，不写内容列

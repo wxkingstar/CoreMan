@@ -28,20 +28,17 @@ def _row(seq: int, **kw: Any) -> AssistantFollowup:
 
 def _board(per_group: int = 10) -> board.Board:
     groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
-    stages = {"owner": "owner", "stalled": "working", "working": "working", "others": "others"}
+    reasons = {"owner": "decide", "stalled": "idle", "working": "assistant", "others": "waiting"}
     seq = 0
     for name in board.GROUPS:
-        # 「卡在权限」由 `Board.gaps` 驱动，另有测试；这里只摆原来的几组。
-        if name == "gap":
-            continue
         for _ in range(per_group):
             seq += 1
             if name == "scheduled":
                 row = _row(seq, review_on=TODAY + timedelta(days=2))
-                item = board.Item(row, "scheduled", False, 0, None)
+                item = board.Item(row, "scheduled", "review", 0, None)
             else:
                 row = _row(seq, category="decide" if name == "owner" else "promised")
-                item = board.Item(row, stages[name], name == "stalled", 3, None)
+                item = board.Item(row, name, reasons[name], 3, None)
             groups[name].append(item)
     approvals = [
         AssistantApproval(
@@ -116,7 +113,7 @@ def test_an_empty_board_says_there_is_nothing_to_follow_up() -> None:
 
 def test_who_is_on_it() -> None:
     def who(row: AssistantFollowup, job: AssistantJob | None = None) -> str:
-        return digest._who(board.Item(row, "working", False, 0, job))
+        return digest._who(board.Item(row, "working", "assistant", 0, job))
 
     assert who(_row(1, handler="job"), AssistantJob(kind="bot_help")) == "公共员工在办"
     assert who(_row(1, handler="job"), AssistantJob(kind="subtask")) == "子任务在办"
@@ -149,7 +146,7 @@ def test_gap_group_has_hint_and_buttons() -> None:
     )
     admin = AssistantGap(seq=4, kind="cloud_product", key="slb", need_enc="改白名单", status="open")
     groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
-    groups["gap"] = [board.Item(_row(1), "gap", False, 0, None, chat)]
+    groups["owner"] = [board.Item(_row(1), "owner", "gap", 0, None, chat)]
     result = board.Board(
         TODAY,
         groups,
@@ -157,11 +154,14 @@ def test_gap_group_has_hint_and_buttons() -> None:
         0,
         {},
         None,
-        [board.Gap(chat, "authorize", [1]), board.Gap(admin, "admin", [])],
+        [board.Gap(chat, "authorize", [1], "owner"), board.Gap(admin, "admin", [], "stalled")],
     )
     card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
     text = json.dumps(card, ensure_ascii=False)
-    assert "卡在权限（1 件，2 个缺口）" in text
+    # 所有者自己能开的列在「等你」，要找管理员的列在「停滞」。
+    assert "要你开通的权限（1）" in text and "停滞（0）" in text
+    assert text.index("G003") < text.index("停滞（0）") < text.index("G004")
+    assert "要你开通权限" in text
     assert "G003 缺飞书权限 im:message：读群消息 → 卡住 F001" in text
     assert gaps.hint(chat, "authorize") in text and gaps.hint(admin, "admin") in text
     assert "开通 G003" in text and "不开 G003" in text
@@ -179,10 +179,10 @@ def test_gap_group_has_hint_and_buttons() -> None:
         ("不开 G003", "gp3", ["go3", "gd3"], "ou_x"),
         ("不开 G004", "gp4", ["gd4"], "ou_x"),
     ]
-    # 摘要（非看板）只在计数行里带一句。
+    # 摘要（非看板）也展开等你与停滞：两个缺口都在。
     brief, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=False)
-    assert "卡在权限 1" in json.dumps(brief, ensure_ascii=False)
-    assert "G003" not in json.dumps(brief, ensure_ascii=False)
+    brief_text = json.dumps(brief, ensure_ascii=False)
+    assert "G003" in brief_text and "G004" in brief_text
 
 
 def _buttons(node: Any) -> list[dict[str, Any]]:
@@ -208,6 +208,7 @@ def test_many_gaps_stay_within_the_card_limit() -> None:
             ),
             "credential",
             list(range(1, 30)),
+            "owner",
         )
         for n in range(1, 40)
     ]
@@ -228,7 +229,7 @@ def test_many_gaps_stay_within_the_card_limit() -> None:
     texts = _texts(card)
     assert _size(card) <= MAX_CARD_BYTES
     shown = texts.count("缺个人凭证")
-    tail = texts.split("卡在权限（0 件，39 个缺口）", 1)[1].split("\n**", 1)[0]
+    tail = texts.split("要你开通的权限（39）", 1)[1].split("\n**", 1)[0]
     assert digest.MORE_HINT.format(n=len(entries) - shown) in tail
 
 
@@ -237,7 +238,7 @@ def test_linked_approval_line_under_item() -> None:
     approval = AssistantApproval(
         id=uuid.uuid4(), tool="feishu_im_send_message", args_enc={"abstract": "私聊 → 李四"}
     )
-    groups["owner"] = [board.Item(_row(1), "owner", False, 0, None, None, (approval,))]
+    groups["owner"] = [board.Item(_row(1), "owner", "approval", 0, None, None, (approval,))]
     card, _ = digest.board_card(
         board.Board(TODAY, groups, [], 0, {}, None),
         requester="ou_x",
@@ -254,7 +255,7 @@ def test_batch_under_item_is_one_line_with_its_item_count() -> None:
     approval = AssistantApproval(
         id=uuid.uuid4(), tool="feishu_im_send_message", args_enc={"abstract": "私聊 → 李四"}
     )
-    groups["owner"] = [board.Item(_row(1), "owner", False, 0, None, None, (approval,))]
+    groups["owner"] = [board.Item(_row(1), "owner", "approval", 0, None, None, (approval,))]
     card, _ = digest.board_card(
         board.Board(TODAY, groups, [], 0, {approval.id: 2}, None),
         requester="ou_x",
@@ -283,7 +284,7 @@ def test_requested_gap_has_no_open_button() -> None:
         0,
         {},
         None,
-        [board.Gap(waiting, "request", []), board.Gap(fresh, "request", [])],
+        [board.Gap(waiting, "request", [], "others"), board.Gap(fresh, "request", [], "owner")],
     )
     card, _ = digest.board_card(result, requester="ou_x", link=None, system=None, full=True)
     text = json.dumps(card, ensure_ascii=False)
@@ -293,3 +294,31 @@ def test_requested_gap_has_no_open_button() -> None:
     )
     assert "开通 G005" not in text and "不开 G005" in text
     assert "开通 G006" in text and "不开 G006" in text
+
+
+def test_lines_say_why_and_when() -> None:
+    def line(stage: str, reason: str, **kw: Any) -> str:
+        return digest._line(board.Item(_row(7, **kw), stage, reason, 2, None))
+
+    assert "不知道找谁" in line("stalled", "stuck_who") and "2 个工作日没动" in line(
+        "stalled", "idle"
+    )
+    assert "该催了" in line("others", "nudge_due")
+    assert "在等对方" not in line("others", "waiting")
+    assert f"{TODAY + timedelta(days=3)} 启动" in line(
+        "scheduled", "review", review_on=TODAY + timedelta(days=3)
+    )
+
+
+def test_owner_item_shows_what_is_needed() -> None:
+    groups: dict[str, list[board.Item]] = {name: [] for name in board.GROUPS}
+    row = _row(1, notes_enc="需要你：给出报价上限")
+    groups["owner"] = [board.Item(row, "owner", "info", 0, None)]
+    card, _ = digest.board_card(
+        board.Board(TODAY, groups, [], 0, {}, None),
+        requester="ou_x",
+        link=None,
+        system=None,
+        full=False,
+    )
+    assert "需要你：给出报价上限" in _texts(card)

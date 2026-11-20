@@ -44,6 +44,12 @@ Title = Annotated[
 ]
 Notes = Annotated[str, StringConstraints(max_length=followups.MAX_NOTES)]
 Handler = Literal["assistant", "job", "person", "owner"]
+Stuck = Literal["how", "who", "failed"]
+STUCK = (
+    "Why it is stalled: how (you do not know how to do it), who (you do not know whom to ask),"
+    " failed (it keeps failing). Set it only when nothing else moves it forward; write the"
+    " details into notes. The owner's board lists it under 停滞 for him to decide"
+)
 HandlerName = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=followups.MAX_HANDLER_NAME),
@@ -93,14 +99,15 @@ class Update(Arguments):
     handler: Handler | None = Field(default=None, description=HANDLER)
     handler_name: HandlerName | None = None
     job: JobRef | None = None
+    stuck: Stuck | None = Field(default=None, description=STUCK)
     approval_id: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = (
         Field(
             default=None,
             description="An approval id (from approval_list) to show under this follow-up",
         )
     )
-    clear: list[Literal["notes", "review_on", "due_on"]] = Field(
-        default_factory=list, max_length=3, description="Fields to empty"
+    clear: list[Literal["notes", "review_on", "due_on", "stuck"]] = Field(
+        default_factory=list, max_length=4, description="Fields to empty"
     )
 
     _days = valid_days("review_on", "due_on")
@@ -120,6 +127,13 @@ class Progress(Arguments):
         StringConstraints(strip_whitespace=True, min_length=1, max_length=followups.MAX_PROGRESS),
         Field(description="One or two sentences: what moved forward, found out or changed"),
     ]
+    nudged: bool = Field(
+        default=False,
+        description=(
+            "true when this progress is that a reminder (nudge) to the person you are waiting"
+            " on was sent: counts the nudge and restarts the nudge clock"
+        ),
+    )
 
 
 class Close(Arguments):
@@ -187,6 +201,7 @@ HINTS = {
     ),
     "notes_full": "备注里开头的说明已经太长，进展写不进去：先用 followup_update 把 notes 精简。",
     "invalid_progress": "note 写一两句话，不超过 300 字。",
+    "invalid_stuck": "stuck 只能是 how、who、failed 之一。",
     "content_locked": "所有者的数据密钥不可用，标题与备注现在写不了；不要重试，如实告诉所有者。",
 }
 
@@ -251,7 +266,9 @@ async def _run(
         return {"followup": followups.view(row)}
     seq = followups.parse_label(args.id)
     if name == "followup_progress":
-        row = await followups.progress(session, bot_id, seq, args.note, today=today)
+        row = await followups.progress(
+            session, bot_id, seq, args.note, today=today, nudged=args.nudged
+        )
         return {"followup": followups.view(row)}
     if name == "followup_snooze":
         row = await followups.snooze(
@@ -263,7 +280,7 @@ async def _run(
         )
     else:
         changes: dict[str, Any] = {}
-        for field in ("category", "title", "notes", "needs_owner"):
+        for field in ("category", "title", "notes", "needs_owner", "stuck"):
             if getattr(args, field) is not None:
                 changes[field] = getattr(args, field)
         for field in ("review_on", "due_on"):

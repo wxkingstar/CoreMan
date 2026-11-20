@@ -11,6 +11,7 @@ from coreman.core.assistants import sealed
 from coreman.core.crypto import Cipher, DecryptError
 from coreman.core.db.models import (
     AssistantApproval,
+    AssistantFeedback,
     AssistantFollowup,
     AssistantGap,
     AssistantInbox,
@@ -56,6 +57,7 @@ def test_every_content_column_is_registered() -> None:
         AssistantSettings,
         AssistantPage,
         AssistantFollowup,
+        AssistantFeedback,
         AssistantGap,
         AssistantJob,
         AssistantInbox,
@@ -70,6 +72,7 @@ def test_every_content_column_is_registered() -> None:
     assert set(sealed.COLUMNS[AssistantTranscript]) == {"blob_enc"}
     assert set(sealed.COLUMNS[AssistantWatch]) == {"head_enc", "cursor_enc"}
     assert set(sealed.COLUMNS[AssistantInbox]) == {"summary_enc"}
+    assert set(sealed.COLUMNS[AssistantFeedback]) == {"note_enc"}
     assert set(sealed.COLUMNS[AssistantFollowup]) == {
         "title_enc",
         "notes_enc",

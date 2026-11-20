@@ -229,3 +229,21 @@ async def test_handler_arguments_reach_the_core(db_session: AsyncSession) -> Non
     assert bad["error"] == "job_not_found"
     nameless = await call(db_session, scope, "followup_update", id=label, handler="person")
     assert nameless["error"] == "invalid_handler_name" and "hint" in nameless
+
+
+async def test_stuck_and_nudged_arguments(db_session: AsyncSession) -> None:
+    _, _, scope = await assistant_turn(db_session)
+    added = await call(db_session, scope, "followup_add", category="waiting", title="等报价")
+    label = added["followup"]["id"]
+    stuck = await call(db_session, scope, "followup_update", id=label, stuck="who")
+    assert stuck["followup"]["stuck"] == "who"
+    bad = await call(db_session, scope, "followup_update", id=label, stuck="lazy")
+    assert bad["error"] == "invalid_tool_or_arguments"
+    cleared = await call(db_session, scope, "followup_update", id=label, clear=["stuck"])
+    assert cleared["followup"]["stuck"] is None
+    nudged = await call(
+        db_session, scope, "followup_progress", id=label, note="发了催办", nudged=True
+    )
+    assert nudged["followup"]["nudges"] == 1
+    plain = await call(db_session, scope, "followup_progress", id=label, note="对方说明天给")
+    assert plain["followup"]["nudges"] == 1

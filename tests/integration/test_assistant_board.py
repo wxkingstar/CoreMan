@@ -1,4 +1,4 @@
-"""总表：按阶段分组、停滞判断、子任务在跑不算停滞、审批单单独列出、内容按密钥还原。"""
+"""总表：按五种状态分组、停滞判断、子任务在跑算执行中、审批单单独列出、内容按密钥还原。"""
 
 from __future__ import annotations
 
@@ -64,8 +64,12 @@ async def test_groups_and_stalls(db_session: AsyncSession) -> None:
     result = await board.build(db_session, bot.id, prefs, WED_NOON)
     seqs = {name: [i.row.seq for i in items] for name, items in result.groups.items()}
     assert seqs["owner"] == [decide.seq]
-    # 停滞组按没动的工作日数从多到少：整理合同（上周五起 3 个工作日）在前，过期的等赵六在后。
-    assert seqs["stalled"] == [stale.seq, waiting.seq]
+    # 助理推进的整理合同上周五起 3 个工作日没动：停滞。
+    assert seqs["stalled"] == [stale.seq]
+    assert [i.reason for i in result.groups["stalled"]] == ["idle"]
+    # 等赵六过了期限：还在等别人，标「该催了」。
+    assert seqs["others"] == [waiting.seq]
+    assert [i.reason for i in result.groups["others"]] == ["nudge_due"]
     assert set(seqs["working"]) == {fresh.seq, running.seq}
     # 子任务还在跑：即使很久没动，也不算停滞。
     assert running.seq not in seqs["stalled"]
@@ -109,7 +113,7 @@ async def test_a_woken_item_does_not_count_its_snoozed_days_as_idle(
     await db_session.commit()
     result = await board.build(db_session, bot.id, prefs, WED_NOON)
     [awake] = [i for i in result.groups["working"] if i.row.seq == woken.seq]
-    assert awake.idle_days == 1 and not awake.stalled
+    assert awake.idle_days == 1 and awake.stage == "working"
     [stalled] = result.groups["stalled"]
     assert stalled.row.seq == parked.seq and stalled.idle_days == 3
 
@@ -131,11 +135,13 @@ async def test_followups_stuck_on_a_gap(db_session: AsyncSession) -> None:
     )
     await db_session.commit()
     result = await board.build(db_session, bot.id, prefs, WED_NOON)
-    assert [i.row.seq for i in result.groups["gap"]] == [stuck.seq]
-    assert result.groups["gap"][0].gap is not None and result.groups["gap"][0].gap.id == row.id
+    # 个人凭证所有者自己就能填：卡住的事在「等你」，缺口也列在那一组。
+    [entry] = result.groups["owner"]
+    assert entry.row.seq == stuck.seq and entry.reason == "gap"
+    assert entry.gap is not None and entry.gap.id == row.id
     assert [i.row.seq for i in result.groups["working"]] == [free.seq]
-    assert [(g.row.seq, g.fix, g.followups) for g in result.gaps] == [
-        (1, "credential", [stuck.seq])
+    assert [(g.row.seq, g.fix, g.followups, g.stage) for g in result.gaps] == [
+        (1, "credential", [stuck.seq], "owner")
     ]
     await gaps.decline(db_session, bot.id, row.seq)
     await db_session.commit()
@@ -188,8 +194,8 @@ async def test_gap_stuck_item_leaves_its_approval_in_the_loose_list(
     row.followup_id = item.id
     await db_session.commit()
     result = await board.build(db_session, bot.id, prefs, WED_NOON)
-    assert [i.row.seq for i in result.groups["gap"]] == [item.seq]
-    assert result.groups["gap"][0].approvals == ()
+    assert [(i.row.seq, i.reason) for i in result.groups["owner"]] == [(item.seq, "gap")]
+    assert result.groups["owner"][0].approvals == ()
     assert [a.id for a in result.approvals] == [row.id] and result.approvals_total == 1
 
 
@@ -245,3 +251,32 @@ async def test_an_approval_linked_to_an_old_item_still_makes_the_digest_fresh(
     result = await board.build(db_session, bot.id, prefs, WED_NOON + timedelta(hours=2))
     assert result.approvals_total == 0 and result.approvals_newest is not None
     assert await digest.send_digest(db_session, bot, prefs, WED_NOON + timedelta(hours=2))
+
+
+async def test_stalled_and_nudged_items(db_session: AsyncSession) -> None:
+    bot, _ = await ready(db_session)
+    prefs = await assistant_settings.get(db_session, bot.id)
+    lost = await followups.add(db_session, bot.id, category="promised", title="对账")
+    await followups.update(db_session, bot.id, lost.seq, stuck="who")
+    quiet = await followups.add(
+        db_session,
+        bot.id,
+        category="waiting",
+        title="等报价",
+        handler="person",
+        handler_name="赵六",
+    )
+    for _ in range(board.MAX_NUDGES):
+        await followups.progress(
+            db_session, bot.id, quiet.seq, "催了一次", today=WED_NOON.date(), nudged=True
+        )
+    await _age(db_session, quiet, LAST_FRI)
+    await db_session.commit()
+    result = await board.build(db_session, bot.id, prefs, WED_NOON)
+    reasons = {i.row.seq: i.reason for i in result.groups["stalled"]}
+    assert reasons == {lost.seq: "stuck_who", quiet.seq: "no_reply"}
+    # 换了在等的人：催办从头算，回到等别人。
+    await followups.update(db_session, bot.id, quiet.seq, handler="person", handler_name="钱七")
+    assert (await followups.get(db_session, bot.id, quiet.seq)).nudges == 2
+    await followups.update(db_session, bot.id, quiet.seq, category="promised")
+    assert (await followups.get(db_session, bot.id, quiet.seq)).nudges == 0

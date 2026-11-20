@@ -406,7 +406,7 @@ async def gap_withdraw(
 async def board_view(
     own: Mine = Depends(mine), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    """总表：所有未结的待跟进按阶段分组（等你、停滞、在推进、等别人、排期），加上在途审批单。
+    """总表：所有未结的待跟进按状态分组（等你、执行中、等别人、排期、停滞），加上在途审批单。
 
     审批单与卡片同一口径：一轮里合成的一张单只算一张、只列一行（`items` 是它含几项），早的在前，
     至多 `board.APPROVALS_MAX` 行；`approvals_total` 是总张数。
@@ -430,6 +430,7 @@ async def board_view(
 
     def gap_view(entry: board.Gap) -> dict[str, Any]:
         out = gaps.view(entry.row, entry.fix, entry.followups)
+        out["stage"] = entry.stage
         found = latest.get(entry.row.id)
         out["request"] = (
             {
@@ -452,9 +453,10 @@ async def board_view(
         out = followups.view(entry.row, notes=False)
         out.update(
             stage=entry.stage,
-            stalled=entry.stalled,
+            reason=entry.reason,
             idle_days=entry.idle_days,
             suggestion=board.suggestion(entry.row),
+            need=board.need(entry.row),
             job=owner_view.job(entry.job, names) if entry.job else None,
             gap=gap_labels.get(entry.row.gap_id) if entry.row.gap_id else None,
             approvals=[approval(a) for a in entry.approvals],

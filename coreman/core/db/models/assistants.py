@@ -459,7 +459,13 @@ class AssistantPage(Base):
 
 FOLLOWUP_CATEGORIES = ("decide", "promised", "waiting", "remind")
 FOLLOWUP_STATUSES = ("open", "snoozed", "done", "dropped")
-FOLLOWUP_CLOSE_CODES = ("origin_recalled",)
+# 关闭原因：平台自动关闭（起因消息被撤回），或所有者在页面上选的原因。
+FOLLOWUP_OWNER_CLOSE_CODES = ("talked", "resolved", "others_done", "not_needed", "other")
+FOLLOWUP_CLOSE_CODES = ("origin_recalled", *FOLLOWUP_OWNER_CLOSE_CODES)
+# 停滞的原因（助理标）：不知道怎么做、不知道找谁、反复失败。
+FOLLOWUP_STUCK = ("how", "who", "failed")
+# 所有者在页面上的反馈：补充、改期、关闭。
+FEEDBACK_KINDS = ("supplement", "reschedule", "close")
 # 谁在办：助理自己、子任务（含调度公共员工，指向 job_id）、某位同事、所有者自己。
 FOLLOWUP_HANDLERS = ("assistant", "job", "person", "owner")
 # 能力缺口：助理办不成事时卡在哪个权限上（见 coreman/core/assistants/gaps.py）。
@@ -475,7 +481,8 @@ class AssistantFollowup(Base):
 
     `title_enc` / `notes_enc` 登记在 `sealed.COLUMNS`：库里是密文，经会话取出的行上是明文。
     分类、状态、两个日期、编号是明文，按日期查询不解密。`seq` 在一位助理内递增，显示为 F012。
-    `snoozed` 的条目到 `review_on` 那天由读取方改回 `open`。`close_code` 只在平台自动关闭时有值。
+    `snoozed` 的条目到 `review_on` 那天由读取方改回 `open`。`close_code` 是平台自动关闭或所有者
+    关闭时选的原因。`stuck` 是助理标的停滞原因；`nudges` 是等别人时已经催过几次。
     `job_id` 指向引出这一条的子任务（`assistant_jobs`），子任务行删掉时置空。
     `handler_name_enc` 同样登记在 `sealed.COLUMNS`。`gap_id` 指向卡住它的能力缺口，缺口删掉时置空。
     """
@@ -489,6 +496,7 @@ class AssistantFollowup(Base):
             f"close_code IS NULL OR {enum_check('close_code', FOLLOWUP_CLOSE_CODES)}",
             name="close_code",
         ),
+        CheckConstraint(f"stuck IS NULL OR {enum_check('stuck', FOLLOWUP_STUCK)}", name="stuck"),
         UniqueConstraint("bot_id", "seq", name="uq_assistant_followups_bot_seq"),
         Index("assistant_followups_bot_status_idx", "bot_id", "status"),
     )
@@ -511,16 +519,42 @@ class AssistantFollowup(Base):
     handler_name_enc: Mapped[str | None] = mapped_column(Text)
     # 最近一次进展：新建、改动、followup_progress 时刷新；总表据此判断停滞。
     progress_at: Mapped[datetime] = _ts(server_default=text("now()"))
-    # 卡住它的能力缺口；缺口未解决时总表把它放进「卡在权限」。
+    # 卡住它的能力缺口；缺口未解决时总表按缺口怎么开把它放进等你、等别人或停滞。
     gap_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("assistant_gaps.id", ondelete="SET NULL")
     )
     title_enc: Mapped[str] = mapped_column(Text)
     notes_enc: Mapped[str | None] = mapped_column(Text)
     close_code: Mapped[str | None] = mapped_column(Text)
+    stuck: Mapped[str | None] = mapped_column(Text)
+    nudges: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
     updated_at: Mapped[datetime] = _ts(server_default=text("now()"))
     closed_at: Mapped[datetime | None] = _ts()
+
+
+class AssistantFeedback(Base):
+    """所有者在「我的助理」页上对一条待跟进的反馈：补充、改期、关闭。
+
+    下班编译把窗口里的反馈交给编译子任务提炼进知识库。`note_enc`（所有者原话）登记在
+    `sealed.COLUMNS`；种类、原因代码、编号是明文。待跟进删掉时 `followup_id` 置空，`seq` 留着。
+    """
+
+    __tablename__ = "assistant_feedback"
+    __table_args__ = (
+        CheckConstraint(enum_check("kind", FEEDBACK_KINDS), name="kind"),
+        Index("assistant_feedback_bot_created_idx", "bot_id", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    followup_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assistant_followups.id", ondelete="SET NULL")
+    )
+    seq: Mapped[int | None] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(Text)
+    code: Mapped[str | None] = mapped_column(Text)
+    note_enc: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 
 WATCH_STATES = ("idle", "polling", "backoff", "paused", "stopped")
