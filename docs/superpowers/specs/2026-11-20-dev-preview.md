@@ -40,7 +40,7 @@ Runtime 节点（云上的 Linux 和办公室的 Mac）内存充足，可以直�
 - **复用测试环境的 API 网关**，只加两条路由：`*.dev.example.com`（预览流量）和 `tunnel.dev.example.com`（节点建隧道），都指向 frps。以后新增预览不用再动网关。
 - **隧道用 frp**（Apache-2.0）。节点只需要主动连出，不用开入站端口，云节点和办公室的 Mac 走同一条路。frp 自带按子域名分发（`subDomainHost`），不用自己写路由。
 - **frpc 经网关连 frps**：`transport.protocol = "wss"`，网关终结 TLS 后以 WebSocket 转给 frps 的 `bindPort`。这样不用为隧道单独买负载均衡，隧道连接也受网关的白名单保护。
-- **关闭 TCP 多路复用**（frps 和 frpc 都设 `transport.tcpMux = false`），每个用户连接走一条独立的工作连接。办公室到机房是长距离链路，单条连接吞吐低，多条并行才能把前端资源拉得动。
+- **关闭 TCP 多路复用**（frps 和 frpc 都设 `transport.tcpMux = false`），每个用户连接走一条独立的工作连接。办公室到机房是长距离链路，单条连接吞吐低，多条并行才能把前端资源拉得动。frpc 不预建工作连接（`transport.poolCount = 0`）：经网关的空闲连接会被静默断开，预建的连接池会被死连接占满，所有预览一起返回 404（2026-11-21 实测）；每个用户连接现建一条，多一次握手。
 - 隧道服务端与客户端共用一个 token。所有节点都是自己的机器，第一期不做按节点限制子域名。
 
 ## 地址规则
