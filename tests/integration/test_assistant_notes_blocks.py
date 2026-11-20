@@ -90,27 +90,36 @@ async def test_only_the_index_when_there_are_no_pinned_pages(db_session: AsyncSe
     ]
 
 
-async def test_over_the_limit_only_the_index_is_injected(
+async def test_over_the_limit_small_pinned_pages_come_first(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bot, _ = await assistant(db_session)
     await notes.write(
-        db_session, bot.id, "rules/a.md", body="甲" * 10, summary="甲规则", pinned=True
+        db_session, bot.id, "rules/a.md", body="甲" * 20, summary="甲规则", pinned=True
     )
     await notes.write(
         db_session, bot.id, "rules/b.md", body="乙" * 10, summary="乙规则", pinned=True
     )
     await db_session.commit()
-    # 两页各 30 字节：上限 60 时刚好都给，59 时一页正文都不给。
-    monkeypatch.setattr(notes, "PINNED_LIMIT_BYTES", 60)
+    # 甲页 60 字节、乙页 30 字节：上限 90 时刚好都给。
+    monkeypatch.setattr(notes, "PINNED_LIMIT_BYTES", 90)
     within = await notes.pinned_block(db_session, bot.id)
-    assert within is not None and "甲" * 10 in within and "乙" * 10 in within
-    monkeypatch.setattr(notes, "PINNED_LIMIT_BYTES", 59)
+    assert within is not None and "甲" * 20 in within and "乙" * 10 in within
+    assert "没有附" not in within
+    # 上限 89：小的乙页照给正文，装不下的甲页只列路径——一页超大不连累别的规则。
+    monkeypatch.setattr(notes, "PINNED_LIMIT_BYTES", 89)
     over = await notes.pinned_block(db_session, bot.id)
     assert over is not None
-    assert "甲" * 10 not in over and "乙" * 10 not in over and "【置顶页" not in over
-    assert "这里不附正文" in over and "notes_read" in over
+    lines = over.splitlines()
+    assert "甲" * 20 not in over and "> " + "乙" * 10 in lines
+    note = lines.index(notes.OVER_LIMIT.format(limit=0))
+    assert lines[note + 1] == "> rules/a.md" and "notes_read" in lines[note]
     assert "> * rules/a.md — a — 甲规则" in over and "> * rules/b.md — b — 乙规则" in over
+    # 一页都装不下：都只列路径。
+    monkeypatch.setattr(notes, "PINNED_LIMIT_BYTES", 29)
+    none = await notes.pinned_block(db_session, bot.id)
+    assert none is not None and "【置顶页" not in none
+    assert "> rules/a.md" in none.splitlines() and "> rules/b.md" in none.splitlines()
 
 
 async def test_index_is_capped_pinned_first_then_newest(

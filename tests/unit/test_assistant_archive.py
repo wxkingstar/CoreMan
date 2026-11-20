@@ -39,8 +39,8 @@ def test_markdown_files_become_pages_and_the_header_is_optional() -> None:
     )
     assert parsed.followups == []
     assert parsed.pages == [
-        # 其余键（tags）忽略；收尾的 --- 之后全是正文。
-        PageFile("人/李四", "李四", "采购负责人", True, "正文第一行\n"),
+        # 其余键（tags）原样留在正文开头，仍是一段 front matter；收尾的 --- 之后接在后面。
+        PageFile("人/李四", "李四", "采购负责人", True, "---\ntags:\n- a\n- b\n---\n正文第一行\n"),
         PageFile("规则/口吻", None, None, None, "没有头的一页\n"),
         # 两条 --- 之间不是映射：整篇都是正文。
         PageFile("分隔线", None, None, None, "---\n只是一条分隔线\n---\n后面还有\n"),
@@ -337,3 +337,50 @@ def test_only_the_root_macosx_folder_and_forks_beside_their_file_are_clutter() -
     assert code_of(pack({"a.md": "x", "子目录/._照片.png": b"x"})) == "unsupported_file"
     assert code_of(pack({"a.md": "x", "深/__MACOSX/照片.png": b"x"})) == "unsupported_file"
     assert code_of(pack({"a.md": "x", "._b.md": b"\x00\x05\x16\x07"})) == "not_utf8"
+
+
+def test_extra_front_matter_survives_a_round_trip_as_one_header() -> None:
+    source = (
+        "---\ntype: 项目\nstatus: 进行中\nnext: 等报价\nupdated: 2026-11-20\n"
+        "tags: [work/项目]\ntitle: 报价\n---\n# 报价\n"
+    )
+    (page,) = archive.parse(pack({"项目/报价.md": source})).pages
+    assert (page.title, page.summary, page.pinned) == ("报价", None, None)
+    kept = (
+        "---\ntype: 项目\nstatus: 进行中\nnext: 等报价\nupdated: 2026-11-20\n"
+        "tags:\n- work/项目\n---\n"
+    )
+    assert page.body == kept + "# 报价\n"
+    exported = archive.page_text(title="报价", summary="季度报价", pinned=False, body=page.body)
+    # 导出只有一段头：三个属性在前，其余键接在后面。
+    assert exported.count("---\n") == 2 and exported.startswith(
+        "---\ntitle: 报价\nsummary: 季度报价\n"
+    )
+    assert "status: 进行中\n" in exported and exported.endswith("---\n# 报价\n")
+    (again,) = archive.parse(archive.build([("项目/报价", exported)], None)).pages
+    assert (again.title, again.summary, again.pinned, again.body) == (
+        "报价",
+        "季度报价",
+        False,
+        page.body,
+    )
+
+
+def test_a_header_left_in_the_body_never_overrides_the_page() -> None:
+    body = "---\ntitle: 旧标题\npinned: true\nstatus: 已完成\n---\n正文"
+    exported = archive.page_text(title="新标题", summary="", pinned=False, body=body)
+    (page,) = archive.parse(archive.build([("页", exported)], None)).pages
+    assert (page.title, page.pinned, page.body) == (
+        "新标题",
+        False,
+        "---\nstatus: 已完成\n---\n正文",
+    )
+
+
+def test_pages_whose_path_ends_in_md_are_not_named_md_md() -> None:
+    files = [
+        ("people/li.md", archive.page_text(title="li", summary="", pinned=False, body="甲")),
+        ("人/李四", archive.page_text(title="李四", summary="", pinned=False, body="乙")),
+    ]
+    with zipfile.ZipFile(io.BytesIO(archive.build(files, None))) as zf:
+        assert sorted(zf.namelist()) == ["people/li.md", "人/李四.md"]

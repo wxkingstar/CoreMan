@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { notes: vi.fn(), page: vi.fn(), savePage: vi.fn(), deletePage: vi.fn(), regenerateVoice: vi.fn() },
+  myAssistant: { notes: vi.fn(), page: vi.fn(), pageLinks: vi.fn(), renamePage: vi.fn(), savePage: vi.fn(), deletePage: vi.fn(), regenerateVoice: vi.fn() },
 }))
 
 import { ApiError } from '@/api/client'
@@ -31,6 +31,8 @@ beforeEach(() => {
     locked: false,
   })
   vi.mocked(myAssistant.page).mockReset().mockResolvedValue(page({}))
+  vi.mocked(myAssistant.pageLinks).mockReset().mockResolvedValue({ path: '规则/口吻', linked_from: [], links_to: [], unresolved: [] })
+  vi.mocked(myAssistant.renamePage).mockReset()
   vi.mocked(myAssistant.savePage).mockReset().mockResolvedValue(entry({ version: 4, updated_by: 'owner' }))
   vi.mocked(myAssistant.deletePage).mockReset().mockResolvedValue({ deleted: true })
   vi.mocked(myAssistant.regenerateVoice).mockReset().mockResolvedValue({ queued: true, left_today: 2 })
@@ -142,7 +144,7 @@ describe('knowledge base', () => {
     wrapper.unmount()
   })
 
-  it('shows page content as plain text, never as markup or links', async () => {
+  it('shows index rows as plain text and renders the body without running markup', async () => {
     vi.mocked(myAssistant.notes).mockResolvedValue({
       items: [entry({ title: '<img src=x onerror=alert(1)>', summary: '[点这里](https://evil.example.com)' })],
       locked: false,
@@ -154,10 +156,14 @@ describe('knowledge base', () => {
     expect(row.find('a').exists()).toBe(false)
     expect(row.text()).toContain('[点这里](https://evil.example.com)')
     await wrapper.get('[data-test="open-0"]').trigger('click'); await flushPromises()
+    // 正文按 Markdown 渲染，但不认 HTML：脚本原样显示成文字，外链在新窗口打开、不带来源。
     const viewer = wrapper.get('[data-test="viewer"]')
     expect(viewer.find('script').exists()).toBe(false)
-    expect(viewer.find('a').exists()).toBe(false)
-    expect(viewer.text()).toContain('<script>alert(1)</script> [链接](https://evil.example.com)')
+    expect(viewer.text()).toContain('<script>alert(1)</script>')
+    const link = viewer.get('[data-test="note-rendered"] a')
+    expect(link.attributes('href')).toBe('https://evil.example.com')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toContain('noreferrer')
     wrapper.unmount()
   })
 
@@ -182,4 +188,60 @@ describe('knowledge base', () => {
     expect(failed).toHaveBeenCalledWith('今天已经重新生成过 3 次了，明天再试')
     wrapper.unmount()
   })
+
+  it('renders the body, follows wiki links and lists backlinks', async () => {
+    vi.mocked(myAssistant.page).mockImplementation(async (path: string) => path === '人/李四'
+      ? page({ path: '人/李四', title: '李四', body: '负责采购' })
+      : page({ body: '# 口吻\n\n问 [[李四]] 或 [[王五]]' }))
+    vi.mocked(myAssistant.pageLinks).mockImplementation(async (path: string) => path === '人/李四'
+      ? { path, linked_from: ['规则/口吻'], links_to: [], unresolved: [] }
+      : { path, linked_from: [], links_to: ['人/李四'], unresolved: ['王五'] })
+    vi.spyOn(ElMessage, 'warning').mockReturnValue({ close: () => {} })
+    const wrapper = render(); await flushPromises()
+    await wrapper.get('[data-test="open-1"]').trigger('click'); await flushPromises()
+    const viewer = wrapper.get('[data-test="viewer"]')
+    expect(viewer.find('h1').text()).toBe('口吻')
+    expect(viewer.get('[data-test="backlinks"]').text()).toContain(t('assistant.notes.linkedFromEmpty'))
+    expect(viewer.get('[data-test="unresolved"]').text()).toBe('[[王五]]')
+    const [lisi, wangwu] = viewer.findAll('a.wikilink')
+    await wangwu.trigger('click'); await flushPromises()
+    expect(ElMessage.warning).toHaveBeenCalledWith(t('assistant.notes.linkMissing', { name: '王五' }))
+    await lisi.trigger('click'); await flushPromises()
+    expect(myAssistant.page).toHaveBeenLastCalledWith('人/李四')
+    expect(wrapper.get('[data-test="viewer"]').text()).toContain('负责采购')
+    const back = wrapper.get('[data-test="backlinks"] button')
+    expect(back.text()).toBe('规则/口吻')
+    await back.trigger('click'); await flushPromises()
+    expect(myAssistant.page).toHaveBeenLastCalledWith('规则/口吻')
+    wrapper.unmount()
+  })
+
+  it('offers candidates when a link names several pages', async () => {
+    vi.mocked(myAssistant.notes).mockResolvedValue({
+      items: [entry({ path: 'x/同名' }), entry({ path: 'y/同名' }), entry({ path: '规则/口吻' })], locked: false,
+    })
+    vi.mocked(myAssistant.page).mockResolvedValue(page({ body: '[[同名]]' }))
+    const wrapper = render(); await flushPromises()
+    await wrapper.get('[data-test="open-2"]').trigger('click'); await flushPromises()
+    await wrapper.get('a.wikilink').trigger('click'); await flushPromises()
+    const choices = wrapper.get('[data-test="link-candidates"]').findAll('button')
+    expect(choices.map((choice) => choice.text())).toEqual(['x/同名', 'y/同名'])
+    await choices[1].trigger('click'); await flushPromises()
+    expect(myAssistant.page).toHaveBeenLastCalledWith('y/同名')
+    wrapper.unmount()
+  })
+
+  it('renames a page and says how many pages had their links updated', async () => {
+    vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: ' 规则/说话 ', action: 'confirm' } as never)
+    vi.mocked(myAssistant.renamePage).mockResolvedValue({ ...entry({ path: '规则/说话' }), links_updated_in: ['人/李四'] })
+    const wrapper = render(); await flushPromises()
+    await wrapper.get('[data-test="open-1"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-test="viewer-rename"]').trigger('click'); await flushPromises()
+    expect(myAssistant.renamePage).toHaveBeenCalledWith('规则/口吻', '规则/说话')
+    expect(ElMessage.success).toHaveBeenCalledWith(t('assistant.notes.renamedLinks', { count: 1 }))
+    expect(myAssistant.notes).toHaveBeenCalledTimes(2)
+    expect(myAssistant.page).toHaveBeenLastCalledWith('规则/说话')
+    wrapper.unmount()
+  })
 })
+

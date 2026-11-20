@@ -65,8 +65,10 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("POST", "/gaps/{label}/withdraw"): {"path": "/gaps/G001/withdraw"},
     ("GET", "/approvals/recent"): {},
     ("GET", "/notes"): {},
-    # 知识页的路径只放请求体：读与删都是 POST。
+    # 知识页的路径只放请求体：读、链接、改名与删都是 POST。
     ("POST", "/notes/read"): {"json": {"path": PAGE}},
+    ("POST", "/notes/links"): {"json": {"path": PAGE}},
+    ("POST", "/notes/rename"): {"json": {"path": PAGE, "new_path": "规则/新名字"}},
     ("PUT", "/notes/page"): {"json": {"path": PAGE, "body": "改掉", "version": 1}},
     ("POST", "/notes/delete"): {"json": {"path": PAGE}},
     ("GET", "/settings"): {},

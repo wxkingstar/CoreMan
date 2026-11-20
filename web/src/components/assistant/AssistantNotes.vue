@@ -3,11 +3,13 @@ import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { myAssistant, type NoteEntry, type NoteIndex, type NotePage } from '@/api/myAssistant'
+import { myAssistant, type NoteEntry, type NoteIndex, type NoteLinks, type NotePage } from '@/api/myAssistant'
 import AssistantTransfer from '@/components/assistant/AssistantTransfer.vue'
+import NoteMarkdown from '@/components/assistant/NoteMarkdown.vue'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage, isVersionConflict } from '@/utils/errors'
 import { formatBytes, formatDateTime } from '@/utils/format'
+import { resolveLink } from '@/utils/noteLinks'
 
 const { t } = useI18n()
 const index = ref<NoteIndex | null>(null)
@@ -24,9 +26,45 @@ async function load() {
 function fill(page: NotePage) {
   Object.assign(editor, { open: true, isNew: false, path: page.path, title: page.title, summary: page.summary, body: page.body, pinned: page.pinned, version: page.version })
 }
-async function open(entry: NoteEntry) {
-  try { current.value = await myAssistant.page(entry.path); editor.open = false }
-  catch (e) { ElMessage.error(errorMessage(e)) }
+/** 打开的页的链接（反链、找不到的双链）；另取一次，取不到不影响看正文。 */
+const links = ref<NoteLinks | null>(null)
+/** 点了多页同名的双链：列出候选让人选。 */
+const candidates = ref<{ name: string; paths: string[] } | null>(null)
+const paths = computed(() => index.value?.items.map((item) => item.path) ?? [])
+const resolve = (target: string) => resolveLink(paths.value, target)
+async function show(path: string) {
+  try {
+    current.value = await myAssistant.page(path); editor.open = false
+    candidates.value = null; links.value = null
+  } catch (e) { ElMessage.error(errorMessage(e)); return }
+  try { links.value = await myAssistant.pageLinks(path) } catch { links.value = null }
+}
+function open(entry: NoteEntry) { return show(entry.path) }
+function openLink(target: string) {
+  const found = resolve(target)
+  if (found.length === 1) return show(found[0])
+  if (found.length) candidates.value = { name: target, paths: found }
+  else ElMessage.warning(t('assistant.notes.linkMissing', { name: target }))
+}
+/** 改名：别的页里链到它的双链由后端一起改好；改完重新取索引、打开改名后的页。 */
+async function rename() {
+  const page = current.value
+  if (!page) return
+  let next: string
+  try {
+    const answer = await ElMessageBox.prompt(t('assistant.notes.renamePrompt'), t('assistant.notes.renameTitle', { name: page.path }), {
+      inputValue: page.path, confirmButtonText: t('assistant.notes.rename'), cancelButtonText: t('assistant.notes.cancel'),
+    })
+    next = answer.value.trim()
+  } catch { return }
+  if (!next || next === page.path) return
+  try {
+    const done = await myAssistant.renamePage(page.path, next)
+    const count = done.links_updated_in.length
+    ElMessage.success(count ? t('assistant.notes.renamedLinks', { count }) : t('assistant.notes.renamed'))
+    await load()
+    await show(done.path)
+  } catch (e) { ElMessage.error(errorMessage(e)) }
 }
 async function edit(entry: NoteEntry) {
   try { const page = await myAssistant.page(entry.path); current.value = page; fill(page) }
@@ -277,8 +315,65 @@ defineExpose({ editor, save, load })
           <span>{{ t('assistant.notes.version', { n: current.version }) }}</span>
           <span>{{ t('assistant.notes.updatedAt', { time: formatDateTime(current.updated_at) }) }}</span>
         </div>
-        <!-- 正文按纯文本显示：内容可能来自别人发来的消息，不当成 HTML 或 Markdown 渲染。 -->
-        <pre class="ma-text note-body">{{ current.body }}</pre>
+        <div
+          v-if="candidates"
+          class="note-candidates"
+          data-test="link-candidates"
+        >
+          <span>{{ t('assistant.notes.linkAmbiguous', { name: candidates.name }) }}</span>
+          <button
+            v-for="path in candidates.paths"
+            :key="path"
+            type="button"
+            class="note-link"
+            @click="show(path)"
+          >
+            {{ path }}
+          </button>
+        </div>
+        <!-- 内容可能来自别人发来的消息：NoteMarkdown 不认 HTML、净化输出、不加载图片。 -->
+        <NoteMarkdown
+          class="note-body"
+          :content="current.body"
+          :resolve="resolve"
+          @open-link="openLink"
+        />
+        <section
+          v-if="links"
+          class="note-links"
+          data-test="backlinks"
+        >
+          <h4>{{ t('assistant.notes.linkedFrom', { count: links.linked_from.length }) }}</h4>
+          <p
+            v-if="!links.linked_from.length"
+            class="note-hint"
+          >
+            {{ t('assistant.notes.linkedFromEmpty') }}
+          </p>
+          <ul v-else>
+            <li
+              v-for="path in links.linked_from"
+              :key="path"
+            >
+              <button
+                type="button"
+                class="note-link"
+                @click="show(path)"
+              >
+                {{ path }}
+              </button>
+            </li>
+          </ul>
+          <template v-if="links.unresolved.length">
+            <h4>{{ t('assistant.notes.unresolved') }}</h4>
+            <p
+              class="note-hint"
+              data-test="unresolved"
+            >
+              {{ links.unresolved.map((name) => '[[' + name + ']]').join('、') }}
+            </p>
+          </template>
+        </section>
       </article>
       <template #footer>
         <template v-if="editor.open">
@@ -298,14 +393,21 @@ defineExpose({ editor, save, load })
             {{ t('assistant.notes.save') }}
           </el-button>
         </template>
-        <el-button
-          v-else-if="current && !index?.locked"
-          type="primary"
-          data-test="viewer-edit"
-          @click="editCurrent"
-        >
-          {{ t('assistant.notes.edit') }}
-        </el-button>
+        <template v-else-if="current && !index?.locked">
+          <el-button
+            data-test="viewer-rename"
+            @click="rename"
+          >
+            {{ t('assistant.notes.rename') }}
+          </el-button>
+          <el-button
+            type="primary"
+            data-test="viewer-edit"
+            @click="editCurrent"
+          >
+            {{ t('assistant.notes.edit') }}
+          </el-button>
+        </template>
       </template>
     </el-drawer>
   </section>
@@ -318,6 +420,13 @@ defineExpose({ editor, save, load })
 .note-link:hover { color: var(--el-color-primary); text-decoration: underline; }
 .ma-row.is-current { background: var(--cm-brand-soft); }
 .ma-meta code { font-size: 12px; }
-.note-body { margin-top: 12px; font-size: 14px; line-height: 24px; }
+.note-body { margin-top: 12px; }
+.note-candidates { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 12px; padding: 8px 12px; background: var(--el-color-warning-light-9); border-radius: 4px; font-size: 13px; }
+.note-candidates .note-link { color: var(--el-color-primary); }
+.note-links { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--el-border-color-lighter); font-size: 13px; }
+.note-links h4 { margin: 8px 0; font-size: 13px; color: var(--el-text-color-secondary); }
+.note-links ul { margin: 0; padding-left: 18px; }
+.note-links .note-link { color: var(--el-color-primary); }
+.note-links .note-hint { margin: 0; }
 .note-hint { margin: 0 12px 0 8px; color: var(--el-text-color-secondary); font-size: 12px; }
 </style>

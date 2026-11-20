@@ -1,4 +1,4 @@
-"""知识库的五个工具：入参校验、结果的样子、登记在 knowledge 组。"""
+"""知识库的八个工具：入参校验、结果的样子、登记在 knowledge 组。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,16 @@ from tests.integration.approval_helpers import assistant_turn
 from tests.integration.assistant_helpers import SECRET, raw, seed_standard
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
-NAMES = {"notes_index", "notes_read", "notes_search", "notes_write", "notes_delete"}
+NAMES = {
+    "notes_index",
+    "notes_read",
+    "notes_search",
+    "notes_write",
+    "notes_edit",
+    "notes_rename",
+    "notes_links",
+    "notes_delete",
+}
 
 
 async def call(session: AsyncSession, scope: Scope, name: str, **arguments: Any) -> dict[str, Any]:
@@ -24,7 +33,7 @@ async def call(session: AsyncSession, scope: Scope, name: str, **arguments: Any)
     return out
 
 
-def test_five_tools_are_registered_in_the_knowledge_group() -> None:
+def test_eight_tools_are_registered_in_the_knowledge_group() -> None:
     assert {item["name"] for item in notes_tools.DEFINITIONS} == NAMES
     listed = {item["name"] for item in registry.definitions([], groups=("knowledge",))}
     assert NAMES <= listed
@@ -161,7 +170,7 @@ async def test_bad_arguments_never_echo_values(db_session: AsyncSession) -> None
         out = await call(db_session, scope, name, **arguments)
         assert out["error"] == "invalid_tool_or_arguments" and out["invalid"], (name, arguments)
         assert SECRET not in str(out)
-    assert await call(db_session, scope, "notes_rename", path="a.md") == {
+    assert await call(db_session, scope, "notes_move", path="a.md") == {
         "error": "invalid_tool_or_arguments"
     }
 

@@ -97,3 +97,19 @@ def test_too_many_outcomes_drop_the_earliest_and_say_how_many() -> None:
     assert "第59张" in text and "第0张 " not in text
     kept = text.count("> 摘要：")
     assert 0 < kept < 60 and text.endswith(f"另有 {60 - kept} 张未列出。")
+
+
+def test_render_edits_pages_in_place_and_flags_conflicts() -> None:
+    text = compiling.render(DAY, compiling.Activity(turns=1, approvals=(), followups=()))
+    assert "notes_edit" in text and "待核实" in text and "[[路径]]" in text
+    assert compiling.WEEKLY not in text
+
+
+def test_the_first_compile_of_a_week_adds_the_check_up() -> None:
+    found = compiling.Activity(turns=1, approvals=(), followups=())
+    text = compiling.render(DAY, found, weekly=True)
+    head, rest = text.split(compiling.WEEKLY)
+    assert compiling.INSTRUCTIONS.format(day=DAY.isoformat()) in head
+    assert rest.lstrip("\n").startswith("今天的活动")
+    for word in ("notes_index", "notes_links", "合并", "待核实", "followup_add", "14 天"):
+        assert word in compiling.WEEKLY, word

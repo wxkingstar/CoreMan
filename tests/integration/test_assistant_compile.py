@@ -81,6 +81,8 @@ async def test_after_the_shift_one_system_job_is_spawned_once_a_day(
     assert row.title_enc == compiling.COMPILE_TITLE and day.isoformat() in row.brief_enc
     # 交代里只有编号与状态，没有待跟进的标题。
     assert SECRET not in row.brief_enc
+    # 第一次整理：知识库刚建，不做每周体检。
+    assert compiling.WEEKLY not in row.brief_enc
     # 不再有主会话里的编译轮次：跑在子任务自己的会话里，所有者之后发消息不会被它挡住。
     assert await tasks_of(db_session, bot, COMPILE_KIND) == []
     (task,) = await tasks_of(db_session, bot, SUBTASK_KIND)
@@ -105,6 +107,39 @@ async def test_after_the_shift_one_system_job_is_spawned_once_a_day(
     await db_session.commit()
     assert done is not None and done.status == "done"
     assert await tasks_of(db_session, bot, JOB_RESULT_KIND) == []
+
+
+async def test_the_first_compile_of_a_new_week_adds_the_check_up(
+    db_session: AsyncSession,
+) -> None:
+    bot, _, prefs = await working(db_session)
+    later = await after_work(db_session, bot, prefs)
+    day = prefs.worked_on
+    assert day is not None
+    # 上一次整理在上一个 ISO 周。
+    prefs.compiled_on = day - timedelta(days=7)
+    assert await compiling.step(db_session, bot, prefs, later) == "queued"
+    await db_session.commit()
+    (row,) = await compile_jobs(db_session, bot)
+    assert compiling.WEEKLY in row.brief_enc
+
+
+async def test_a_later_compile_in_the_same_week_skips_the_check_up(
+    db_session: AsyncSession,
+) -> None:
+    bot, _, prefs = await working(db_session)
+    later = await after_work(db_session, bot, prefs)
+    day = prefs.worked_on
+    assert day is not None
+    # 上一次整理是同一个 ISO 周里的周一；今天就是周一时，同一周里没有更早的日子。
+    monday = day - timedelta(days=day.weekday())
+    if monday == day:
+        pytest.skip("今天是周一：同一周里没有更早的日子")
+    prefs.compiled_on = monday
+    assert await compiling.step(db_session, bot, prefs, later) == "queued"
+    await db_session.commit()
+    (row,) = await compile_jobs(db_session, bot)
+    assert compiling.WEEKLY not in row.brief_enc
 
 
 async def test_the_compile_does_not_use_the_assistants_daily_allowance(

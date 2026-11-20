@@ -299,6 +299,10 @@ export const assistantZh = {
     regenerate: '重新生成口吻页',
     regenerateConfirm: '让助理按你最近 30 天自己发出的消息重新归纳口吻页？每天至多 3 次；你自己改过的口吻页不会被覆盖。',
     regenerated: '已排上，过一会儿口吻页会更新。今天还可以再生成 {count} 次。',
+    linkedFrom: '链到这一页的页（{count}）', linkedFromEmpty: '还没有别的页链到这一页。', unresolved: '找不到的链接',
+    linkMissing: '还没有「{name}」这一页', linkAmbiguous: '有几页都叫「{name}」，选一页：',
+    rename: '改名', renamePrompt: '新的路径。别的页里链到这一页的 [[双链]] 会一起改好。', renameTitle: '改名「{name}」',
+    renamed: '已改名', renamedLinks: '已改名，同时改了 {count} 页里的链接',
   },
   settings: {
     timezone: '时区', timezoneHint: '工作时段、摘要时点、免打扰都按这个时区算。',
@@ -670,6 +674,10 @@ export const assistantEn: typeof assistantZh = {
     regenerate: 'Regenerate the voice page',
     regenerateConfirm: 'Have the assistant rebuild the voice page from the messages you sent in the last 30 days? At most 3 times a day; a voice page you edited yourself is never overwritten.',
     regenerated: 'Queued. The voice page will update shortly. You can regenerate {count} more times today.',
+    linkedFrom: 'Pages linking here ({count})', linkedFromEmpty: 'No other page links here yet.', unresolved: 'Links that lead nowhere',
+    linkMissing: 'There is no page named "{name}" yet', linkAmbiguous: 'Several pages are named "{name}". Pick one:',
+    rename: 'Rename', renamePrompt: 'The new path. [[Links]] to this page in other pages are updated too.', renameTitle: 'Rename {name}',
+    renamed: 'Renamed', renamedLinks: 'Renamed, and updated links in {count} pages',
   },
   settings: {
     timezone: 'Time zone', timezoneHint: 'Working hours, digest times and quiet hours all follow this time zone.',
@@ -1041,6 +1049,10 @@ export const assistantJa: typeof assistantZh = {
     regenerate: '口調ページを再生成',
     regenerateConfirm: '直近 30 日間に自分が送ったメッセージから、アシスタントに口調ページを作り直させますか？1 日 3 回まで。自分で編集した口調ページは上書きされません。',
     regenerated: 'キューに入れました。しばらくすると口調ページが更新されます。今日はあと {count} 回再生成できます。',
+    linkedFrom: 'このページへのリンク元（{count}）', linkedFromEmpty: 'まだ他のページからリンクされていません。', unresolved: '見つからないリンク',
+    linkMissing: '「{name}」というページはまだありません', linkAmbiguous: '「{name}」という名前のページが複数あります。選んでください：',
+    rename: '名前を変更', renamePrompt: '新しいパス。他のページにあるこのページへの [[リンク]] も一緒に書き換えます。', renameTitle: '「{name}」の名前を変更',
+    renamed: '名前を変更しました', renamedLinks: '名前を変更し、{count} ページのリンクを書き換えました',
   },
   settings: {
     timezone: 'タイムゾーン', timezoneHint: '勤務時間、ダイジェスト時刻、おやすみ時間はこのタイムゾーンで計算します。',
