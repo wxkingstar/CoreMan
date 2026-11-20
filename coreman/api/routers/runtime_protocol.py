@@ -151,6 +151,9 @@ class Capability(BaseModel):
     assistant_sandbox_v1: StrictBool = False
     # 节点能在多个席位之间切换（见 runtime_daemon/seats.py）。旧节点没有，管理台提示升级。
     seat_switch_v1: StrictBool = False
+    # 守护进程的开发环境预览隧道在跑（见 runtime_daemon/devpreview.py）；
+    # 有它才在开发模式提示词里加预览规则。
+    dev_preview_v1: StrictBool = False
     seats: list[SeatState] = Field(default_factory=list, max_length=21)
 
     @field_validator("assistant_sandbox_v1", mode="before")

@@ -186,3 +186,11 @@ def test_command_script_runs_release_python(tmp_path):
     assert script.startswith("#!/bin/sh")
     assert "runtime_daemon.devpreview import main" in script
     assert str(tmp_path / "release/.venv/bin/python") in script
+
+
+def test_platform_keeps_the_capability_from_heartbeats():
+    from coreman.api.routers.runtime_protocol import Capability
+
+    stored = Capability.model_validate({"dev_preview_v1": True}).model_dump()
+    assert stored["dev_preview_v1"] is True
+    assert Capability.model_validate({}).dev_preview_v1 is False
