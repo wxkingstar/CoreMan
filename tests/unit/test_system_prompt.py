@@ -331,6 +331,9 @@ def test_dev_preview_section_only_with_dev_mode_and_node_support() -> None:
     )
     assert "coreman-dev up" in out
     assert "hot reload" in out and "polling" in out
+    assert "do\n   not run checks first" in out
+    assert "before any\n   other checks" in out
+    assert "Before pushing, run the project's full checks" in out
     assert "never a shared one" in out
     assert "checks that\n   person's own authorization" in out
     assert "git switch <branch>" in out

@@ -209,8 +209,13 @@ This node can run your worktree as a development environment and give it a URL t
 open. It connects directly to the test environment's database (data changes only, no schema
 changes) and Redis, and uses the systems' default login, not single sign-on.
 
-1. Run `coreman-dev up` in the worktree root once your first change builds and its checks
-   pass. It builds and starts `dev/compose.yaml`, checks the entry, and prints the URL.
+The development environment is for fast iteration: get each change in front of the user, or
+your own end-to-end check, as quickly as possible. The full checks gate the pull request,
+not each round here.
+
+1. Run `coreman-dev up` in the worktree root as soon as your first change is written; do
+   not run checks first. It builds and starts `dev/compose.yaml`, checks the entry, and
+   prints the URL.
    After that, code changes go live by themselves through hot reload, usually within a few
    seconds: edit, wait for the reload, check the page. Run `coreman-dev up` again only when
    dependencies, Dockerfiles, `dev/` or the services' environment change; it keeps the
@@ -235,19 +240,29 @@ changes) and Redis, and uses the systems' default login, not single sign-on.
      back through it (Vite `server.hmr.clientPort: 443`).
    - A small dev Dockerfile under `dev/` is fine when the repository's Dockerfiles only
      build production images. When `dev/` no longer matches the code, fix it.
-3. When `coreman-dev up` succeeds, open the pages and endpoints your change touches
-   yourself and confirm they work. Then reply with the URL so the user can test. If
-   anything fails, read `coreman-dev logs` and fix it (run `up` again only if the fix needs
-   a rebuild); never hand over a URL you have not seen working.
-4. Push the branch and open the pull request only after the user confirms the development
-   environment works, or asks you to. This replaces "when a change is ready" in step 2
-   above.
-5. If the change alters the database schema, skip the development environment: tell the
+3. When the URL is up, or after each later edit once it has reloaded, confirm what your
+   change touches with the quickest check that shows it working: fetch the page or call the
+   endpoint, and open a browser only when the change is visual and a fetch cannot show it.
+   Then put the URL in your reply right away so the user can start testing, before any
+   other checks. If anything fails, read `coreman-dev logs` and fix it (run `up` again only
+   if the fix needs a rebuild); never hand over a URL you have not seen working.
+4. While iterating here, run only the checks related to what you changed (the tests of the
+   touched modules, a type check or lint of the changed files, a short end-to-end script
+   against the URL), after the URL is in your reply. Do not run the full check suite or long
+   test runs on each round, even if the repository's own rules ask for them on every
+   change: those run before pushing. Run checks in the foreground and finish them within
+   the turn; a background task that ends after your reply starts another round and makes
+   the user's next message wait.
+5. Push the branch and open the pull request only after the user confirms the development
+   environment works, or asks you to. Before pushing, run the project's full checks and fix
+   what fails. This replaces "run the project's checks" in step 1 and "when a change is
+   ready" in step 2 above.
+6. If the change alters the database schema, skip the development environment: tell the
    user the migration has to go through a test environment release first, and that later
    changes without schema changes can come back here.
-6. If the change concerns single sign-on, skip the development environment and tell the
+7. If the change concerns single sign-on, skip the development environment and tell the
    user it has to be verified in the test or staging environment.
-7. `coreman-dev status`, `coreman-dev logs [service]`, `coreman-dev down` and
+8. `coreman-dev status`, `coreman-dev logs [service]`, `coreman-dev down` and
    `coreman-dev list` show and stop environments. Idle environments are stopped
    automatically."""
 
