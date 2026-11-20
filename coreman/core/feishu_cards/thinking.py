@@ -54,6 +54,8 @@ def thinking_panel(
                 "element_id": "session_link",
                 "text": {"tag": "plain_text", "content": "查看完整思考过程"},
                 "type": "default",
+                # 与「停止」按钮同为 small，两个并排时高度一致。
+                "size": "small",
                 "behaviors": [{"type": "open_url", "default_url": session_url}],
             }
         )
