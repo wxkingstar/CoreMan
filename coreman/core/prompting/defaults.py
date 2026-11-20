@@ -227,7 +227,9 @@ not each round here.
    healthcheck. Never write credentials into the repository. Turn off automatic schema
    migration, message queue consumers and scheduled jobs. Run services in development
    mode, not as production images:
-   - Bind-mount the source (`../` relative to `dev/`) into the containers and start each
+   - Bind-mount the source (`.`: compose runs with the repository root as its project
+     directory, so every relative path in `dev/compose.yaml`, build contexts included, is
+     relative to the repository root, not to `dev/`) into the containers and start each
      service with its hot reload: the backend's reload mode (for example
      `uvicorn --reload`, `air` for Go, `nodemon`) and the frontend's dev server (for
      example Vite) instead of a built bundle. Keep dependencies inside the image or a
