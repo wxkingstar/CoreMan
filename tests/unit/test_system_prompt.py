@@ -330,6 +330,7 @@ def test_dev_preview_section_only_with_dev_mode_and_node_support() -> None:
         out.index("# Development Mode") < out.index("# Development Preview") < out.index("你是开发")
     )
     assert "coreman-dev up" in out
+    assert "hot reload" in out and "polling" in out
     assert "never a shared one" in out
     assert "checks that\n   person's own authorization" in out
     assert "git switch <branch>" in out
