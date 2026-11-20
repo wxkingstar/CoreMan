@@ -218,3 +218,22 @@ def test_project_env_file_is_merged_after_the_shared_one(tmp_path):
     extra.unlink()
     assert devpreview.preview_env_file(settings, "shop", "shop-abc123") == settings.env_file
     assert not merged.exists()
+
+
+def test_tunnel_starts_when_pid_file_points_at_a_gone_process(tmp_path, monkeypatch):
+    # systemd 重启时连 frpc 一起杀掉，留下的 pid 已不存在：ps 退出码 1，不能因此起不来。
+    settings = make_settings(tmp_path)
+    settings.data_dir.mkdir(parents=True)
+    (settings.data_dir / "frpc.pid").write_text("999999")
+    monkeypatch.setattr(devpreview, "install_frpc", lambda s: tmp_path / "frpc")
+
+    def fake_run(cmd, **kw):
+        raise PreviewError("ps 失败（退出码 1）")
+
+    started = []
+    monkeypatch.setattr(devpreview, "run", fake_run)
+    monkeypatch.setattr(
+        devpreview.subprocess, "Popen", lambda cmd, **kw: started.append(cmd) or NS(pid=4242)
+    )
+    devpreview.DevPreview(settings).ensure_tunnel()
+    assert started and (settings.data_dir / "frpc.pid").read_text() == "4242"
