@@ -39,6 +39,7 @@ from runtime_daemon.agent import (
     operation_message,
 )
 from runtime_daemon.assistant_turns import AssistantTurns
+from runtime_daemon.devpreview import DevPreview
 from runtime_daemon.direct_transfer import DirectTransfer
 from runtime_daemon.lifecycle import (
     FatalConfigError,
@@ -792,6 +793,12 @@ class Daemon:
         self.operations_lock = threading.Lock()
         # 局域网直连换机：配了 network_zone 与 direct_address 才有，各实例共用一个下载口。
         self.direct = DirectTransfer.from_config(self.config, self.data_dir)
+        # 开发环境预览：配了 dev_preview 才有；配置写错只关掉这项，不影响守护进程。
+        try:
+            self.dev_preview = DevPreview.from_config(self.config, self.data_dir)
+        except (TypeError, ValueError) as exc:
+            LOG.warning("dev_preview 配置无效，开发环境预览不启用：%s", exc)
+            self.dev_preview = None
         self.stopping = asyncio.Event()
         self.http = None
         self.lock_file = None
@@ -949,6 +956,11 @@ class Daemon:
                     link.unlink()
                 link.symlink_to(executable)
         os.environ["PATH"] = str(bin_dir) + os.pathsep + configured_path
+        release = Path(self.config.get("release", str(Path(__file__).resolve().parents[1])))
+        if self.dev_preview is not None:
+            self.dev_preview.write_command(bin_dir, self.config_path, release)
+        else:
+            (bin_dir / "coreman-dev").unlink(missing_ok=True)
         self.apply_proxy()
         for provider in PROVIDERS:
             self.seats.apply_env(provider)
@@ -1183,6 +1195,8 @@ class Daemon:
             cap = await asyncio.to_thread(cli_status, provider)
             # 守护进程自己的能力，不看驱动：记忆在工作目录的 .coreman-memory/，两种后端共用。
             cap["memory_layout_v1"] = True
+            # 开发环境预览：隧道在跑才声明，平台据此在开发模式的提示词里加预览规则。
+            cap["dev_preview_v1"] = self.dev_preview is not None and self.dev_preview.capability()
             # 守护进程自检的结果：只有声明了它的节点才会收到个人助理的轮次。
             try:
                 cap[SANDBOX_CAPABILITY] = self.assistant.capability(provider) is True
@@ -1756,6 +1770,8 @@ class Daemon:
             await self.enroll()
             await self.discover()
             self.start_assistant()
+            if self.dev_preview is not None:
+                self.dev_preview.start()
             next_discovery = time.monotonic() + 60
             self.control_deadline = time.monotonic() + CONTROL_LEASE_SECONDS
             lease_watch = asyncio.create_task(self.watch_control_lease())
@@ -1795,6 +1811,8 @@ class Daemon:
                 await asyncio.gather(beats, lease_watch, return_exceptions=True)
                 self.write_state(False, force=True)
                 await self.stop_work()
+                if self.dev_preview is not None:
+                    self.dev_preview.stop()
                 self.log_rotator.stop()
                 for provider in PROVIDERS:
                     self.socket_path(provider).unlink(missing_ok=True)

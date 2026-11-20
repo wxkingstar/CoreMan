@@ -38,6 +38,7 @@ from coreman.core.crypto import Cipher
 from coreman.core.prompting.defaults import (
     DEFAULT_CRON_MODE,
     DEV_MODE_RULE,
+    DEV_PREVIEW_RULE,
     IDENTITY_TAG_RULE,
     IDENTITY_UNKNOWN_NOTE,
     MEMORY_RULE,
@@ -169,6 +170,7 @@ def build_system_prompt(
     structured_reply: bool = False,
     dev_mode: bool = False,
     memory_dir: str = "",
+    dev_preview: bool = False,
 ) -> str:
     """按固定顺序拼稳定段；空段直接跳过，段间恒为一个空行。
 
@@ -183,6 +185,8 @@ def build_system_prompt(
 
     `memory_dir` 是员工记忆目录的绝对路径，节点支持共用记忆时才给；只对 Codex / OpenCode 说明，
     Claude Code 自带记忆说明。输出契约同样只给这两种后端。
+
+    `dev_preview` 表示员工所在节点开了开发环境预览；只在开发模式下追加预览规则。
     """
     codex = backend in {"codex", "opencode"}
     parts = [
@@ -196,6 +200,7 @@ def build_system_prompt(
         TIME_RULE.format(clock_timezone=CLOCK_TIMEZONE),
         # 开发模式的根目录本身就是仓库，规则随仓库维护；其余员工按 docs/ 分篇存规则。
         DEV_MODE_RULE if dev_mode else RULES_LAYOUT_RULE,
+        DEV_PREVIEW_RULE if dev_mode and dev_preview else "",
         MEMORY_RULE.format(memory_dir=memory_dir) if codex and memory_dir else "",
         segments.cron_mode if scheduled else "",
         segments.org_context,

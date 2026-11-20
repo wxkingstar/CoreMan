@@ -70,6 +70,7 @@ from coreman.core.relay.sse import (
     UsageEvent,
     paragraph_gap,
 )
+from coreman.core.runtime_nodes import dev_preview
 from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.core.timeutils import utcnow
 from coreman.core.wecom_personal import policy as wecom_policy
@@ -355,6 +356,8 @@ class CronRunHandler:
                         memory_dir=await memory.prompt_dir(
                             session, relay, backend, bot.working_dir
                         ),
+                        dev_preview=bot.dev_mode
+                        and await dev_preview.supported(session, relay, backend),
                     ),
                 )
                 # 与对话同一口径：调用模型之前先写进行中的记录，与执行记录的私密标记同一事务。

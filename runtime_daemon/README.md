@@ -196,6 +196,7 @@ launchd 没有按退出码阻止重启的机制，因此 launchd 下同类错误
 | `assistant_sandbox_ro_paths` | 额外只读挂进沙箱的绝对路径（CLI 装在不常见的位置、自检报 `cli_unavailable` 时用）；不得等于或包含本轮目录、socket 目录、工作目录或项目主目录，也不得落在本轮目录、socket 目录、项目主目录里面（`unsafe_mount`） |
 | `network_zone` | 局域网直连换机的网络区名，如 `office`。两台节点的网络区相同、都配了 `direct_address`，换运行时由目标节点直接从源节点拉取工作目录压缩包，不经平台中转；不配则照旧中转 |
 | `direct_address` | 本机供同一网络区其他节点访问的 `主机:端口`（局域网 IP 或主机名，端口 1024–65535，如 `192.0.2.20:47801`）。守护进程在该端口所有网卡上开 HTTPS 下载口，只在换机期间凭平台签发的一次性令牌提供压缩包；证书在首次使用时用 `openssl` 自签生成（数据目录下 `direct-cert.pem` / `direct-key.pem`），指纹随 ping 报给平台，拉取方核对指纹后才发令牌。**macOS 节点不要填局域网 IP**：launchd 托管的守护进程受系统「本地网络」隐私限制，连不上 `192.168.x.x` 这类局域网地址（报 `No route to host`，在终端或 ssh 里测却是通的），直连会一直失败、退回中转；改填覆盖网络的地址（如 Tailscale 的 `100.x` 地址，同一局域网内的节点之间仍直接走局域网），这类地址也不会随 DHCP 变化。Linux 节点没有这个限制，填局域网 IP 即可，IP 会变时用固定 IP 或主机名。源节点开了防火墙时要放行这个端口（macOS 是放行 coreman-runtime）。直连时上限放宽到 20 万个文件或 32G；拉不通且目录在 5 万个文件或 4G 之内时自动退回中转 |
+| `dev_preview` | 开发环境预览（见 `docs/features/dev-mode.md`「开发环境预览」）。对象，必填 `domain`（开发域名的上一级，如 `dev.example.com`）、`tunnel_server`（frps 经网关的地址，如 `tunnel.dev.example.com`，端口 `tunnel_port` 默认 443，走 wss）、`token_file`（隧道 token 文件）、`env_file`（注入 compose 的环境变量文件，600）；可选 `port_range`（默认 `[42000, 42999]`）、`max_previews`（同时运行的预览数，默认 8，满了先停最久没用的）、`idle_hours`（闲置多久停容器，默认 24）、`admin_port`（frpc 本机管理口，默认 17400，同一台机器的多个守护进程要错开）、`visitors`（`[{"server_name": "...", "bind_port": 13306}]`，把网关后面以 stcp 提供的测试数据库等绑到本机端口，办公室节点用）与 `visitor_key_file`、`docker`（docker 命令路径）、`frpc_path`（自带 frpc 时用；默认首次启动从 GitHub 下载固定版本并核对 sha256）。配了才声明 `dev_preview_v1`、才生成 `coreman-dev` 命令 |
 
 **资源上限（建议）。** 沙箱本身不限内存与进程数，可写目录也不限大小。建议给助理专用实例的服务加一个 systemd drop-in（`systemctl --user edit coreman-runtime`），按机器大小取值，例如：
 
@@ -332,6 +333,7 @@ Go 驱动基于开源项目 clawrelay-api 修改，上游快照记录在 `driver
 - Agent：受限工作区内的 Git、技能和 MCP 操作、记忆同步、健康与额度探测。
 - 会话查看：通过 CoreMan 登录鉴权及 Runtime 出站连接读取，会话正文经过转义。
 - 邮件：通用 Agent 提供基本 IMAP 探测，不提供额外的邮件代理或 HTML 提取扩展。
+- 开发环境预览：配了 `dev_preview` 的节点在运行时下载 frp（Apache-2.0）的 frpc 固定版本，发布包不含它。
 
 ## 验证范围
 

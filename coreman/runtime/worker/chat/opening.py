@@ -48,6 +48,7 @@ from coreman.core.prompting import (
 from coreman.core.relay.client import ChatRequest
 from coreman.core.relay.labels import relay_label
 from coreman.core.relay.models import backend_of
+from coreman.core.runtime_nodes import dev_preview
 from coreman.core.systems_catalog import confirm as systems_confirm
 from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.runtime.worker.background import TimeoutSupervisor
@@ -580,6 +581,7 @@ class OpenStage(ChatStageBase):
             access.prompt,
             extra,
             memory_dir=await memory.prompt_dir(session, relay, backend, bot.working_dir),
+            dev_preview=bot.dev_mode and await dev_preview.supported(session, relay, backend),
         )
         turn_context = build_turn_context(
             tag=tag,
@@ -748,6 +750,7 @@ class OpenStage(ChatStageBase):
         systems_prompt: str = "",
         extra: str = "",
         memory_dir: str = "",
+        dev_preview: bool = False,
     ) -> str:
         """本轮的 system prompt（稳定段）。续跑时也使用当前配置与系统授权；身份在本轮块里。"""
         from coreman.core.prompting.rich_cards import rich_cards_prompt
@@ -764,6 +767,7 @@ class OpenStage(ChatStageBase):
             structured_reply=self._structured_reply(ctx),
             dev_mode=intake.bot.dev_mode,
             memory_dir=memory_dir,
+            dev_preview=dev_preview,
         )
 
     async def _dispatch_note(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> str:

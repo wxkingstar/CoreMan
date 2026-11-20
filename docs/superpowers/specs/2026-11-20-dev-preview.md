@@ -106,7 +106,7 @@ Runtime 节点（云上的 Linux 和办公室的 Mac）内存充足，可以直�
 
 - Runtime Daemon 把 frpc 当作子进程托管：异常退出就重启，断线由 frpc 自己重连。
 - 主配置用 `includes` 引入 `dev-preview/proxies/*.toml`，每个 worktree 一个文件；`coreman-dev up/down` 增删文件后执行 `frpc reload`。
-- frpc 二进制固定版本，随 Runtime 发布包按平台（linux-amd64、linux-arm64、darwin-arm64）分发，跟着节点升级一起更新，不另外维护。
+- frpc 固定版本：守护进程首次启动时按平台从 frp 的 GitHub 发布页下载，核对代码里写死的 sha256 后放进数据目录；升级 frpc 就是随 Runtime 版本改版本号和校验值。节点不能访问 GitHub 时用 `frpc_path` 指定自带的 frpc。
 
 ### 自动回收
 
@@ -152,7 +152,6 @@ Runtime 节点（云上的 Linux 和办公室的 Mac）内存充足，可以直�
 ## 平台改动
 
 - 节点：`dev_preview` 配置、`coreman-dev` 命令、frpc 托管、回收挂进定期检查、心跳上报能力。
-- 发布包：按平台带上固定版本的 frpc。
 - 提示词：按节点能力追加上面一段。
 - 不做：平台侧的预览记录和管理页（链接由 AI 员工直接写在回复里）、按节点限制子域名、预览访问统计。
 
