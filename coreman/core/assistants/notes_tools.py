@@ -1,4 +1,4 @@
-"""个人知识库的五个工具：登记在助理工具注册表的 knowledge 组。
+"""个人知识库的六个工具：登记在助理工具注册表的 knowledge 组。
 
 knowledge 组不受飞书授权代数影响，子任务也能用；分派时只认这一轮核验过的助理记录
 （`scope.bot`），路径之外没有别的寻址方式，读写不到别人的页。
@@ -39,7 +39,14 @@ class Index(Arguments):
 
 
 class Read(TextPage):
-    path: PagePath
+    path: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=2 * notes.MAX_PATH_CHARS),
+        Field(
+            description="Page path such as people/zhang-san.md, or a wiki link such as"
+            " [[zhang-san]] (found by page name when the path does not exist)"
+        ),
+    ]
 
 
 class Search(Arguments):
@@ -68,6 +75,19 @@ class Write(Arguments):
     )
 
 
+class Edit(Arguments):
+    path: PagePath
+    old: Annotated[str, StringConstraints(min_length=1, max_length=notes.MAX_PAGE_BYTES)] = Field(
+        description="Exact text to replace; must occur exactly once in the page"
+    )
+    new: Annotated[str, StringConstraints(max_length=notes.MAX_PAGE_BYTES)] = Field(
+        description="Replacement text; may be empty to remove old"
+    )
+    summary: Annotated[str, StringConstraints(max_length=notes.MAX_SUMMARY_CHARS)] | None = Field(
+        default=None, description="Omit to keep the current summary"
+    )
+
+
 class Delete(Arguments):
     path: PagePath
 
@@ -80,8 +100,9 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
     ),
     "notes_read": (
         Read,
-        "Read one page by path. Long pages come in slices; continue with text_offset ="
-        " next_offset.",
+        "Read one page by path or [[wiki link]]. Long pages come in slices; continue with"
+        " text_offset = next_offset. When several pages share the linked name you get"
+        " candidates instead; read one of them by its path.",
     ),
     "notes_search": (
         Search,
@@ -92,6 +113,12 @@ OWN: dict[str, tuple[type[Arguments], str]] = {
         Write,
         "Create a page or replace it whole. New page: version 0. Existing page: pass the"
         " version you read; on version_conflict read it again, merge and write once more.",
+    ),
+    "notes_edit": (
+        Edit,
+        "Change one part of a page: replace the exact text old, which must occur exactly once,"
+        " with new; the rest of the page stays as it is. Prefer this to notes_write for adding"
+        " a line or correcting a passage in an existing page.",
     ),
     "notes_delete": (Delete, "Delete one page by path."),
 }
@@ -129,8 +156,10 @@ async def _index(session: AsyncSession, scope: Scope, args: Index) -> dict[str, 
 
 
 async def _read(session: AsyncSession, scope: Scope, args: Read) -> dict[str, Any]:
-    page = await notes.read(session, scope.bot.id, args.path)
+    page, candidates = await notes.lookup(session, scope.bot.id, args.path)
     if page is None:
+        if candidates:
+            return {"error": "ambiguous_name", "candidates": candidates}
         return {"error": "page_not_found"}
     body, meta = text_page(page.body, args)
     return {**_listed(page), "body": body, **meta}
@@ -158,6 +187,20 @@ async def _write(session: AsyncSession, scope: Scope, args: Write) -> dict[str, 
     return {"status": "saved", "path": entry.path, "version": entry.version, "pinned": entry.pinned}
 
 
+async def _edit(session: AsyncSession, scope: Scope, args: Edit) -> dict[str, Any]:
+    entry = await notes.edit(
+        session,
+        scope.bot.id,
+        args.path,
+        old=args.old,
+        new=args.new,
+        summary=args.summary,
+        updated_by="assistant",
+        owner_present=not scope.unattended,
+    )
+    return {"status": "saved", "path": entry.path, "version": entry.version, "pinned": entry.pinned}
+
+
 async def _delete(session: AsyncSession, scope: Scope, args: Delete) -> dict[str, Any]:
     if await notes.delete(session, scope.bot.id, args.path, owner_present=not scope.unattended):
         return {"status": "deleted"}
@@ -169,6 +212,7 @@ _RUN: dict[str, Callable[[AsyncSession, Scope, Any], Awaitable[dict[str, Any]]]]
     "notes_read": _read,
     "notes_search": _search,
     "notes_write": _write,
+    "notes_edit": _edit,
     "notes_delete": _delete,
 }
 

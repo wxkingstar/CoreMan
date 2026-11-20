@@ -7,8 +7,10 @@
 - 一个 zip。包里每个 `.md` 文件是一页，页的路径是文件在包里的相对路径去掉结尾的 `.md`
   （`人/李四.md` → `人/李四`）；不剥掉最外层目录。
 - 文件开头可以有一段 YAML front matter：第一行是 `---`，到下一个只有 `---` 的行为止，中间
-  是一个 YAML 映射。只采用三个键：`title`、`summary`（标量，按字符串用）与 `pinned`（布尔），
-  其余键忽略。收尾的 `---` 之后的全部内容是正文；没有 front matter 的文件整篇是正文。
+  是一个 YAML 映射。`title`、`summary`（标量，按字符串用）与 `pinned`（布尔）三个键成为页的
+  属性；其余的键（如 Obsidian 笔记里的 `status`、`tags`）原样留在正文开头，仍是一段 front
+  matter，模型读页时看得到。收尾的 `---` 之后的全部内容接在后面；没有 front matter 的文件整篇
+  是正文。导出时把三个属性并回正文开头的那段 front matter，导出的文件只有一段头。
 - 包根目录下可选的 `followups.json`：待跟进清单，语法见 `_followups`。
 - 系统自带的压缩功能顺手带上的文件（`.DS_Store`、包根下 `__MACOSX/` 里的一切、`Thumbs.db`、
   名字以 `._` 开头且同一个目录里有它的本体的资源分叉文件）跳过不读，只计数
@@ -42,8 +44,10 @@ MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_UNPACKED_BYTES = notes.MAX_TOTAL_BYTES + 12 * 1024 * 1024
 MAX_PAGE_FILES = notes.MAX_PAGES
 # 包里条目总数（含目录条目）的硬上限：读中央目录之后、读任何内容之前就判断。
-MAX_RAW_ENTRIES = 4096
-MAX_HEADER_CHARS = 4096
+MAX_RAW_ENTRIES = 2 * MAX_PAGE_FILES
+MAX_HEADER_CHARS = 16 * 1024
+# 成为页属性的 front matter 键；其余的留在正文里。
+PAGE_KEYS = ("title", "summary", "pinned")
 MAX_FOLLOWUP_ITEMS = followups.MAX_OPEN
 MAX_SHOWN_NAME = 200
 FOLLOWUPS_FILE = "followups.json"
@@ -228,11 +232,26 @@ def _scalar(value: object) -> bool:
     )
 
 
+def _header(meta: Mapping[Any, Any]) -> str:
+    """一段 front matter（含首尾两条 `---`）。"""
+    dumped = yaml.safe_dump(
+        dict(meta),
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=MAX_HEADER_CHARS,
+    )
+    return f"{_FENCE}\n{dumped}{_FENCE}\n"
+
+
 def _page(name: str, text: str) -> PageFile:
     path = name[: -len(PAGE_SUFFIX)]
     try:
         meta, body = _split(text)
-    except _BadHeader:
+        rest = {key: value for key, value in meta.items() if key not in PAGE_KEYS}
+        if rest:
+            body = _header(rest) + body
+    except (_BadHeader, yaml.YAMLError, ValueError, RecursionError, OverflowError):
         return PageFile(path, None, None, None, "", "invalid_front_matter")
     title, summary, pinned = meta.get("title"), meta.get("summary"), meta.get("pinned")
     if not (_scalar(title) and _scalar(summary) and (pinned is None or isinstance(pinned, bool))):
@@ -310,7 +329,7 @@ def parse(data: bytes) -> Parsed:
 
     1. 压缩包本身不超过 20MB（`archive_too_large`），是一个读得出中央目录的 zip
        （`invalid_archive`）。
-    2. 条目总数不超过 4096，其中页面文件不超过 2000 个（`too_many_entries`）。
+    2. 条目总数不超过页面上限的两倍，其中页面文件不超过页面上限（`too_many_entries`）。
     3. 每个条目的名字：不是绝对路径，没有反斜杠、`.` / `..` 段、空段、控制字符或 NUL
        （`unsafe_path`）；不是符号链接（`symlink_not_allowed`）；过了这两条的系统文件
        （`.DS_Store` 之类，见 `_clutter`）跳过不读、只计数，其余的继续查：没有加密
@@ -355,14 +374,20 @@ def parse(data: bytes) -> Parsed:
 
 
 def page_text(*, title: str, summary: str, pinned: bool, body: str) -> str:
-    """导出的一页：front matter 加正文，`parse` 读回来与原样一致。"""
-    header = yaml.safe_dump(
-        {"title": title, "summary": summary, "pinned": pinned},
-        allow_unicode=True,
-        sort_keys=False,
-        width=MAX_HEADER_CHARS,
-    )
-    return f"{_FENCE}\n{header}{_FENCE}\n{body}"
+    """导出的一页：front matter 加正文，`parse` 读回来与原样一致。
+
+    正文开头已经有一段 front matter（导入时留下的 `status`、`tags` 之类）时，三个属性并进
+    那一段，文件里只有一段头；那一段里同名的三个键以页的属性为准。
+    """
+    meta: dict[Any, Any] = {"title": title, "summary": summary, "pinned": pinned}
+    try:
+        own, rest = _split(body)
+    except _BadHeader:
+        own, rest = {}, body
+    if own:
+        meta |= {key: value for key, value in own.items() if key not in PAGE_KEYS}
+        body = rest
+    return _header(meta) + body
 
 
 def followups_text(items: Iterable[Mapping[str, Any]]) -> str:
@@ -377,7 +402,10 @@ def build(pages: Iterable[tuple[str, str]], followups_json: str | None) -> bytes
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, text in pages:
-            zf.writestr(path + PAGE_SUFFIX, text)
+            # 路径本身带 `.md` 的页不再补一个：`people/li.md` 导出成 `people/li.md`，导回来是
+            # `people/li`，知识库认作同一页。
+            named = path if path.casefold().endswith(PAGE_SUFFIX) else path + PAGE_SUFFIX
+            zf.writestr(named, text)
         if followups_json is not None:
             zf.writestr(FOLLOWUPS_FILE, followups_json)
     return buffer.getvalue()

@@ -1,4 +1,4 @@
-"""知识库的五个工具：入参校验、结果的样子、登记在 knowledge 组。"""
+"""知识库的六个工具：入参校验、结果的样子、登记在 knowledge 组。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from tests.integration.approval_helpers import assistant_turn
 from tests.integration.assistant_helpers import SECRET, raw, seed_standard
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
-NAMES = {"notes_index", "notes_read", "notes_search", "notes_write", "notes_delete"}
+NAMES = {"notes_index", "notes_read", "notes_search", "notes_write", "notes_edit", "notes_delete"}
 
 
 async def call(session: AsyncSession, scope: Scope, name: str, **arguments: Any) -> dict[str, Any]:
@@ -24,7 +24,7 @@ async def call(session: AsyncSession, scope: Scope, name: str, **arguments: Any)
     return out
 
 
-def test_five_tools_are_registered_in_the_knowledge_group() -> None:
+def test_six_tools_are_registered_in_the_knowledge_group() -> None:
     assert {item["name"] for item in notes_tools.DEFINITIONS} == NAMES
     listed = {item["name"] for item in registry.definitions([], groups=("knowledge",))}
     assert NAMES <= listed

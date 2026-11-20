@@ -155,7 +155,7 @@ async def test_single_page_limit_counts_bytes(db_session: AsyncSession) -> None:
 
 
 async def test_page_count_limit(db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert notes.MAX_PAGES == 2000
+    assert notes.MAX_PAGES == 5000
     monkeypatch.setattr(notes, "MAX_PAGES", 2)
     bot, _ = await assistant(db_session)
     other, _ = await assistant(db_session)

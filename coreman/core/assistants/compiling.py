@@ -55,8 +55,11 @@ MAX_LINES = 40
 _UNSAFE = re.compile(r"[^A-Za-z0-9_\-]")
 INSTRUCTIONS = (
     "把今天值得跨天记住的事整理进知识库，做完只回一两句话说整理了什么，不要复述内容：\n"
-    "- 先用 notes_search、notes_read 找到相关的页（人、项目、决策各自成页），用 notes_write "
-    "补充或新建；当天的流水写进 log/{day}.md。\n"
+    "- 先用 notes_search、notes_read 找到相关的页（人、项目、决策各自成页）：已有的页用 "
+    "notes_edit 加一行、改一处，没有才用 notes_write 新建；页首 front matter 里的状态跟着改；"
+    "新页用 [[路径]] 链到相关的人、项目、决策页。当天的流水写进日志目录里当天的一页（沿用"
+    "已有的日志目录，没有就用 log/{day}.md）。\n"
+    "- 和页里已有的说法对不上的，不覆盖：两种说法连同出处都留下，标「待核实」。\n"
     "- 被拒的审批单：所有者写的意见平台会记进 profile/feedback.md，那里已有的不用再抄；只把这次"
     "拒绝说明的事实（某人、某项目上他的立场）写进相关的页。\n"
     "- 只写事实与结论，不抄聊天原文；来自别人消息的内容写明是谁说的。\n"
@@ -67,6 +70,16 @@ INSTRUCTIONS = (
     "- 置顶页在这一轮改不了（没有人在场）：想改的规则写进普通页面 "
     "inbox/pinned-suggestions.md，由所有者在场时再决定。\n"
     "- 没有值得记的就只回一句「今天没有要整理的」，什么都不写。"
+)
+# 每周第一次整理（与上一次整理不在同一个 ISO 周）时追加的体检。
+WEEKLY = (
+    "这是本周第一次整理，做完上面的再体检一遍知识库（先 notes_index 看全貌）：\n"
+    "- 同一个人、同一件事有两页的，合并成一页，删掉多余的那页，把指向它的链接改过来。\n"
+    "- 没有任何别的页链到它、它也不链别的页的，补上相关的 [[路径]] 链接。\n"
+    "- 「待核实」的说法：能从别的页或待跟进里核实的就改掉标记，核实不了的留着。\n"
+    "- front matter 里状态还是进行中、等待，却超过 14 天没更新的项目页：没有对应的未结待跟进"
+    "就用 followup_add 记一条「提醒我」，请所有者确认还要不要跟；已经结束的把状态改成已完成。\n"
+    "- 体检只整理已有的内容，不删任何还有用的事实。"
 )
 COMPILE_TITLE = "下班编译"
 # 有了结局、要把摘要写进交代的审批单状态。
@@ -250,8 +263,10 @@ def _feedback(item: owner_feedback.Entry) -> list[str]:
     return lines
 
 
-def render(day: date, found: Activity) -> str:
+def render(day: date, found: Activity, *, weekly: bool = False) -> str:
     """交给编译子任务的交代，不超过 `jobs.MAX_BRIEF`。
+
+    `weekly` 为真时在固定说明之后追加每周体检（`WEEKLY`）。
 
     除了固定的说明，平台写的行只有计数、编号、工具名与状态；所有者反馈的原话、审批单的摘要与
     拒绝原因在引用行里。放不下时先丢最早的审批单，再丢最早的反馈，末尾注明还有几条没列出。
@@ -260,6 +275,7 @@ def render(day: date, found: Activity) -> str:
         f"【下班整理 {day.isoformat()}】这一轮由平台在下班后（全天候时是过了零点）发起，"
         "所有者不在场。",
         INSTRUCTIONS.format(day=day.isoformat()),
+        *([WEEKLY] if weekly else []),
         "今天的活动（只有编号与状态，内容用工具读）：",
         f"- 对话轮次：{found.turns}",
     ]
@@ -339,6 +355,9 @@ async def _compile(
     if await runtime.turn_blocker(session, bot) is not None:
         # 暂停时这一轮只会静默失败：不记成处理过，恢复后再入队。
         return "paused"
+    # 上一次整理在别的 ISO 周：这一次顺带做每周体检。从没整理过的不做（知识库刚建）。
+    previous = prefs.compiled_on
+    weekly = previous is not None and previous.isocalendar()[:2] != day.isocalendar()[:2]
     # 下面无论入不入队，这一天都不再看。
     prefs.compiled_on = day
     since = window_start(prefs, day)
@@ -354,7 +373,7 @@ async def _compile(
             session,
             bot,
             title=COMPILE_TITLE,
-            brief=render(day, found),
+            brief=render(day, found, weekly=weekly),
             origin="system",
             report=False,
             attended=False,

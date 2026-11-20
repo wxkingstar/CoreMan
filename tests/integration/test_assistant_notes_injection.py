@@ -136,7 +136,7 @@ async def test_over_the_limit_the_first_turn_gets_only_the_index(
     bot, task = await assistant_chat(db_session)
     monkeypatch.setattr(notes, "PINNED_LIMIT_BYTES", 10)
     block = turn_block(await run(db_engine, db_session, task))
-    assert MARK in block and "这里不附正文" in block
+    assert MARK in block and "下面这些没有附" in block and "> rules/tone.md" in block
     assert TONE not in block and "* rules/tone.md — tone — 口吻" in block
 
 

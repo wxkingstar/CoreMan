@@ -79,7 +79,9 @@ def _checked(file: PageFile) -> tuple[str, str, str | None]:
     if file.problem is not None:
         return file.path[: notes.MAX_PATH_CHARS], "", file.problem
     try:
-        shown, key = notes.normalize(file.path)
+        shown = notes.normalize(file.path)[0]
+        # 带不带 `.md` 是同一页：包里的 `人/李四` 对得上库里的 `人/李四.md`。
+        key = notes.same_page(file.path)
     except NotesError:
         return file.path[: notes.MAX_PATH_CHARS], "", "invalid_path"
     if len(file.body.encode("utf-8")) > notes.MAX_PAGE_BYTES:
@@ -115,9 +117,7 @@ async def plan(
     """
     if not await sealed.key_ready(session, bot_id):
         raise TransferError("content_locked")
-    existing = {
-        notes.normalize(entry.path)[1]: entry for entry in await notes.index(session, bot_id)
-    }
+    existing = {notes.same_page(entry.path): entry for entry in await notes.index(session, bot_id)}
     create: list[PagePlan] = []
     replace: list[PagePlan] = []
     skip: list[Skipped] = []

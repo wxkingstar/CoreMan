@@ -27,7 +27,14 @@ APPROVAL_TOOLS = [
     "assistant_mark_processing",
     "assistant_report",
 ]
-NOTES_TOOLS = ["notes_index", "notes_read", "notes_search", "notes_write", "notes_delete"]
+NOTES_TOOLS = [
+    "notes_index",
+    "notes_read",
+    "notes_search",
+    "notes_write",
+    "notes_edit",
+    "notes_delete",
+]
 SETTINGS_TOOLS = ["assistant_settings_get", "assistant_settings_update"]
 FOLLOWUP_TOOLS = [
     "followup_add",
