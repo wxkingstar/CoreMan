@@ -194,3 +194,10 @@ def test_platform_keeps_the_capability_from_heartbeats():
     stored = Capability.model_validate({"dev_preview_v1": True}).model_dump()
     assert stored["dev_preview_v1"] is True
     assert Capability.model_validate({}).dev_preview_v1 is False
+
+
+def test_docker_path_expands_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = make_settings(tmp_path, docker="~/.local/bin/docker")
+    assert settings.docker == str(tmp_path / ".local/bin/docker")
+    assert make_settings(tmp_path).docker == "docker"

@@ -108,7 +108,8 @@ class Settings:
             visitors=visitors,
             visitor_key_file=path("visitor_key_file"),
             frpc_path=path("frpc_path"),
-            docker=str(raw.get("docker") or "docker"),
+            # 节点配置里常写 ~/...：命令不经 shell，这里自己展开。
+            docker=os.path.expanduser(str(raw.get("docker") or "docker")),
         )
 
     @property
