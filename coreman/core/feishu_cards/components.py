@@ -736,7 +736,7 @@ def render_followups(block: FollowupsBlock, ctx: RenderContext) -> list[Element]
     （`ctx.requester`），value 带过期时刻；其余出口不渲染。
     """
     requester = ctx.requester
-    if not requester:
+    if not requester or not block.questions:
         return []
     row = ctx.new_id("cols")
     ids = [ctx.new_id("bubble") for _ in block.questions]

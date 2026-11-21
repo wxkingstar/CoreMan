@@ -11,7 +11,16 @@ from coreman.core.feishu_cards.markdown import render_markdown
 from coreman.core.feishu_cards.reply_buttons import FORM_LABEL, UsedRow, parse_form
 from coreman.core.feishu_cards.sanitize import validate_card
 from coreman.core.richtext.degrade import to_markdown
-from coreman.core.richtext.schema import BlockError, validate_block
+from coreman.core.richtext.schema import (
+    ActionsBlock,
+    BlockError,
+    FollowupsBlock,
+    HeaderBlock,
+    KpiBlock,
+    NoteBlock,
+    RecommendBlock,
+    validate_block,
+)
 
 
 def _walk(node: Any):
@@ -225,3 +234,58 @@ def test_recommend_box_with_a_go_ahead_button_for_the_requester() -> None:
     plain = compile_reply(RECOMMEND)
     assert not [n for n in _walk(plain.cards[0]) if n.get("tag") == "button"]
     assert "⭐ 推荐：**先对手袋品类暂停 7 天无理由退货**" in to_markdown(RECOMMEND)
+
+
+# ---------------------------------------------------------------- 超出上限：截断而不是整块作废
+
+
+def test_overlong_values_are_trimmed_instead_of_invalidating_block() -> None:
+    long = "长" * 60
+    header = HeaderBlock.model_validate({"title": "t", "tags": ["a", "b", "c", "d"]})
+    assert [t.text for t in header.tags] == ["a", "b", "c"]
+
+    kpi = KpiBlock.model_validate([{"label": long, "value": str(i)} for i in range(10)])
+    assert len(kpi.items) == 8
+    assert len(kpi.items[0].label) == 40 and kpi.items[0].label.endswith("…")
+
+    note = NoteBlock.model_validate({"text": "注" * 600})
+    assert len(note.text) == 500 and note.text.endswith("…")
+
+    rec = RecommendBlock.model_validate({"title": "t", "reason": "理" * 400, "action": long})
+    assert rec.reason == "理" * 299 + "…" and rec.action == "就按这个办"
+    assert RecommendBlock.model_validate({"title": "t", "action": None}).action is None
+
+
+def test_overlong_buttons_link_clipped_reply_dropped() -> None:
+    long = "按" * 50
+    actions = ActionsBlock.model_validate(
+        [
+            {"text": long, "url": "https://example.com"},
+            {"text": long, "reply": True},
+            {"text": "短", "reply": True},
+        ],
+    )
+    assert [b.text for b in actions.buttons] == ["按" * 39 + "…", "短"]
+    assert ActionsBlock.model_validate([{"text": long, "reply": True}]).buttons == []
+
+
+def test_overlong_followups_dropped() -> None:
+    block = FollowupsBlock.model_validate(["问" * 41, "短问题"])
+    assert block.questions == ["短问题"]
+    assert FollowupsBlock.model_validate(["问" * 41]).questions == []
+
+
+def test_only_overlong_reply_buttons_and_followups_render_no_json() -> None:
+    long = "长" * 50
+    reply = (
+        "正文\n\n```card:actions\n"
+        + json.dumps([{"text": long, "reply": True}], ensure_ascii=False)
+        + "\n```\n\n```card:followups\n"
+        + json.dumps([long], ensure_ascii=False)
+        + "\n```"
+    )
+    compiled = compile_reply(reply, requester="ou_x")
+    dumped = json.dumps(compiled.cards, ensure_ascii=False)
+    assert "```json" not in dumped and long not in dumped
+    for card in compiled.cards:
+        validate_card(card)
