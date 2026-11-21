@@ -54,8 +54,8 @@ def test_reply_is_only_a_marker() -> None:
         validate_block("actions", [{"text": "好", "reply": False}])
     with pytest.raises(BlockError):
         validate_block("actions", [{"text": "好", "reply": True, "url": "https://example.com"}])
-    with pytest.raises(BlockError):
-        validate_block("actions", [{"text": "长" * 41, "reply": True}])
+    # 超长的回复按钮去掉（点了会发出半句话），不再让整块作废。
+    assert ActionsBlock.model_validate([{"text": "长" * 41, "reply": True}]).buttons == []
 
 
 def test_value_roundtrip() -> None:
@@ -249,9 +249,11 @@ def test_followups_block_validation() -> None:
     from coreman.core.richtext.schema import FollowupsBlock
 
     assert FollowupsBlock.model_validate(["a", " b "]).questions == ["a", "b"]
-    for bad in ([], ["a", "b", "c", "d"], ["长" * 41], ["  "]):
-        with pytest.raises(BlockError):
-            validate_block("followups", bad)
+    with pytest.raises(BlockError):
+        validate_block("followups", ["a", "b", "c", "d"])
+    # 空白和超长的追问去掉，全去掉了整块不显示，不再降级成 JSON 原文。
+    for dropped in ([], ["长" * 41], ["  "]):
+        assert FollowupsBlock.model_validate(dropped).questions == []
     # 其他出口点不了，不显示。
     assert block_to_markdown("followups", FollowupsBlock(questions=["a"])) == ""
 

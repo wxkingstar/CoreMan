@@ -87,6 +87,29 @@ def _as_list(value: Any) -> Any:
     return value
 
 
+def _first(limit: int) -> Any:
+    """列表超出上限只留前 limit 项，不让整块作废。单个对象或字符串同 _as_list。"""
+
+    def keep(value: Any) -> Any:
+        value = _as_list(value)
+        return value[:limit] if isinstance(value, list) else value
+
+    return keep
+
+
+def _clip(limit: int) -> Any:
+    """文字超出上限截到 limit 字、末尾换成「…」，不让整块作废。"""
+
+    def clip(value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip()
+            if len(value) > limit:
+                return value[: limit - 1] + "…"
+        return value
+
+    return clip
+
+
 def _number(value: Any) -> float | None:
     """`"1,240"`、`"12.5%"`、`"$4,621"` 都认成数字；空值与认不出的都是 None。"""
     if value is None or isinstance(value, bool):
@@ -152,7 +175,7 @@ class HeaderBlock(_Model):
     color: HeaderColor | None = None
     icon: str | None = None
 
-    _list_tags = field_validator("tags", mode="before")(_as_list)
+    _list_tags = field_validator("tags", mode="before")(_first(3))
 
 
 class KpiItem(_Model):
@@ -164,12 +187,15 @@ class KpiItem(_Model):
     note: str | None = Field(default=None, max_length=80)
 
     _value_text = field_validator("value", "delta", mode="before")(_text)
+    _clip_label = field_validator("label", mode="before")(_clip(40))
 
 
 class KpiBlock(_Model):
     items: list[KpiItem] = Field(min_length=1, max_length=8)
     columns: int | None = Field(default=None, ge=2, le=4)
     size: Size = "full"
+
+    _first_items = field_validator("items", mode="before")(_first(8))
 
     @model_validator(mode="before")
     @classmethod
@@ -404,6 +430,8 @@ class PeopleBlock(_Model):
 class NoteBlock(_Model):
     text: str = Field(min_length=1, max_length=500)
 
+    _clip_text = field_validator("text", mode="before")(_clip(500))
+
     @model_validator(mode="before")
     @classmethod
     def _from_str(cls, value: Any) -> Any:
@@ -430,12 +458,29 @@ class Button(_Model):
 
 
 class ActionsBlock(_Model):
-    buttons: list[Button] = Field(min_length=1, max_length=6)
+    # 可以为空：超长的回复按钮全被去掉时整块不显示，而不是降级成 JSON 原文。
+    buttons: list[Button] = Field(max_length=6)
 
     @model_validator(mode="before")
     @classmethod
     def _bare_list(cls, value: Any) -> Any:
         return {"buttons": value} if isinstance(value, list) else value
+
+    @field_validator("buttons", mode="before")
+    @classmethod
+    def _long_text(cls, value: Any) -> Any:
+        """按钮文字超 40 字：链接按钮截短；回复按钮点了会原样发出文字，截短会发出半句话，去掉。"""
+        if not isinstance(value, list):
+            return value
+        out = []
+        for button in value:
+            text = button.get("text") if isinstance(button, dict) else None
+            if isinstance(text, str) and len(text.strip()) > 40:
+                if not button.get("url"):
+                    continue
+                button = {**button, "text": _clip(40)(text)}
+            out.append(button)
+        return out
 
 
 class Source(_Model):
@@ -507,6 +552,16 @@ class RecommendBlock(_Model):
     alternatives: list[str] = Field(default_factory=list, max_length=5)
     action: str | None = Field(default="就按这个办", max_length=10)
 
+    _clip_reason = field_validator("reason", mode="before")(_clip(300))
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _long_action(cls, value: Any) -> Any:
+        """按钮文字超 10 字换回默认：点了会把它原样发出，截短会发出半句话。"""
+        if isinstance(value, str) and len(value.strip()) > 10:
+            return "就按这个办"
+        return value
+
     @field_validator("alternatives")
     @classmethod
     def _short(cls, value: list[str]) -> list[str]:
@@ -521,7 +576,8 @@ class FollowupsBlock(_Model):
     不管写在哪里都放到卡片最后；只在提问人自己的对话回复里可点，30 分钟后过期。
     """
 
-    questions: list[str] = Field(min_length=1, max_length=3)
+    # 可以为空：超长的追问全被去掉时整块不显示，而不是降级成 JSON 原文。
+    questions: list[str] = Field(max_length=3)
 
     @model_validator(mode="before")
     @classmethod
@@ -531,10 +587,8 @@ class FollowupsBlock(_Model):
     @field_validator("questions")
     @classmethod
     def _short(cls, value: list[str]) -> list[str]:
-        out = [q.strip() for q in value if q.strip()]
-        if not out or any(len(q) > 40 for q in out):
-            raise ValueError("每条追问 1–40 个字")
-        return out
+        """超过 40 字的追问去掉：点了会原样发出，截短会发出半句话。"""
+        return [q.strip() for q in value if q.strip() and len(q.strip()) <= 40]
 
 
 class RawBlock(_Model):

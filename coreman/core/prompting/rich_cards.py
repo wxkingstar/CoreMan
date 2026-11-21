@@ -31,13 +31,13 @@ user explicitly asks for a chart, table or similar.
 
 Types:
 - header: {"title", "subtitle"?, "tags"?: [{"text", "color"?}], \
-"color"?: blue|green|orange|red|grey|turquoise} — at most one, first. Tag colors (here and in \
-`item`) are neutral (grey)|blue|turquoise|lime|green|yellow|orange|red|purple. The title is \
-one short conclusion (about 20 Chinese characters or 40 letters) because phone screens cut a \
-long title; put figures and details in `subtitle`, a `callout` or the body.
+"color"?: blue|green|orange|red|grey|turquoise} — at most one, first; up to 3 tags. Tag \
+colors (here and in `item`) are neutral (grey)|blue|turquoise|lime|green|yellow|orange|red|purple. \
+The title is one short conclusion (about 20 Chinese characters or 40 letters) because phone \
+screens cut a long title; put figures and details in `subtitle`, a `callout` or the body.
 - kpi: {"items": [{"label", "value", "delta"?, "good"?: true|false, "note"?}], \
-"size"?: full|half} — `good` says whether the change is good (green) or bad (red); arrows \
-follow the sign of `delta`.
+"size"?: full|half} — up to 8 items; `good` says whether the change is good (green) or bad \
+(red); arrows follow the sign of `delta`.
 - chart: {"chart": line|area|bar|hbar|pie|donut|funnel|combo|progress|ring|radar|scatter, \
 "title"?, then data: "x": [labels] + "series": [{"name", "values": [numbers or null], \
 "kind"?: bar|line, "axis"?: left|right}] for line/area/bar/combo/radar; \
@@ -60,7 +60,7 @@ is {"type": "markdown", "text"} or any of kpi/chart/callout/item/timeline/people
 "type" field.
 - people: {"users": [emails or login names], "title"?} — avatar and name; nobody is notified; \
 unmatched names stay plain text.
-- note: {"text"} — footnote, data source or caveat.
+- note: {"text"} — footnote, data source or caveat; at most 500 characters.
 - actions: {"buttons": [{"text": "…", "url": "…"} or {"text": "…", "reply": true}, ...], \
 each with "style"?: primary|danger|default} — up to 6 buttons, text at most 40 characters. \
 `url` opens an http/https link. A `"reply": true` button sends its own text to you as the \
@@ -70,8 +70,9 @@ action. For suggested next questions use `followups`, not reply buttons.
 - recommend: {"title", "reason"?, "alternatives"?: [strings], "action"?} — when you weigh \
 options and recommend one: `title` is the recommended choice in one line, `reason` why, \
 `alternatives` the others in a few words each. The asker can tap a button ("就按这个办" by \
-default; `action` sets its text, null hides it) to tell you to go ahead. In AskUserQuestion \
-choices, mark the option you recommend by ending its label with "（推荐）".
+default; `action` sets its text, at most 10 characters; null hides it) to tell you to go \
+ahead. In AskUserQuestion choices, mark the option you recommend by ending its label with \
+"（推荐）".
 - sources: {"items": [{"title", "url", "note"?}], "title"?} — up to 10 web pages or documents \
 your answer relied on, listed at the end with numbers; use it whenever you searched or read \
 something the reader may want to check.
