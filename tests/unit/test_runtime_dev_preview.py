@@ -90,6 +90,7 @@ def test_frpc_config_carries_tunnel_admin_includes_and_visitors(tmp_path):
     assert 'serverAddr = "tunnel.dev.example.com"' in text
     assert 'auth.token = "tok-123"' in text
     assert 'transport.protocol = "wss"' in text and "transport.tcpMux = false" in text
+    assert "transport.poolCount = 0" in text
     assert 'webServer.addr = "127.0.0.1"' in text and 'webServer.password = "admin-pw"' in text
     assert f'includes = ["{settings.proxies_dir}/*.toml"]' in text
     assert 'serverName = "test-mysql"' in text and "bindPort = 13306" in text

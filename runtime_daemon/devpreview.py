@@ -547,7 +547,9 @@ def frpc_config_text(settings: Settings, admin_password: str) -> str:
         'transport.protocol = "wss"',
         # 每个连接各走一条：办公室到机房单条连接吞吐低，多路复用会挤在一条上。
         "transport.tcpMux = false",
-        "transport.poolCount = 5",
+        # 不预建工作连接：池里的空闲连接会被网关静默断开，frps 拿断掉的连接转发就失败（页面 404），
+        # 池又被死连接占满、新连接进不来。每个请求现建一条，多一次握手，但不会整片打不开。
+        "transport.poolCount = 0",
         f"log.to = {toml_str(settings.data_dir / 'frpc.log')}",
         "log.maxDays = 3",
         'webServer.addr = "127.0.0.1"',
