@@ -345,3 +345,14 @@ def test_random_unicode_never_raises(text: str) -> None:
         parse_json(text)
     except ValueError:
         pass
+
+
+def test_header_tag_grey_color_does_not_invalidate_block() -> None:
+    raw = (
+        '{"title": "方案待确认", "color": "grey", "tags": ['
+        '{"text": "未开发", "color": "grey"}, {"text": "A", "color": "Gray"}, '
+        '{"text": "B", "color": "pink"}]}'
+    )
+    (seg,) = split(f"```card:header\n{raw}\n```")
+    assert seg.kind == "block"
+    assert [t.color for t in seg.model.tags] == ["neutral", "neutral", None]

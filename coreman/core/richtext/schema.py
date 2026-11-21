@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -46,6 +46,7 @@ TagColor = Literal[
     "purple",
     "carmine",
 ]
+_TAG_COLORS: frozenset[str] = frozenset(get_args(TagColor))
 ChartKind = Literal[
     "line",
     "area",
@@ -131,6 +132,17 @@ class Tag(_Model):
     @classmethod
     def _from_str(cls, value: Any) -> Any:
         return {"text": value} if isinstance(value, str) else value
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _loose_color(cls, value: Any) -> Any:
+        """标签色写错不该让整块作废：grey/gray 是飞书的 neutral，其余认不出的按默认色。"""
+        if not isinstance(value, str):
+            return None
+        color = value.strip().lower()
+        if color in {"grey", "gray"}:
+            return "neutral"
+        return color if color in _TAG_COLORS else None
 
 
 class HeaderBlock(_Model):
