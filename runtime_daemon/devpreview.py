@@ -545,10 +545,11 @@ def frpc_config_text(settings: Settings, admin_password: str) -> str:
         'auth.method = "token"',
         f"auth.token = {toml_str(token)}",
         'transport.protocol = "wss"',
-        # 每个连接各走一条：办公室到机房单条连接吞吐低，多路复用会挤在一条上。
-        "transport.tcpMux = false",
-        # 不预建工作连接：池里的空闲连接会被网关静默断开，frps 拿断掉的连接转发就失败（页面 404），
-        # 池又被死连接占满、新连接进不来。每个请求现建一条，多一次握手，但不会整片打不开。
+        # 多路复用 + 保活：经网关的连接空闲满 60 秒会被断开，frps 复用断掉的工作连接
+        # 就失败（页面 404）。所有工作连接走同一条连接里的流，每 20 秒保活一次。
+        # frps 要同样打开 tcpMux，两边不一致登录不上。
+        "transport.tcpMux = true",
+        "transport.tcpMuxKeepaliveInterval = 20",
         "transport.poolCount = 0",
         f"log.to = {toml_str(settings.data_dir / 'frpc.log')}",
         "log.maxDays = 3",
