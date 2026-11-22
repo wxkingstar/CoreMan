@@ -261,12 +261,17 @@ async def test_credential_items_bind_update_and_delete(client, app, db_session):
     found = await store.injected(db_session, cipher, bot_id=bot.id, user_id=user.id)
     await db_session.commit()
     assert found.env == {"DEMO_PIN": "pin-000111"}
+    renamed = await client.put(f"{url}/label", json={"label": "  运营 PIN  "})
+    assert renamed.status_code == 200 and renamed.json()["data"]["label"] == "运营 PIN"
+    assert (await client.put(f"{url}/label", json={"label": "   "})).status_code == 422
+    assert (await client.put(f"{url}/label", json={"label": "x" * 51})).status_code == 422
     unbound = await client.put(f"{url}/bots", json={"bot_ids": []})
     assert unbound.json()["data"]["bindings"] == []
     # 别人动不了。
     await login_existing(client, db_session, stranger)
     assert (await client.put(url, json={"value": "x"})).status_code == 404
     assert (await client.put(f"{url}/bots", json={"bot_ids": []})).status_code == 404
+    assert (await client.put(f"{url}/label", json={"label": "x"})).status_code == 404
     assert (await client.delete(url)).status_code == 404
     await login_existing(client, db_session, user)
     assert (await client.delete(url)).status_code == 200

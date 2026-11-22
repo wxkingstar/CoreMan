@@ -160,6 +160,7 @@ const en = {
     replaces: "{key} of “{bot}” currently uses “{label}” and will use this one instead.",
     updateShared: " This credential is used by {bots}; the new value applies to all of them.",
     updated: "Updated", deleted: "Deleted",
+    rename: "Rename", renameTitle: "Rename", renamePrompt: "A name you will recognise for {key} (up to 50 characters). Only the display name changes; the variable and value stay the same.", renameInvalid: "Enter a name of up to 50 characters", renamed: "Renamed",
   },
   credentialRequest: {
     title: "Personal credential",

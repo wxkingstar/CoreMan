@@ -100,6 +100,11 @@ class SubmitIn(BaseModel):
     use: dict[str, uuid.UUID] = Field(default_factory=dict, max_length=policy.MAX_FIELDS)
 
 
+class LabelIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1, max_length=50)
+
+
 class BotsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     bot_ids: list[uuid.UUID] = Field(max_length=500)
@@ -385,6 +390,35 @@ async def update_item(
         session, request.app.state.cipher, credential_id=row.id, user_id=actor.id, value=value
     )
     await _audit(session, actor, "personal_credential.updated", None, row.env_key)
+    await session.commit()
+    return {"code": 0, "data": await _owned_item(request, session, actor, credential_id)}
+
+
+@router.put("/api/me/credential-items/{credential_id}/label", dependencies=[Depends(verify_csrf)])
+async def rename_item(
+    credential_id: uuid.UUID,
+    body: LabelIn,
+    request: Request,
+    response: Response,
+    actor: User = Depends(interactive_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """改名称：只影响「我的凭证」与表单里的显示，变量名和值不变。"""
+    response.headers.update(mcp_rpc.NO_STORE)
+    label = " ".join(body.label.split())
+    if not label:
+        raise ApiError(422, 422, "名称不能为空")
+    row = await store.rename(session, credential_id=credential_id, user_id=actor.id, label=label)
+    if row is None:
+        raise not_found("凭证不存在")
+    await _audit(
+        session,
+        actor,
+        "personal_credential.renamed",
+        None,
+        row.env_key,
+        {"credential_id": str(row.id)},
+    )
     await session.commit()
     return {"code": 0, "data": await _owned_item(request, session, actor, credential_id)}
 
