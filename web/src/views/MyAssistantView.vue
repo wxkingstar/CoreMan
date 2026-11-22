@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { myAssistant, type AssistantAbsent, type AssistantOverview } from '@/api/myAssistant'
+import { myAssistant, type AssistantAbsent, type AssistantOverview, type AssistantReset } from '@/api/myAssistant'
 import AssistantBoard from '@/components/assistant/AssistantBoard.vue'
 import AssistantFollowups from '@/components/assistant/AssistantFollowups.vue'
 import AssistantJobs from '@/components/assistant/AssistantJobs.vue'
 import AssistantNotes from '@/components/assistant/AssistantNotes.vue'
 import AssistantRecent from '@/components/assistant/AssistantRecent.vue'
+import AssistantResetDialog from '@/components/assistant/AssistantResetDialog.vue'
 import AssistantSettings from '@/components/assistant/AssistantSettings.vue'
 import LoadState from '@/components/LoadState.vue'
 import { errorMessage } from '@/utils/errors'
@@ -65,21 +66,12 @@ async function shift(state: 'on' | 'off' | 'auto') {
   } catch (e) { ElMessage.error(errorMessage(e)) }
   finally { switching.value = false }
 }
-/** 从现在开始：清掉试用期间攒下的事项，历史对话留着做背景。先确认；清完重新取概览、刷新各分区。 */
-const resetting = ref(false), resetKey = ref(0)
-async function startFresh() {
-  if (resetting.value) return
-  try {
-    await ElMessageBox.confirm(t('assistant.page.resetConfirm'), t('assistant.page.resetTitle'), { type: 'warning' })
-  } catch { return }
-  resetting.value = true
-  try {
-    const done = await myAssistant.reset()
-    ElMessage.success(t('assistant.page.resetDone', { n: done.followups, count: done.jobs, total: done.approvals, value: done.inbox, detail: done.gaps }))
-    resetKey.value += 1
-    await load()
-  } catch (e) { ElMessage.error(errorMessage(e)) }
-  finally { resetting.value = false }
+/** 从现在开始：弹框讲清楚清掉什么、留下什么，确认后在弹框里清；清完重新取概览、刷新各分区。 */
+const resetDialog = ref<InstanceType<typeof AssistantResetDialog> | null>(null), resetKey = ref(0)
+async function started(done: AssistantReset) {
+  ElMessage.success(t('assistant.page.resetDone', { n: done.followups, count: done.jobs, total: done.approvals, value: done.inbox, detail: done.gaps }))
+  resetKey.value += 1
+  await load()
 }
 onMounted(load)
 defineExpose({ tab, load, refresh })
@@ -111,9 +103,8 @@ defineExpose({ tab, load, refresh })
           v-if="mine?.state === 'active'"
           type="warning"
           plain
-          :loading="resetting"
           data-test="assistant-reset"
-          @click="startFresh"
+          @click="resetDialog?.open()"
         >
           {{ t('assistant.page.reset') }}
         </el-button>
@@ -338,6 +329,12 @@ defineExpose({ tab, load, refresh })
           />
         </el-tab-pane>
       </el-tabs>
+      <AssistantResetDialog
+        ref="resetDialog"
+        :name="mine.name"
+        @started="started"
+        @purged="load"
+      />
     </template>
   </section>
 </template>

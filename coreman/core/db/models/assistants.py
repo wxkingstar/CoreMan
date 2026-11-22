@@ -250,6 +250,8 @@ class AssistantLifecycle(Base):
     )
     action: Mapped[str] = mapped_column(Text)
     step: Mapped[str] = mapped_column(Text)
+    # 停用时彻底清空：最后一步不留停用后的记录，连同本人以前停用的记录与全部数据一起删掉。
+    purge: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     trigger: Mapped[str | None] = mapped_column(Text)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL", name="fk_assistant_lifecycles_actor")

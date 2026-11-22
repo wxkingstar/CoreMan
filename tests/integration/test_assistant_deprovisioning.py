@@ -720,3 +720,50 @@ async def test_stopping_an_old_record_leaves_the_current_one_alone(
     await db_session.commit()
     current = await flow_of(db_session, owner.id)
     assert current is not None and current.step == "grace" and current.trigger == "member_left"
+
+
+async def test_purging_deletes_every_record_of_the_owner_as_if_never_opened(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """彻底清空：先照常停用（撤授权、销毁密钥、登记删目录），最后把本人所有助理记录连同数据删掉。"""
+    from tests.integration.assistant_helpers import into_assistant
+
+    node, _ = install(monkeypatch)
+    bot, owner, task = await active_assistant(db_session)
+    old = await seed_standard(db_session)
+    old.enabled = False
+    await into_assistant(db_session, old, owner)
+    old.assistant_state, old.bot_key = "deprovisioned", "assistant-old-x1"
+    earlier = AssistantLifecycle(
+        owner_id=owner.id,
+        platform_app_id=bot.platform_app_id,
+        bot_id=old.id,
+        action="deprovision",
+        step="destroy",
+        outcome="done",
+        finished_at=utcnow(),
+    )
+    db_session.add(earlier)
+    await db_session.commit()
+    bot_id, old_id, task_id, earlier_id = bot.id, old.id, task.id, earlier.id
+    working_dir = bot.working_dir
+    flow = await deprovisioning.request(
+        db_session, bot, trigger="owner", actor_id=owner.id, purge=True
+    )
+    await db_session.commit()
+    assert flow is not None and flow.purge
+    factory, messenger = make_session_factory(db_engine), FakeMessenger()
+    for _ in range(6):
+        await tick(factory, messenger)
+    db_session.expunge_all()
+    for gone in (bot_id, old_id):
+        assert await db_session.get(Bot, gone) is None
+    assert await db_session.get(Task, task_id) is None
+    assert await db_session.get(FeishuPersonalGrant, (bot_id, owner.id)) is None
+    assert await db_session.get(AssistantLifecycle, earlier_id) is None
+    flow = await flow_of(db_session, owner.id)
+    assert flow is not None and flow.outcome == "done" and flow.bot_id is None
+    key = await db_session.get(AssistantKey, owner.id)
+    assert key is not None and key.dek_enc is None and key.destroyed_at is not None
+    assert ("workspace-remove", {"working_dir": working_dir, "bot_id": str(bot_id)}) in (node.calls)
+    assert messenger.texts[-1] == ("owner_pid", deprovisioning.PURGED_TEXT)

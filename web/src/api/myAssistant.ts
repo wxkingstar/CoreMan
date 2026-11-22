@@ -316,6 +316,8 @@ export const myAssistant = {
   /** 停用不可撤销：调用前必须已经让所有者二次确认。 */
   reset: () => call<AssistantReset>(http.post(`${root}/reset`, { confirm: true })),
   deprovision: () => call<{ state: string }>(http.post(`${root}/deprovision`, { confirm: true })),
+  /** 彻底清空：停用并删掉助理与全部数据，像从没开过；同样不可撤销，调用前必须让所有者二次确认。 */
+  purge: () => call<{ state: string }>(http.post(`${root}/purge`, { confirm: true })),
   accessLog: (before?: number) => call<AccessPage>(http.get(`${root}/access-log`, { params: before ? { before } : {} })),
   /** `dryRun` 为真只出清单；为假时必须带上预览给的 `expect`。 */
   importArchive: (file: File, options: { dryRun: boolean; overwrite: boolean; expect?: string }) => {
