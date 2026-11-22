@@ -57,9 +57,9 @@ async def test_private_chat_keeps_the_assistant_and_adds_personal_tools(db_sessi
     }
     prompt, env = await configure(db_session, ctx, intake, base, "你是销售", initial)
     assert prompt.startswith("你是销售")
-    assert "## 本人飞书" in prompt and "feishu_authorize" in prompt
+    assert "# 本人飞书" in prompt and "feishu_authorize" in prompt
     # 本人定时任务的说明改由 chat.schedules 追加，飞书与企业微信共用。
-    assert "## 本人定时任务" not in prompt
+    assert "# 本人定时任务" not in prompt
     assert env["BOT_TOKEN_ERP"] == "business-token" and env["STATIC_SECRET"] == "bot-secret"
     assert env[policy.PREFIX + "URL"].endswith("/api/runtime/feishu-personal/mcp")
     capability = policy.read_capability(ctx.cipher, env[policy.PREFIX + "TOKEN"])
@@ -196,10 +196,10 @@ async def test_open_stage_sends_the_normal_request_with_tools(db_session, app, d
     assert len(fake.requests) == 1
     request = fake.requests[0]
     system = request["messages"][0]["content"]
-    assert "你是销售" in system and "## 本人飞书" in system
+    assert "你是销售" in system and "# 本人飞书" in system
     # 个人工具两段排在结尾重申之前，⑪ 仍是整份 system prompt 的最后一段。
     tail = DEFAULT_RUNTIME_TAIL.strip()
-    assert system.index("## 本人飞书") < system.index("## 本人定时任务") < system.index(tail)
+    assert system.index("# 本人飞书") < system.index("# 本人定时任务") < system.index(tail)
     assert system.endswith(tail)
     assert [m["role"] for m in request["messages"]] == ["system", "user"]
     assert request["env_vars"][policy.PREFIX + "TOKEN"]

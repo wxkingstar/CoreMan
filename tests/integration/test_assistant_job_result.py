@@ -74,7 +74,7 @@ async def test_the_result_turn_quotes_the_conclusion_in_the_main_session(
     text = user_input(relay.requests[0])
     assert text.startswith(jobs.RESULT_HEADER) and f"编号：{row.id}" in text
     assert f"> {RESULT}" in text
-    assert "\n## 子任务\n" in relay.requests[0]["messages"][0]["content"]
+    assert "\n# 子任务\n" in relay.requests[0]["messages"][0]["content"]
     # 主会话里的一轮，但所有者不在场：不出声，要他知道的由助理记成待汇报。
     logged = await raw(
         db_session,

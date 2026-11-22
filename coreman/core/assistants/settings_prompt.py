@@ -5,7 +5,7 @@ from __future__ import annotations
 from coreman.core.assistants import settings
 
 SETTINGS_RULES = (
-    "\n\n## 工作时段、摘要与关注的会话\n"
+    "\n\n# 工作时段、摘要与关注的会话\n"
     "默认全天候：你随时看所有者的飞书消息、把要他处理的事交回这里。他可以改成只在工作时段里"
     "看（always_on 设为 false）；那时下班后他在这里说话你照常回应。\n"
     "- 所有者发「上班」「下班」是临时切换，由平台直接处理并回复，不会到你这里；有人问起时"

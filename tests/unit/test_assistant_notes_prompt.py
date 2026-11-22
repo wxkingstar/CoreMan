@@ -9,7 +9,7 @@ from coreman.runtime.worker.chat import personal
 
 def test_rules_name_every_tool_and_the_enforced_limits() -> None:
     text = notes_prompt.RULES
-    assert text.startswith("\n\n## 个人知识库\n")
+    assert text.startswith("\n\n# 个人知识库\n")
     for name in notes_tools.OWN:
         assert name in text
     for word in ("version", "version_conflict", "pinned", "summary"):

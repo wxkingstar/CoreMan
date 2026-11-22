@@ -9,7 +9,7 @@ from coreman.runtime.worker.chat import personal
 
 def test_rules_cover_the_judgements_that_get_drafts_sent_back() -> None:
     text = reply_prompt.RULES
-    assert text.startswith("\n\n## 要不要回\n")
+    assert text.startswith("\n\n# 要不要回\n")
     for phrase in (
         "整段上下文",
         "已经在这个话题里表过态",
@@ -42,4 +42,4 @@ def test_rules_carry_no_personal_content() -> None:
 
 def test_standard_bot_guidance_does_not_get_these_rules() -> None:
     rules, _ = personal.feishu_guidance(None, "https://coreman.example.com", scheduled=False)
-    assert "## 要不要回" not in rules
+    assert "# 要不要回" not in rules

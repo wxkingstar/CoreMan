@@ -337,7 +337,7 @@ def systems_prompt(
             f"- {system.name} ({system.key})：{system.base_url or ''}"
             f"（env: {token_env_var(system.key)}；{auth_label(auth_mode(system))}{catalog}）"
         )
-    prompt = "## 业务系统访问\n\n" + "\n".join(lines)
+    prompt = "# 业务系统访问\n\n" + "\n".join(lines)
     prompt += "\n\n完整配置见 `$COREMAN_SYSTEMS`（兼容 `$BOT_SYSTEMS_CONFIG`）。"
     if any(system.token_delivery == "env" for system in systems):
         prompt += (

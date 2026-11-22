@@ -103,5 +103,5 @@ async def test_a_platform_turn_has_the_proxies_but_not_the_credentials(
     # 找谁审批的名单与个人工具照常下发。
     assert cloud_policy.APPROVERS_ENV in env and "COREMAN_FEISHU_PERSONAL_TOKEN" in env
     # 规则仍在稳定段里（同一个会话里前后几轮逐字不变），本轮块说明这一轮用不了。
-    assert "## 个人凭证" in request["messages"][0]["content"]
+    assert "# 个人凭证" in request["messages"][0]["content"]
     assert credentials.OWNER_ABSENT in turn_block(request)

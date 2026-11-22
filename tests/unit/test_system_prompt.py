@@ -178,15 +178,15 @@ def test_extra_sections_stay_before_the_tail() -> None:
         "verbosity_level": 3,
         "bot_prompt": "你是销售",
         "tag": TAG,
-        "systems_prompt": "## 业务系统访问",
-        "extra": "\n\n## 本人飞书\n可以读取。\n\n## 本人定时任务\n可以创建。",
+        "systems_prompt": "# 业务系统访问",
+        "extra": "\n\n# 本人飞书\n可以读取。\n\n# 本人定时任务\n可以创建。",
     }
     for scheduled in (False, True):
         out = build_system_prompt(**kwargs, scheduled=scheduled)
         assert (
-            out.index("## 业务系统访问")
-            < out.index("## 本人飞书")
-            < out.index("## 本人定时任务")
+            out.index("# 业务系统访问")
+            < out.index("# 本人飞书")
+            < out.index("# 本人定时任务")
             < out.index(DEFAULT_RUNTIME_TAIL.strip())
         )
         assert out.endswith(DEFAULT_RUNTIME_TAIL.strip())
@@ -201,11 +201,11 @@ def test_output_format_sits_after_verbosity_and_before_the_tail() -> None:
         verbosity_level=3,
         bot_prompt="你是销售",
         tag=TAG,
-        extra="## 本人飞书\n可以读取。",
+        extra="# 本人飞书\n可以读取。",
         output_format="# Rich Card Output",
     )
     assert (
-        out.index("## 本人飞书")
+        out.index("# 本人飞书")
         < out.index(DEFAULT_VERBOSITY[3])
         < out.index("# Rich Card Output")
         < out.index(DEFAULT_RUNTIME_TAIL.strip())
@@ -365,3 +365,29 @@ def test_time_rule_leaves_progress_timestamps_to_the_platform() -> None:
 
     assert "Do not start progress updates with a clock time" in TIME_RULE
     assert "even if a memory or an earlier message asks you" in TIME_RULE
+
+
+def test_org_context_and_bot_prompt_are_framed() -> None:
+    seg = PromptSegments(
+        DEFAULT_SECURITY_POLICY,
+        DEFAULT_CODEX_CONTRACT,
+        DEFAULT_RUNTIME_MODE,
+        DEFAULT_RUNTIME_TAIL,
+        DEFAULT_VERBOSITY,
+        org_context="做二手交易",
+    )
+    out = build_system_prompt(
+        segments=seg,
+        backend="claude",
+        verbosity_level=4,
+        bot_prompt="# 角色\n用 {x} 查库存",
+        tag=TAG,
+    )
+    assert "<organization_context>\n做二手交易\n</organization_context>" in out
+    # 员工提示词原样放进标签里，花括号不当占位符。
+    assert "<employee_instructions>\n# 角色\n用 {x} 查库存\n</employee_instructions>" in out
+    assert out.index("# Organization Context") < out.index("# Employee Instructions")
+    bare = build_system_prompt(
+        segments=SEG, backend="claude", verbosity_level=4, bot_prompt="", tag=TAG
+    )
+    assert "Employee Instructions" not in bare and "Organization Context" not in bare

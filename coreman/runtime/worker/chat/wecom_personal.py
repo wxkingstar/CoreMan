@@ -457,7 +457,7 @@ def guidance(row: WecomPersonalBinding, *, scheduled: bool) -> tuple[str, str]:
     )
     level = service.LEVEL_TITLES.get(row.authorization_level, "仅读取")
     rules = (
-        "\n\n## 本人企业微信\n"
+        "\n\n# 本人企业微信\n"
         "本人已绑定自己的企业微信授权机器人，可以按需调用 coreman_wecom_personal 的工具，"
         "以本人身份在企业微信里查询和办理事情（本人选择的范围与暂时用不了的能力见本轮块）。"
         "先用 wecom_method_schema 查参数，再用 wecom_call 调用；"

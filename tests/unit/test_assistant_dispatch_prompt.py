@@ -18,7 +18,7 @@ def test_the_target_note_asks_for_json_and_forbids_asking_the_user() -> None:
 
 def test_the_assistant_rules_keep_the_dispatch_narrow() -> None:
     rules = dispatch_prompt.RULES
-    assert rules.startswith("\n\n## 调度公共员工\n")
+    assert rules.startswith("\n\n# 调度公共员工\n")
     # 裁定 17 放在助理这一层的四条防范。
     assert "必需、合理" in rules
     assert "不带原始聊天记录" in rules and "隐私" in rules

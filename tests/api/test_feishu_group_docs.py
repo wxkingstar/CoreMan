@@ -427,7 +427,7 @@ async def test_an_old_cards_click_is_still_recorded(app, db_session, db_engine):
     ctx.turn_notes = []
     prompt, env = await configure(db_session, ctx, intake, uuid.uuid4(), "你是助理", {})
     await db_session.commit()
-    assert "## 群里的飞书文档" in prompt and env[policy.PREFIX + "URL"].endswith(URL)
+    assert "# 群里的飞书文档" in prompt and env[policy.PREFIX + "URL"].endswith(URL)
     assert "不要用浏览器" in prompt and "不用另外申请" in prompt
     assert consent.ONCE in ctx.turn_notes[0]
     await db_session.refresh(row)

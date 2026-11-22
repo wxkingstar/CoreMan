@@ -123,7 +123,7 @@ async def test_private_and_group_turns_get_the_capability(db_session, app, db_en
     prompt, env = await chat_schedules.configure(
         db_session, ctx, intake, uuid.uuid4(), "你是助手", forged
     )
-    assert "## 本人定时任务" in prompt and "coreman-cron" in prompt
+    assert "# 本人定时任务" in prompt and "coreman-cron" in prompt
     assert env["COREMAN_SCHEDULE_URL"] == "http://localhost" + URL
     capability = schedules.read_capability(app.state.cipher, env["COREMAN_SCHEDULE_TOKEN"])
     assert (capability.task_id, capability.actor) == (task.id, str(user.id))

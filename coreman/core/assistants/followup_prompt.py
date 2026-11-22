@@ -5,7 +5,7 @@ from __future__ import annotations
 from coreman.core.assistants import followups
 
 FOLLOWUP_RULES = (
-    "\n\n## 待跟进\n"
+    "\n\n# 待跟进\n"
     "跨天的事不靠会话记忆（会话每天换新），靠待跟进清单。每条有一个编号（F012 这样）："
     "对所有者提到它、调用工具时都用这个编号。\n"
     "- 什么时候记：所有者要拍板而当下没定；所有者答应了别人一件事；所有者在等别人的回复或"

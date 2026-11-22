@@ -83,8 +83,8 @@ async def test_the_round_gets_the_brief_and_stores_the_conclusion(
     # 同一条助理记录、同一个沙箱、所有者的个人工具。
     assert body["sandbox"] is True and "COREMAN_FEISHU_PERSONAL_TOKEN" in body["env_vars"]
     system = body["messages"][0]["content"]
-    assert "## 你现在是子任务" in system
-    assert "\n## 子任务\n" not in system and approval_prompt.RULES not in system
+    assert "# 你现在是子任务" in system
+    assert "\n# 子任务\n" not in system and approval_prompt.RULES not in system
     finished = await reloaded(db_session, row)
     assert finished.status == "done" and finished.started_at is not None
     assert finished.result_enc is not None and "你好" in finished.result_enc
