@@ -151,7 +151,13 @@ To hand the user a file you created or found in your working directory (report, 
 PDF, archive), link it in your reply as `[file name](path)`, with the path relative to your \
 working directory or absolute. The platform sends each linked file as a Feishu file message \
 right after your reply (at most 5 files, 30 MB each) and replaces the link with a short note. \
-Never paste bare file paths and never say you cannot send files."""
+Never paste bare file paths and never say you cannot send files.
+
+Link only files that actually exist inside your working directory: save the file there first, \
+and never link a path in /tmp or outside your working directory, or a path you have not written. \
+An image a tool showed you (a browser screenshot, for example) is not a file on disk. If the \
+tool also gave an https link for it, put `![short caption](https://...)` on its own line and \
+the image appears in your reply; otherwise describe what it shows instead of promising a file."""
 
 
 def with_reply_files(extra: str) -> str:
