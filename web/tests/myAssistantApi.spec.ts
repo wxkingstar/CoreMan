@@ -38,9 +38,11 @@ describe('my assistant API', () => {
     const post = vi.spyOn(http, 'post').mockResolvedValue(ok({}))
     await myAssistant.shift('off')
     await myAssistant.deprovision()
+    await myAssistant.purge()
     expect(post.mock.calls).toEqual([
       ['/api/me/assistant/shift', { state: 'off' }],
       ['/api/me/assistant/deprovision', { confirm: true }],
+      ['/api/me/assistant/purge', { confirm: true }],
     ])
   })
 })

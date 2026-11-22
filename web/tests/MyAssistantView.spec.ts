@@ -5,7 +5,7 @@ import { nextTick } from 'vue'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { overview: vi.fn(), shift: vi.fn(), reset: vi.fn() },
+  myAssistant: { overview: vi.fn(), shift: vi.fn(), reset: vi.fn(), purge: vi.fn() },
 }))
 // 各分区有自己的用例，这里换成只带标记的替身：壳只管概览、空状态与标签页。
 const boardLoad = vi.hoisted(() => vi.fn())
@@ -198,18 +198,42 @@ describe('My assistant page', () => {
     wrapper.unmount()
   })
 
-  it('starts fresh after confirming, reports what was cleared and reloads', async () => {
+  it('explains what is cleared and kept before starting fresh, then reports and reloads', async () => {
     vi.mocked(myAssistant.reset).mockReset().mockResolvedValue({ followups: 5, jobs: 2, approvals: 1, inbox: 7, reports: 0, gaps: 3 })
-    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
     const success = vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
     const wrapper = render(); await flushPromises()
-    // 取消确认不发请求。
     await wrapper.get('[data-test="assistant-reset"]').trigger('click'); await flushPromises()
+    // 只弹出说明，还没发请求。
     expect(myAssistant.reset).not.toHaveBeenCalled()
-    confirm.mockResolvedValueOnce('confirm' as never)
-    await wrapper.get('[data-test="assistant-reset"]').trigger('click'); await flushPromises()
+    const dialog = document.body.querySelector('[data-test="reset-dialog"]') as HTMLElement
+    expect(dialog.querySelectorAll('[data-test="reset-clears"] li')).toHaveLength(6)
+    expect(dialog.querySelectorAll('[data-test="reset-keeps"] li')).toHaveLength(5)
+    expect(dialog.textContent).toContain(t('assistant.page.resetKeepItems.notes'))
+    expect(dialog.textContent).toContain(t('assistant.page.purgeHint'))
+    ;(dialog.querySelector('[data-test="reset-confirm"]') as HTMLElement).click(); await flushPromises()
     expect(myAssistant.reset).toHaveBeenCalledTimes(1)
     expect(success).toHaveBeenCalledWith(t('assistant.page.resetDone', { n: 5, count: 2, total: 1, value: 7, detail: 3 }))
+    expect(myAssistant.overview).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('erases everything only after the assistant name is typed back', async () => {
+    vi.mocked(myAssistant.purge).mockReset().mockResolvedValue({ state: 'deprovisioning' })
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockRejectedValueOnce('cancel')
+    vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
+    const wrapper = render(); await flushPromises()
+    await wrapper.get('[data-test="assistant-reset"]').trigger('click'); await flushPromises()
+    const button = () => document.body.querySelector('[data-test="assistant-purge"]') as HTMLElement
+    button().click(); await flushPromises()
+    expect(myAssistant.purge).not.toHaveBeenCalled()
+    expect(prompt.mock.calls[0][0]).toBe(t('assistant.page.purgePrompt', { name: '个人助理' }))
+    const options = prompt.mock.calls[0][2] as { inputValidator: (value: string) => boolean | string }
+    expect(options.inputValidator('别的名字')).toBe(t('assistant.page.purgeMismatch'))
+    expect(options.inputValidator(' 个人助理 ')).toBe(true)
+    prompt.mockResolvedValueOnce({ value: '个人助理', action: 'confirm' } as never)
+    button().click(); await flushPromises()
+    expect(myAssistant.purge).toHaveBeenCalledTimes(1)
+    expect(myAssistant.reset).not.toHaveBeenCalled()
     expect(myAssistant.overview).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })

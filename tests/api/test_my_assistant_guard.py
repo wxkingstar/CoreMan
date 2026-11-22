@@ -81,8 +81,9 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("POST", "/voice/regenerate"): {},
     ("POST", "/message-range"): {"json": {"message_range": "group"}},
     ("POST", "/reset"): {"json": {"confirm": True}},
-    # 停用放最后：有的用例按这个顺序把每条路由都调一遍。
+    # 停用与彻底清空放最后：有的用例按这个顺序把每条路由都调一遍。
     ("POST", "/deprovision"): {"json": {"confirm": True}},
+    ("POST", "/purge"): {"json": {"confirm": True}},
 }
 
 
@@ -302,6 +303,31 @@ async def test_the_owner_stops_their_assistant_once(
     assert (await client.get(URL)).json()["data"]["state"] == "deprovisioning"
     refused = await client.post(f"{URL}/followups/F001/close", json={})
     assert refused.status_code == 409 and code(refused) == "assistant_not_active"
+
+
+async def test_the_owner_purges_their_assistant_even_while_it_is_stopping(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    seeded = await _seeded(db_session)
+    await login_existing(client, db_session, seeded.owner)
+    assert (await client.post(f"{URL}/purge", json={})).status_code == 422
+    await client.post(f"{URL}/deprovision", json={"confirm": True})
+    response = await client.post(f"{URL}/purge", json={"confirm": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == {"state": "deprovisioning"}
+    [flow] = list(
+        await db_session.scalars(
+            select(AssistantLifecycle).where(AssistantLifecycle.bot_id == seeded.bot.id)
+        )
+    )
+    await db_session.refresh(flow)
+    assert flow.purge and flow.step == "drain"
+    # 停用之后补上的彻底清空另记一次审计；再点不重复记。
+    await client.post(f"{URL}/purge", json={"confirm": True})
+    audits = list(
+        await db_session.scalars(select(AuditLog).where(AuditLog.action == "assistant.purge"))
+    )
+    assert len(audits) == 1 and audits[0].target_id == str(seeded.bot.id)
 
 
 async def test_a_cli_session_gets_nothing_even_as_the_owner(

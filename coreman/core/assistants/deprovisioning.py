@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import (
@@ -34,7 +34,14 @@ from coreman.core.assistants.records import is_assistant
 from coreman.core.bots.events import notify_bot_changed
 from coreman.core.bus import tasks
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import AssistantLifecycle, Bot, Task, User, UserIdentity
+from coreman.core.db.models import (
+    AssistantLifecycle,
+    Bot,
+    Escalation,
+    Task,
+    User,
+    UserIdentity,
+)
 from coreman.core.feishu_personal import service as personal
 from coreman.core.timeutils import utcnow
 
@@ -54,6 +61,10 @@ DONE_TEXT = {
         "管理员停用了你的个人助理：飞书授权已撤销，待批的审批单已撤回，加密保存的个人内容已不可恢复。"
     ),
 }
+PURGED_TEXT = (
+    "个人助理已彻底清空：飞书授权已撤销，待批的审批单已撤回，知识库、待跟进、对话记录与设置都已删除。"
+    "想再用的时候给我发条消息，重新开通就是一个全新的助理。"
+)
 
 
 async def _feishu_user(session: AsyncSession, owner_id: uuid.UUID) -> str:
@@ -66,11 +77,17 @@ async def _feishu_user(session: AsyncSession, owner_id: uuid.UUID) -> str:
 
 
 async def request(
-    session: AsyncSession, bot: Bot, *, trigger: str, actor_id: uuid.UUID | None
+    session: AsyncSession,
+    bot: Bot,
+    *,
+    trigger: str,
+    actor_id: uuid.UUID | None,
+    purge: bool = False,
 ) -> AssistantLifecycle | None:
     """开始停用这条助理记录，返回进行中的停用流程；已经停用完的返回 None。调用方提交。
 
-    重复请求不重复做；正在开通的那条流程就此取消。
+    重复请求不重复做；正在开通的那条流程就此取消。`purge`（彻底清空）：最后一步把记录连同全部
+    数据删掉，本人以前停用的旧记录一并删掉；停用已经在进行时也能补上这个要求。
 
     Raises:
         ValueError: 不是个人助理的记录
@@ -98,7 +115,9 @@ async def request(
             # 宽限期里本人或管理员明确要停用：不再等账号恢复，现在就往下走。
             row.trigger, row.actor_id, row.deadline = trigger, actor_id, None
             advance(row, "drain")
-            await session.flush()
+        if purge:
+            row.purge = True
+        await session.flush()
         return row
     if row is not None:
         finish(row, "cancelled", "deprovision_requested")
@@ -111,6 +130,7 @@ async def request(
         bot_id=bot.id,
         action="deprovision",
         step="grace" if grace else "drain",
+        purge=purge,
         trigger=trigger,
         actor_id=actor_id,
         platform_user_id=(row.platform_user_id if row is not None else "")
@@ -237,8 +257,40 @@ async def step_destroy(
     bot.assistant_state, bot.enabled, bot.bot_key = "deprovisioned", False, retired_key(bot)
     await notify_bot_changed(session, bot.id)
     finish(row, "done")
+    if row.purge:
+        await _purge(session, row)
+        return [PURGED_TEXT]
     text = DONE_TEXT.get(row.trigger or "")
     return [text] if text else []
+
+
+async def _purge(session: AsyncSession, row: AssistantLifecycle) -> None:
+    """彻底清空：本人所有停用完的助理记录连同挂在上面的数据（外键级联）一起删掉，以前的开通、停用
+    流水也删掉，像从没开过一样。只留这一条流程（看护进程还要用它发完成通知）与已销毁的密钥行（它
+    记着销毁时刻，重新开通要等各进程的密钥缓存过期）；工作目录已登记给 `retired_dirs` 去删。"""
+    found = list(
+        await session.scalars(
+            select(Bot.id).where(
+                Bot.kind == "assistant",
+                Bot.owner_id == row.owner_id,
+                Bot.assistant_state == "deprovisioned",
+            )
+        )
+    )
+    if found:
+        # 只有这张表引用记录却不级联。
+        await session.execute(delete(Escalation).where(Escalation.bot_id.in_(found)))
+        await session.execute(delete(Bot).where(Bot.id.in_(found)))
+        for bot_id in found:
+            await notify_bot_changed(session, bot_id)
+    await session.execute(
+        delete(AssistantLifecycle).where(
+            AssistantLifecycle.owner_id == row.owner_id,
+            AssistantLifecycle.id != row.id,
+            AssistantLifecycle.finished_at.is_not(None),
+        )
+    )
+    row.bot_id = None
 
 
 STEPS = {

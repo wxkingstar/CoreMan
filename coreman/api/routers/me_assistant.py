@@ -702,3 +702,24 @@ async def deprovision(
     )
     await session.commit()
     return {"code": 0, "data": {"state": state}}
+
+
+@router.post("/purge")
+async def purge(
+    body: DeprovisionIn,
+    request: Request,
+    own: Mine = Depends(mine),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """彻底清空：先像停用一样撤销授权、撤回待批、销毁密钥，最后把助理记录连同知识库、待跟进、
+    对话记录、设置等全部数据删掉，像从没开过一样；想再用就重新开通。一旦开始不可撤销。
+
+    停用已经在进行时点它，就在那次停用的最后一步一并删掉。
+    """
+    if body.confirm is not True:
+        raise ApiError(422, 422, "彻底清空不可撤销，请带上 confirm: true")
+    state = await assistant_deprovision.begin(
+        session, request, own.bot, trigger="owner", actor=own.actor, purge=True
+    )
+    await session.commit()
+    return {"code": 0, "data": {"state": state}}

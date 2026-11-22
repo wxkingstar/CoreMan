@@ -16,28 +16,38 @@ from coreman.core.db.models import Bot, User
 
 
 async def begin(
-    session: AsyncSession, request: Request, bot: Bot, *, trigger: str, actor: User
+    session: AsyncSession,
+    request: Request,
+    bot: Bot,
+    *,
+    trigger: str,
+    actor: User,
+    purge: bool = False,
 ) -> str:
     """开始停用 `bot`，返回它之后的状态：`deprovisioning`，或早已停用完的 `deprovisioned`。
 
     Args:
         trigger: `owner`（所有者本人）或 `admin`（平台管理员）
+        purge: 彻底清空，停用完把记录与全部数据删掉（只给所有者本人）
 
     调用方提交。
     """
     prior = await lifecycle.live(session, bot.owner_id, lock=False) if bot.owner_id else None
-    before = (prior.id, prior.action, prior.step) if prior is not None else None
-    flow = await deprovisioning.request(session, bot, trigger=trigger, actor_id=actor.id)
+    before = (prior.id, prior.action, prior.step, prior.purge) if prior is not None else None
+    flow = await deprovisioning.request(
+        session, bot, trigger=trigger, actor_id=actor.id, purge=purge
+    )
     started = flow is not None and (
         before is None
         or before[0] != flow.id
         or before[1] != "deprovision"
         or (before[2] == "grace" and flow.step != "grace")
+        or (flow.purge and not before[3])
     )
     if started:
         await record_audit(
             session,
-            action="assistant.deprovision",
+            action="assistant.purge" if purge else "assistant.deprovision",
             actor_id=actor.id,
             actor_login=actor.login_name,
             target_type="bot",
