@@ -697,6 +697,39 @@ async def test_long_task_reminder_is_queued_after_the_final_reply(
     assert item.not_before > datetime.now(UTC) + timedelta(seconds=300)
 
 
+async def test_feishu_long_task_reminder_carries_the_feed_card_details(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """飞书：完成提醒带上提问人与耗时，网关据此改发「已完成」消息流卡片；文字留作兜底。"""
+    bot, _, _ = await seed_bot(db_session)
+    bot.platform = "feishu"
+    t = await chat_task(db_session, bot, "hi")
+    event = await db_session.get(InboundEvent, t.inbound_event_id)
+    assert event is not None
+    event.reply_context = {**event.reply_context, "chat_type": "group"}
+    await db_session.commit()
+    now = [1000.0]
+    ctx = build_ctx(
+        db_engine,
+        t,
+        relay_client_factory=lambda _r: FakeRelay("normal").client(),
+        clock=lambda: now[0],
+    )
+    handler = ChatTaskHandler()
+    handler._on_first_event = lambda: now.__setitem__(0, 1075.0)
+    await handler.run(ctx)
+    (item,) = (await db_session.execute(select(OutboxItem))).scalars().all()
+    assert item.payload == {
+        "markdown": msg("long_task_done", seconds=75),
+        "_long_done": {
+            "user": event.sender_platform_user_id,
+            "task_id": t.id,
+            "seconds": 75,
+            "group": True,
+        },
+    }
+
+
 async def test_allowlist_and_commands_come_before_relay_check(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

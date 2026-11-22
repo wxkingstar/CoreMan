@@ -23,6 +23,9 @@ from coreman.core.db.session import make_session_factory
 from coreman.core.platforms.feishu import FeishuError
 from coreman.runtime.gateway_feishu.transport import FeishuTransport, LeaseLost, api_id
 
+# 消息流卡片的跳转链接用平台公网地址（get_settings）。
+pytestmark = pytest.mark.usefixtures("runtime_settings")
+
 
 @pytest.fixture(autouse=True)
 def _no_call_spacing(monkeypatch):
@@ -1887,7 +1890,7 @@ async def test_reply_file_is_sent_as_a_file_message_quoting_the_question(db_sess
 
 
 async def test_long_private_reply_gets_a_feed_card_then_a_pin(db_session, db_engine):
-    """跑满 3 分钟：建「进行中」消息流卡片；做完删卡片、私聊临时置顶，6 小时后或下次来问取消。"""
+    """跑满 1 分钟：建「进行中」消息流卡片；做完删卡片、私聊临时置顶，6 小时后或下次来问取消。"""
     bot, row, generation = await seed(db_session)
     started = datetime.now(UTC) - timedelta(minutes=4)
     await db_session.execute(
@@ -1913,7 +1916,10 @@ async def test_long_private_reply_gets_a_feed_card_then_a_pin(db_session, db_eng
     assert len(created) == 1
     card = created[0]["app_feed_card"]
     assert card["status_label"] == {"text": "进行中", "type": "primary"}
-    assert created[0]["user_ids"] == ["u1"] and card["link"]["link"].startswith("https://applink")
+    assert created[0]["user_ids"] == ["u1"]
+    # 飞书不收 AppLink 作卡片链接：经平台跳转进这个会话。
+    assert card["link"]["link"] == "http://localhost/api/feishu/open?chat=oc1"
+    assert card["notify"] == {"close_notify": True}
     await transport.round()
     assert len([1 for m, p, _ in api.calls if p == "/open-apis/im/v2/app_feed_card"]) == 1
     await streams.complete(db_session, row.task_id, final_text="做完了")
@@ -1925,7 +1931,7 @@ async def test_long_private_reply_gets_a_feed_card_then_a_pin(db_session, db_eng
     assert pins == [{"time_sensitive": True, "user_ids": ["u1"]}]
     async with factory() as session:
         unpin = await session.scalar(
-            select(OutboxItem).where(OutboxItem.dedupe_key == f"{row.task_id}:unpin")
+            select(OutboxItem).where(OutboxItem.dedupe_key == f"unpin:{row.task_id}")
         )
         assert unpin.payload == {"_unpin": "u1"} and unpin.not_before > datetime.now(UTC)
         unpin.not_before = datetime.now(UTC)
@@ -2013,6 +2019,89 @@ async def test_confirm_card_gets_a_waiting_feed_card_until_it_is_answered(db_ses
     assert deleted == [
         {"feed_cards": [{"biz_id": created["app_feed_card"]["biz_id"], "user_id": "u1"}]}
     ]
+
+
+async def _long_done_item(factory, bot, *, group: bool):
+    async with factory() as session:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key="9:send:long_done",
+            target={"chat_id": "oc_g1"},
+            payload={
+                "markdown": "✅ 回复已生成（耗时 133 秒），请查看上方内容。",
+                "_long_done": {"user": "u1", "task_id": 9, "seconds": 133, "group": group},
+            },
+        )
+        await session.commit()
+
+
+class NamedChat(FakeAPI):
+    async def call(self, method, path, **kwargs):
+        if path == "/open-apis/im/v1/chats/oc_g1":
+            self.calls.append((method, path, {}))
+            return {"data": {"name": "对接群"}}
+        return await super().call(method, path, **kwargs)
+
+
+async def test_long_task_done_becomes_a_notifying_feed_card_not_a_chat_message(
+    db_session, db_engine
+):
+    """长任务完成提醒：只给提问人一张会提醒的「已完成」卡片，群里不多发；24 小时后删卡。"""
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), NamedChat()
+    await _long_done_item(factory, bot, group=True)
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    [created] = [b for m, p, b in api.calls if p == "/open-apis/im/v2/app_feed_card"]
+    card = created["app_feed_card"]
+    assert created["user_ids"] == ["u1"] and card["biz_id"] == "coreman-task-9-done"
+    assert card["status_label"] == {"text": "已完成", "type": "success"}
+    assert card["preview"] == "耗时 133 秒 · 对接群 · 点开查看"
+    assert card["notify"] == {"close_notify": False}
+    assert card["link"]["link"] == "http://localhost/api/feishu/open?chat=oc_g1"
+    assert not [p for _, p, _ in api.calls if p == "/open-apis/im/v1/messages"]
+    async with factory() as session:
+        cleanup = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == "feed_done_delete:9")
+        )
+        assert cleanup.payload == {"_feed_delete": {"biz": "coreman-task-9-done", "user": "u1"}}
+        assert cleanup.not_before > datetime.now(UTC) + timedelta(hours=23)
+        cleanup.not_before = datetime.now(UTC)
+        await session.commit()
+    await transport.round()
+    deleted = [b for m, p, b in api.calls if m == "DELETE"]
+    assert deleted == [{"feed_cards": [{"biz_id": "coreman-task-9-done", "user_id": "u1"}]}]
+
+
+class NoFeedCard(FakeAPI):
+    async def call(self, method, path, **kwargs):
+        if path == "/open-apis/im/v2/app_feed_card":
+            self.calls.append((method, path, kwargs.get("json") or {}))
+            raise FeishuError(99991672)
+        return await super().call(method, path, **kwargs)
+
+
+async def test_long_task_done_falls_back_to_a_chat_message_without_feed_card(db_session, db_engine):
+    """卡片建不成（缺权限）：照旧在会话里发完成消息；私聊不读群名。"""
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), NoFeedCard()
+    await _long_done_item(factory, bot, group=False)
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    assert not [p for _, p, _ in api.calls if p.startswith("/open-apis/im/v1/chats/")]
+    [sent] = [b for _, p, b in api.calls if p == "/open-apis/im/v1/messages"]
+    assert sent["receive_id"] == "oc_g1" and "133 秒" in sent["content"]
+    async with factory() as session:
+        assert not await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == "feed_done_delete:9")
+        )
 
 
 class NoMediaCard(FakeAPI):

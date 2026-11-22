@@ -409,7 +409,7 @@ class FeishuTransport:
         return title
 
     async def long_task_feed(self, row: TaskStream, delivery: FeishuDelivery) -> None:
-        """对话回复跑满 3 分钟：给提问人建一张「进行中」的消息流卡片，之后预览跟着最后动作走。"""
+        """对话回复跑满 1 分钟：给提问人建一张「进行中」的消息流卡片，之后预览跟着最后动作走。"""
         requester = _requester(row)
         if requester is None or row.running_since is None:
             return
@@ -425,6 +425,7 @@ class FeishuTransport:
                 title=f"{self.bot_name}：正在处理你的请求",
                 preview=preview,
                 status=("进行中", "primary"),
+                chat_id=str(row.reply_context.get("chat_id") or "") or None,
             )
             state["feed"] = {"ok": created, "preview": preview}
         elif state["feed"].get("ok") and state["feed"].get("preview") != preview:
@@ -444,7 +445,11 @@ class FeishuTransport:
     async def finish_long_task(
         self, session: AsyncSession, row: TaskStream, delivery: FeishuDelivery
     ) -> None:
-        """回复做完：删掉「进行中」卡片；私聊里跑满 3 分钟的，把会话在消息列表临时置顶。"""
+        """回复做完：删掉「进行中」卡片；私聊里跑满 1 分钟的，把会话在消息列表临时置顶。
+
+        「已完成」卡片不在这里建：成功与否、算不算长任务由 worker 判定，它发来的完成提醒带着
+        `_long_done`，见 `long_done_feed`。
+        """
         requester = _requester(row)
         if requester is None:
             return
@@ -464,7 +469,8 @@ class FeishuTransport:
                 bot_id=self.bot_id,
                 platform="feishu",
                 kind="send",
-                dedupe_key=f"{row.task_id}:unpin",
+                # 不以「任务号:」开头：不进这个任务的投递分组，免得 6 小时后才轮到完成提醒。
+                dedupe_key=f"unpin:{row.task_id}",
                 target={"user_id": requester},
                 payload={"_unpin": requester},
                 not_before=datetime.now(UTC) + timedelta(seconds=feed.PIN_SECONDS),
@@ -1212,6 +1218,12 @@ class FeishuTransport:
             self._pinned.discard(item.payload["_unpin"])
             await feed.pin(self, item.payload["_unpin"], False)
             return
+        if isinstance(item.payload.get("_feed_delete"), dict):
+            marker = item.payload["_feed_delete"]
+            await feed.delete(self, biz_id=str(marker.get("biz")), user_id=str(marker.get("user")))
+            return
+        if isinstance(item.payload.get("_long_done"), dict) and await self.long_done_feed(item):
+            return
         if isinstance(item.payload.get("_file"), dict):
             item.payload = {
                 **item.payload,
@@ -1400,8 +1412,58 @@ class FeishuTransport:
             title=f"{self.bot_name}：有一项操作等你确认",
             preview=title or "点开会话处理",
             status=("待确认", "danger"),
+            chat_id=str(item.target.get("chat_id") or "") or None,
         ):
             item.payload = {**item.payload, "_feed": {"biz": biz, "user": user}}
+
+    async def long_done_feed(self, item: OutboxItem) -> bool:
+        """长任务完成提醒：给提问人建一张会提醒的「已完成」消息流卡片，代替往会话里再发一条。
+
+        只有提问人收到，群里不多一条消息；点开进这个会话。卡片建不成（缺权限等）返回 False，
+        照旧把 `markdown` 那条完成消息发到会话里。卡片 24 小时后删掉。
+        """
+        meta = item.payload["_long_done"]
+        user, task_id = meta.get("user"), meta.get("task_id")
+        chat = str(item.target.get("chat_id") or "")
+        if not isinstance(user, str) or not user or not isinstance(task_id, int) or not chat:
+            return False
+        preview = f"耗时 {meta.get('seconds')} 秒"
+        if meta.get("group") and (name := await self.chat_name(chat)):
+            preview += f" · {name}"
+        biz = feed.done_biz(task_id)
+        if not await feed.create(
+            self,
+            biz_id=biz,
+            user_id=user,
+            title=f"{self.bot_name}：回复已生成",
+            preview=f"{preview} · 点开查看",
+            status=("已完成", "success"),
+            chat_id=chat,
+            notify=True,
+        ):
+            return False
+        async with self.factory() as session:
+            await outbox.add(
+                session,
+                bot_id=self.bot_id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"feed_done_delete:{task_id}",
+                target={"user_id": user},
+                payload={"_feed_delete": {"biz": biz, "user": user}},
+                not_before=datetime.now(UTC) + timedelta(seconds=feed.DONE_SECONDS),
+            )
+            await session.commit()
+        return True
+
+    async def chat_name(self, chat_id: str) -> str:
+        """群名；读不到（缺权限、机器人已出群）时返回空串。"""
+        try:
+            result = await self.call("GET", f"/open-apis/im/v1/chats/{api_id(chat_id)}")
+        except FeishuError as exc:
+            log.info("feishu_chat_name_failed", code=exc.code)
+            return ""
+        return str((result.get("data") or {}).get("name") or "")
 
     async def _initiator(self, card: dict[str, Any]) -> str | None:
         """确认卡的发起人：卡片 task_id 是 `personal:<发起那条消息的任务>`。"""
