@@ -81,6 +81,14 @@ async def _submit(
         values = json.loads(ctx.cipher.decrypt(sealed, policy.sealed_aad(request_id)))
     except (DecryptError, ValueError):
         return "ignored"
+    if not isinstance(values, dict):
+        return "ignored"
+    # 「选已有凭证」下拉框和输入框在同一张表单里，按名字前缀分开。
+    picks = {
+        key[len(policy.PICK_PREFIX) :]: value
+        for key, value in values.items()
+        if key.startswith(policy.PICK_PREFIX) and value
+    }
     try:
         result = await service.submit(
             session,
@@ -88,6 +96,7 @@ async def _submit(
             request_id,
             actor_id=speaker.user_id,
             values=values,
+            picks=picks,
             limit=policy.FEISHU_MAX_VALUE,
         )
     except CredentialError as exc:

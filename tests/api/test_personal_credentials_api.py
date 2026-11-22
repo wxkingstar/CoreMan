@@ -5,11 +5,12 @@ from datetime import timedelta
 
 from sqlalchemy import func, select, update
 
-from coreman.core.db.models import CredentialRequest, User
+from coreman.core.db.models import BotAllowedUser, CredentialRequest, User
 from coreman.core.personal_credentials import policy, store
 from coreman.core.timeutils import utcnow
 from tests.api.conftest import login_existing
 from tests.integration.credential_helpers import BODY, VALUES, cap_for, cron_cap, login_app, owner
+from tests.integration.test_group_dispatch import another_bot
 
 URL = "/api/runtime/credentials/requests"
 
@@ -185,3 +186,88 @@ async def test_one_time_request_from_a_scheduled_run_is_422(client, app, db_sess
     once = {k: v for k, v in BODY.items() if k != "save"}
     r = await client.post(URL, json=once, headers=_bearer(app, cron_cap(bot, user, task)))
     assert r.status_code == 422 and "save" in r.json()["message"]
+
+
+async def test_web_form_offers_existing_credentials_and_submits_a_pick(client, app, db_session):
+    await login_app(db_session, "wecom")
+    bot, user, task, rid = await _requested(client, app, db_session, platform="wecom")
+    other = await another_bot(db_session, bot, "ops_bot", "运营")
+    pin = await store.create(
+        db_session,
+        app.state.cipher,
+        user_id=user.id,
+        env_key="DEMO_PIN",
+        label="PIN",
+        secret=True,
+        value="pin-778899",
+    )
+    await store.bind(db_session, pin, bot_id=other.id, env_key="DEMO_PIN")
+    await db_session.commit()
+    await login_existing(client, db_session, user)
+    got = await client.get(f"/api/me/credential-requests/{rid}")
+    data = got.json()["data"]
+    assert data["choices"] == {
+        "DEMO_PIN": [{"id": str(pin.id), "label": "PIN", "env_key": "DEMO_PIN", "bots": ["运营"]}]
+    }
+    assert data["defaults"] == {"DEMO_PIN": str(pin.id)}
+    assert "pin-778899" not in got.text
+    saved = await client.post(
+        f"/api/me/credential-requests/{rid}/submit",
+        json={"values": {"DEMO_USERNAME": "alice"}, "use": {"DEMO_PIN": str(pin.id)}},
+    )
+    assert saved.status_code == 200, saved.text
+    found = await store.injected(db_session, app.state.cipher, bot_id=bot.id, user_id=user.id)
+    assert found.env == {"DEMO_PIN": "pin-778899", "DEMO_USERNAME": "alice"}
+
+
+async def test_credential_items_bind_update_and_delete(client, app, db_session):
+    bot, user, _, cipher = await owner(db_session)
+    other = await another_bot(db_session, bot, "ops_bot", "运营")
+    hidden = await another_bot(db_session, bot, "hr_bot", "人事")
+    stranger = User(login_name="stranger", display_name="别人", source="sync")
+    db_session.add(stranger)
+    await db_session.flush()
+    db_session.add(BotAllowedUser(bot_id=hidden.id, user_id=stranger.id))
+    await store.save(
+        db_session,
+        cipher,
+        bot_id=bot.id,
+        user_id=user.id,
+        fields=[{"key": "DEMO_PIN", "label": "PIN", "secret": True}],
+        values={"DEMO_PIN": "pin-778899"},
+    )
+    await db_session.commit()
+    await login_existing(client, db_session, user)
+    bots = (await client.get("/api/me/credential-bots")).json()["data"]
+    # 白名单里没有本人的 AI 员工不能选。
+    assert [b["name"] for b in bots] == ["运营", "销售"]
+    [item] = (await client.get("/api/me/credential-items")).json()["data"]
+    assert [b["bot_name"] for b in item["bindings"]] == ["销售"] and item["value"] is None
+    url = f"/api/me/credential-items/{item['id']}"
+    denied = await client.put(f"{url}/bots", json={"bot_ids": [str(bot.id), str(hidden.id)]})
+    assert denied.status_code == 403
+    bound = await client.put(f"{url}/bots", json={"bot_ids": [str(bot.id), str(other.id)]})
+    assert bound.status_code == 200, bound.text
+    assert [b["bot_name"] for b in bound.json()["data"]["bindings"]] == ["运营", "销售"]
+    found = await store.injected(db_session, cipher, bot_id=other.id, user_id=user.id)
+    # 注入会更新使用时间：提交掉，免得测试会话占着绑定的行锁。
+    await db_session.commit()
+    assert found.env == {"DEMO_PIN": "pin-778899"}
+    # 旧的逐行列表在每个 AI 员工下各出现一次，带上同一个凭证 ID。
+    flat = (await client.get("/api/me/credentials")).json()["data"]
+    assert {r["credential_id"] for r in flat} == {item["id"]} and len(flat) == 2
+    put = await client.put(url, json={"value": "pin-000111"})
+    assert put.status_code == 200 and "pin-000111" not in put.text
+    found = await store.injected(db_session, cipher, bot_id=bot.id, user_id=user.id)
+    await db_session.commit()
+    assert found.env == {"DEMO_PIN": "pin-000111"}
+    unbound = await client.put(f"{url}/bots", json={"bot_ids": []})
+    assert unbound.json()["data"]["bindings"] == []
+    # 别人动不了。
+    await login_existing(client, db_session, stranger)
+    assert (await client.put(url, json={"value": "x"})).status_code == 404
+    assert (await client.put(f"{url}/bots", json={"bot_ids": []})).status_code == 404
+    assert (await client.delete(url)).status_code == 404
+    await login_existing(client, db_session, user)
+    assert (await client.delete(url)).status_code == 200
+    assert (await client.get("/api/me/credential-items")).json()["data"] == []

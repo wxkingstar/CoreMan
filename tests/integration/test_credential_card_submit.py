@@ -17,7 +17,7 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
 )
-from coreman.core.personal_credentials import policy, service
+from coreman.core.personal_credentials import policy, service, store
 from coreman.runtime.worker.card_actions import CardActionHandler
 from tests.integration.credential_helpers import BODY, VALUES, cap_for, owner, seed_chat_session
 from tests.integration.worker_helpers import build_ctx
@@ -191,3 +191,30 @@ async def test_click_on_a_card_sent_to_a_user_id_is_matched_by_clicker(
     await CardActionHandler().run(build_ctx(db_engine, click))
     done = await db_session.get(Task, click.id, populate_existing=True)
     assert done.result == {"card": result}
+
+
+async def test_card_pick_binds_an_existing_credential(db_session, db_engine):
+    bot, user, cipher, row = await _prepared(db_session)
+    from tests.integration.test_group_dispatch import another_bot
+
+    other = await another_bot(db_session, bot, "ops_bot", "运营")
+    await store.save(
+        db_session,
+        cipher,
+        bot_id=other.id,
+        user_id=user.id,
+        fields=[{"key": "DEMO_PIN", "label": "PIN", "secret": True}],
+        values={"DEMO_PIN": "pin-778899"},
+    )
+    await db_session.commit()
+    pin = await store.bound_credential(
+        db_session, bot_id=other.id, user_id=user.id, env_key="DEMO_PIN"
+    )
+    values = {"DEMO_USERNAME": "alice", "pick__DEMO_PIN": str(pin.id)}
+    ev, click = await _click(db_session, cipher, bot, row.id, values)
+    await CardActionHandler().run(build_ctx(db_engine, click))
+    await db_session.refresh(row)
+    assert row.status == "submitted"
+    found = await store.injected(db_session, cipher, bot_id=bot.id, user_id=user.id)
+    assert found.env == {"DEMO_PIN": "pin-778899", "DEMO_USERNAME": "alice"}
+    assert not await _sealed_left(db_session, ev, click)

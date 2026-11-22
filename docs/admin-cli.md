@@ -484,6 +484,8 @@ coreman me credential-submit <表单 id> --values-file values.json --as alice
 
 AI 员工写名称或 id。`--values-file` 是 JSON 对象 `{"变量名": "值"}`，默认从标准输入读。
 
+一条凭证可以绑给多个 AI 员工（在网页「我的凭证」里设置）：列表按 AI 员工逐行列出，共用的凭证在每个 AI 员工下各出现一次；`credential-set` 改的是这条凭证本身，用它的 AI 员工一起生效；`credential-delete` 只让这个 AI 员工不再用它，没有别的 AI 员工在用时才删除凭证。
+
 飞书个人授权与企业微信绑定：
 
 ```bash

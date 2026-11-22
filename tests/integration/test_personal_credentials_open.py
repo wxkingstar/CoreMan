@@ -11,7 +11,7 @@ from sqlalchemy import delete, select, text
 from coreman.core.bus import tasks
 from coreman.core.db.models import CredentialRequest, OutboxItem, UserIdentity
 from coreman.core.db.session import make_session_factory
-from coreman.core.personal_credentials import service
+from coreman.core.personal_credentials import service, store
 from coreman.core.personal_credentials.policy import CredentialError
 from tests.integration.credential_helpers import (
     BODY,
@@ -233,3 +233,43 @@ async def test_capability_dies_with_its_turn_and_fields_are_checked(db_session):
     with pytest.raises(CredentialError) as ended:
         await service.open_request(db_session, cipher, cap, BODY, base_url=BASE)
     assert ended.value.code == "inactive"
+
+
+async def _saved_elsewhere(session, bot, user, cipher):
+    """本人在另一个 AI 员工那里已经存过同名的 PIN。"""
+    from tests.integration.test_group_dispatch import another_bot
+
+    other = await another_bot(session, bot, "ops_bot", "运营")
+    await store.save(
+        session,
+        cipher,
+        bot_id=other.id,
+        user_id=user.id,
+        fields=[{"key": "DEMO_PIN", "label": "PIN", "secret": True}],
+        values={"DEMO_PIN": "pin-778899"},
+    )
+    await session.commit()
+    return other
+
+
+async def test_private_form_offers_existing_credentials(db_session):
+    bot, user, task, cipher = await owner(db_session)
+    await _saved_elsewhere(db_session, bot, user, cipher)
+    await service.open_request(db_session, cipher, cap_for(bot, user, task), BODY, base_url=BASE)
+    await db_session.commit()
+    [item] = (await db_session.scalars(select(OutboxItem))).all()
+    text = json.dumps(item.payload, ensure_ascii=False)
+    assert '"pick__DEMO_PIN"' in text and "PIN（DEMO_PIN）" in text
+    assert "pin-778899" not in text and '"pick__DEMO_USERNAME"' not in text
+
+
+async def test_forms_in_groups_and_one_time_forms_offer_nothing(db_session):
+    bot, user, task, cipher = await owner(db_session, chat_type="group", reached=False)
+    await _saved_elsewhere(db_session, bot, user, cipher)
+    await service.open_request(db_session, cipher, cap_for(bot, user, task), BODY, base_url=BASE)
+    once = {**BODY, "save": False, "purpose": "写进配置"}
+    await service.open_request(db_session, cipher, cap_for(bot, user, task), once, base_url=BASE)
+    await db_session.commit()
+    items = (await db_session.scalars(select(OutboxItem))).all()
+    assert len(items) == 2
+    assert "pick__" not in json.dumps([i.payload for i in items], ensure_ascii=False)

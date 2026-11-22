@@ -11,6 +11,8 @@ const route = useRoute()
 const id = computed(() => String(route.params.id))
 const form = ref<CredentialRequest | null>(null)
 const values = reactive<Record<string, string>>({})
+/** 选用的已有凭证：{变量名: 凭证 ID}。同一项又填了值时以填的为准。 */
+const picks = reactive<Record<string, string>>({})
 const error = ref('')
 const busy = ref(false)
 const saved = ref(false)
@@ -18,21 +20,31 @@ const saved = ref(false)
 const outcome = ref('')
 /** 一次性交付不保存：标题和结果都不能说「个人凭证」「已保存」。 */
 const once = computed(() => form.value?.save === false)
+const choices = (key: string) => form.value?.choices?.[key] ?? []
 
 async function load() {
   busy.value = true
-  try { form.value = await personalCredentials.request(id.value); error.value = '' }
+  try {
+    form.value = await personalCredentials.request(id.value)
+    Object.assign(picks, form.value.defaults ?? {})
+    error.value = ''
+  }
   catch (e) { error.value = errorMessage(e) || t('credentialRequest.loadError') }
   finally { busy.value = false }
 }
 /** 提交成功后立即清空输入框：值只在这一次请求里离开浏览器。 */
 async function submit() {
   if (!form.value || busy.value) return
-  const missing = form.value.fields.find(f => !(values[f.key] ?? '').trim())
+  const typed = (key: string) => !!(values[key] ?? '').trim()
+  const missing = form.value.fields.find(f => !typed(f.key) && !picks[f.key])
   if (missing) { error.value = t('credentialRequest.required', { label: missing.label }); return }
   busy.value = true
   try {
-    const result = await personalCredentials.submit(id.value, Object.fromEntries(form.value.fields.map(f => [f.key, values[f.key]])))
+    const result = await personalCredentials.submit(
+      id.value,
+      Object.fromEntries(form.value.fields.filter(f => typed(f.key)).map(f => [f.key, values[f.key]])),
+      Object.fromEntries(form.value.fields.filter(f => !typed(f.key) && picks[f.key]).map(f => [f.key, picks[f.key]])),
+    )
     outcome.value = result.message
     for (const key of Object.keys(values)) values[key] = ''
     saved.value = true
@@ -81,12 +93,34 @@ onMounted(load)
           :key="field.key"
           :label="field.label"
         >
+          <el-select
+            v-if="choices(field.key).length"
+            v-model="picks[field.key]"
+            class="pick"
+            :data-test="'pick-' + field.key"
+            clearable
+            filterable
+            :placeholder="t('credentialRequest.pick')"
+          >
+            <el-option
+              v-for="choice in choices(field.key)"
+              :key="choice.id"
+              :label="`${choice.label || choice.env_key}（${choice.env_key}）`"
+              :value="choice.id"
+            >
+              <span>{{ choice.label || choice.env_key }}（{{ choice.env_key }}）</span>
+              <span
+                v-if="choice.bots.length"
+                class="muted used-by"
+              >{{ t('credentialRequest.usedBy', { bots: choice.bots.join('、') }) }}</span>
+            </el-option>
+          </el-select>
           <el-input
             v-model="values[field.key]"
             :data-test="'field-' + field.key"
             :type="field.secret ? 'password' : 'text'"
             :show-password="field.secret"
-            :placeholder="field.placeholder"
+            :placeholder="picks[field.key] ? t('credentialRequest.orTypeNew') : field.placeholder"
             :maxlength="4096"
             :autocomplete="field.secret ? 'new-password' : 'off'"
           />
@@ -112,4 +146,6 @@ onMounted(load)
 .credential-request { max-width: 560px; }
 .muted, .note { color: var(--el-text-color-secondary); }
 .note { font-size: 12px; margin-top: 16px; }
+.pick { width: 100%; margin-bottom: 8px; }
+.used-by { float: right; margin-left: 12px; font-size: 12px; }
 </style>

@@ -3,7 +3,7 @@
 import json
 import uuid
 
-from coreman.core.personal_credentials import cards
+from coreman.core.personal_credentials import cards, store
 
 RID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 FIELDS = [
@@ -134,3 +134,27 @@ def test_one_time_resume_text():
     text = cards.resume_text(["DEMO_PIN"], "帮我配一下", save=False)
     assert text.startswith("[CoreMan] 用户已通过安全表单提交一次性密钥 DEMO_PIN")
     assert "本轮结束即删除" in text and text.endswith("请继续完成用户的这条原始请求：帮我配一下")
+
+
+def test_form_card_offers_existing_credentials_without_values():
+    choice = store.Choice(uuid.uuid4(), "PIN", "DEMO_PIN", ("运营",))
+    card = cards.form_card(
+        RID,
+        bot_name="B",
+        purpose="p",
+        fields=FIELDS,
+        choices={"DEMO_PIN": [choice]},
+        defaults={"DEMO_PIN": choice.id},
+    )
+    [pick] = [n for n in _walk(card) if n.get("tag") == "select_static"]
+    assert pick["name"] == "pick__DEMO_PIN" and pick["required"] is False
+    assert pick["initial_option"] == str(choice.id)
+    assert pick["options"] == [
+        {"text": {"tag": "plain_text", "content": "PIN（DEMO_PIN）"}, "value": str(choice.id)}
+    ]
+    inputs = {n["name"]: n for n in _walk(card) if n.get("tag") == "input"}
+    # 有候选的字段可以不填；没有候选的照旧必填。
+    assert inputs["DEMO_PIN"]["required"] is False and inputs["DEMO_USERNAME"]["required"] is True
+    form = next(n for n in _walk(card) if n.get("tag") == "form")
+    names = [e.get("name") for e in form["elements"]]
+    assert names.index("pick__DEMO_PIN") == names.index("DEMO_PIN") - 1

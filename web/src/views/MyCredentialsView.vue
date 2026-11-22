@@ -2,27 +2,28 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { personalCredentials, type PersonalCredential } from '@/api/personalCredentials'
+import { personalCredentials, type CredentialBot, type CredentialItem } from '@/api/personalCredentials'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
 
 const { t } = useI18n()
-const rows = ref<PersonalCredential[]>([])
+const rows = ref<CredentialItem[]>([])
+const bots = ref<CredentialBot[]>([])
 const error = ref('')
 const busy = ref(false)
-const groups = computed(() => {
-  const byBot = new Map<string, { id: string; bot: string; items: PersonalCredential[] }>()
-  for (const row of rows.value) {
-    const group = byBot.get(row.bot_id) ?? { id: row.bot_id, bot: row.bot_name, items: [] }
-    group.items.push(row)
-    byBot.set(row.bot_id, group)
-  }
-  return [...byBot.values()]
+/** 可选的 AI 员工，加上已经绑着、但现在不在可选范围里的（例如白名单变了），标签才显示得出名字。 */
+const botOptions = computed(() => {
+  const options = new Map(bots.value.map(b => [b.id, b.name]))
+  for (const row of rows.value) for (const b of row.bindings) if (!options.has(b.bot_id)) options.set(b.bot_id, b.bot_name)
+  return [...options].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
 })
+const botName = (id: string) => botOptions.value.find(b => b.id === id)?.name ?? id
 async function load() {
   busy.value = true
-  try { rows.value = await personalCredentials.list(); error.value = '' }
-  catch (e) { error.value = errorMessage(e) }
+  try {
+    const [items, options] = await Promise.all([personalCredentials.items(), personalCredentials.bots()])
+    rows.value = items; bots.value = options; error.value = ''
+  } catch (e) { error.value = errorMessage(e) }
   finally { busy.value = false }
 }
 /** 取消确认框不算失败。 */
@@ -32,18 +33,34 @@ async function act(action: () => Promise<unknown>, done: string) {
   catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
   finally { busy.value = false }
 }
-const name = (row: PersonalCredential) => row.label || row.env_key
-const update = (row: PersonalCredential) => act(async () => {
+const name = (row: CredentialItem) => row.label || row.env_key
+const boundIds = (row: CredentialItem) => row.bindings.map(b => b.bot_id)
+/** 表单里选用时变量名与凭证自己的不同的绑定：标出在那个 AI 员工里叫什么。 */
+const aliases = (row: CredentialItem) => row.bindings.filter(b => b.env_key !== row.env_key)
+/** 新加的 AI 员工上同名变量已经在用别的凭证：先说清楚会被替换。 */
+function replaced(row: CredentialItem, added: string[]) {
+  return rows.value.flatMap(other => other.id === row.id ? [] : other.bindings
+    .filter(b => added.includes(b.bot_id) && b.env_key === row.env_key)
+    .map(b => t('myCredentials.replaces', { bot: b.bot_name, key: b.env_key, label: name(other) })))
+}
+const changeBots = (row: CredentialItem, ids: string[]) => act(async () => {
+  const added = ids.filter(id => !boundIds(row).includes(id))
+  const notes = replaced(row, added)
+  if (notes.length) await ElMessageBox.confirm(notes.join('\n'), t('myCredentials.replaceTitle'), { type: 'warning' })
+  await personalCredentials.setBots(row.id, ids)
+}, 'myCredentials.bound')
+const update = (row: CredentialItem) => act(async () => {
+  const shared = row.bindings.length > 1 ? t('myCredentials.updateShared', { bots: row.bindings.map(b => b.bot_name).join('、') }) : ''
   const { value } = await ElMessageBox.prompt(
-    t('myCredentials.updatePrompt'),
+    t('myCredentials.updatePrompt') + shared,
     t('myCredentials.updateTitle', { label: name(row) }),
     { inputType: row.secret ? 'password' : 'text', inputValidator: (v: string) => !!v && !!v.trim() },
   )
-  await personalCredentials.update(row.bot_id, row.env_key, value)
+  await personalCredentials.updateItem(row.id, value)
 }, 'myCredentials.updated')
-const remove = (row: PersonalCredential) => act(async () => {
+const remove = (row: CredentialItem) => act(async () => {
   await ElMessageBox.confirm(t('myCredentials.confirmDelete', { label: name(row), key: row.env_key }), t('myCredentials.delete'), { type: 'warning' })
-  await personalCredentials.remove(row.bot_id, row.env_key)
+  await personalCredentials.removeItem(row.id)
 }, 'myCredentials.deleted')
 onMounted(load)
 </script>
@@ -67,64 +84,97 @@ onMounted(load)
       v-if="!busy && !rows.length"
       :description="t('myCredentials.empty')"
     />
-    <article
-      v-for="group in groups"
-      :key="group.id"
-      class="group"
+    <el-table
+      v-else
+      class="table"
+      :data="rows"
+      row-key="id"
     >
-      <h2>{{ group.bot }}</h2>
-      <el-table
-        :data="group.items"
-        row-key="env_key"
+      <el-table-column
+        :label="t('myCredentials.label')"
+        prop="label"
+        min-width="120"
+      />
+      <el-table-column
+        :label="t('myCredentials.key')"
+        min-width="150"
       >
-        <el-table-column
-          :label="t('myCredentials.label')"
-          prop="label"
-        />
-        <el-table-column :label="t('myCredentials.key')">
-          <template #default="{ row }">
-            <code>{{ row.env_key }}</code>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('myCredentials.value')">
-          <template #default="{ row }">
-            {{ row.secret ? t('myCredentials.hidden') : row.value }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('myCredentials.updatedAt')">
-          <template #default="{ row }">
-            {{ formatDateTime(row.updated_at) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('myCredentials.lastUsedAt')">
-          <template #default="{ row }">
-            {{ row.last_used_at ? formatDateTime(row.last_used_at) : t('myCredentials.never') }}
-          </template>
-        </el-table-column>
-        <el-table-column width="160">
-          <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              :data-test="'update-' + row.env_key"
-              @click="update(row)"
-            >
-              {{ t('myCredentials.update') }}
-            </el-button>
-            <el-button
-              link
-              type="danger"
-              :data-test="'delete-' + row.env_key"
-              @click="remove(row)"
-            >
-              {{ t('myCredentials.delete') }}
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </article>
+        <template #default="{ row }">
+          <code>{{ row.env_key }}</code>
+        </template>
+      </el-table-column>
+      <el-table-column
+        :label="t('myCredentials.value')"
+        min-width="120"
+      >
+        <template #default="{ row }">
+          {{ row.secret ? t('myCredentials.hidden') : row.value }}
+        </template>
+      </el-table-column>
+      <el-table-column
+        :label="t('myCredentials.bots')"
+        min-width="260"
+      >
+        <template #default="{ row }">
+          <el-select
+            :model-value="boundIds(row)"
+            :data-test="'bots-' + row.id"
+            multiple
+            filterable
+            :disabled="busy"
+            :placeholder="t('myCredentials.unbound')"
+            @update:model-value="(ids: string[]) => changeBots(row, ids)"
+          >
+            <el-option
+              v-for="bot in botOptions"
+              :key="bot.id"
+              :label="bot.name"
+              :value="bot.id"
+            />
+          </el-select>
+          <div
+            v-for="b in aliases(row)"
+            :key="b.bot_id"
+            class="alias"
+          >
+            {{ t('myCredentials.alias', { bot: botName(b.bot_id), key: b.env_key }) }}
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column :label="t('myCredentials.updatedAt')">
+        <template #default="{ row }">
+          {{ formatDateTime(row.updated_at) }}
+        </template>
+      </el-table-column>
+      <el-table-column :label="t('myCredentials.lastUsedAt')">
+        <template #default="{ row }">
+          {{ row.last_used_at ? formatDateTime(row.last_used_at) : t('myCredentials.never') }}
+        </template>
+      </el-table-column>
+      <el-table-column width="140">
+        <template #default="{ row }">
+          <el-button
+            link
+            type="primary"
+            :data-test="'update-' + row.id"
+            @click="update(row)"
+          >
+            {{ t('myCredentials.update') }}
+          </el-button>
+          <el-button
+            link
+            type="danger"
+            :data-test="'delete-' + row.id"
+            @click="remove(row)"
+          >
+            {{ t('myCredentials.delete') }}
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
   </section>
 </template>
 <style scoped>
-.group { margin-top: 24px; }
+.table { margin-top: 16px; }
+.alias { color: var(--el-text-color-secondary); font-size: 12px; margin-top: 4px; }
 </style>

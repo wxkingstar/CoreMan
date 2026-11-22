@@ -298,6 +298,7 @@ from coreman.core.db.models.group_observe import (
 from coreman.core.db.models.personal_credentials import (
     CREDENTIAL_ORIGINS,
     CREDENTIAL_REQUEST_STATUSES,
+    CredentialBinding,
     CredentialRequest,
     PersonalCredential,
 )
@@ -320,6 +321,7 @@ __all__ += ["WORK_TASK_STATUSES", "WorkTask", "WorkTaskEvent"]
 __all__ += [
     "CREDENTIAL_ORIGINS",
     "CREDENTIAL_REQUEST_STATUSES",
+    "CredentialBinding",
     "CredentialRequest",
     "PersonalCredential",
 ]
