@@ -35,6 +35,7 @@ from coreman.api.routers import (
     feishu_apps,
     feishu_docs,
     feishu_link_preview,
+    feishu_open,
     feishu_personal,
     health,
     health_report,
@@ -149,6 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(cloud_proxy.router)
     app.include_router(tower_callback.router)
     app.include_router(feishu_link_preview.router)
+    app.include_router(feishu_open.router)
     app.include_router(systems_catalog.admin_router)
     app.include_router(infra_relay.router)
     app.include_router(auth.public_router)

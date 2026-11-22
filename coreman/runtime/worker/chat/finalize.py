@@ -606,6 +606,9 @@ class FinalizeStage(ChatStageBase):
         完成。只有终稿仍由网关按流收尾（`delivery_mode=stream`）才需要：主动推送与后台切换
         那几路的终稿本身就是一条新消息，已经会提醒；提问轮的卡片同理，出错 / 被停不算完成。
         群聊与私聊一样直接发到会话里，不 @ 发言者。
+
+        飞书带上 `_long_done`：网关改成只给提问人一张会提醒的「已完成」消息流卡片，会话里
+        不再多一条；卡片建不成时照旧发 `markdown` 这条。
         """
         if (
             verdict.log_status != "success"
@@ -614,6 +617,15 @@ class FinalizeStage(ChatStageBase):
         ):
             return
         delay = timedelta(seconds=self.LONG_TASK_NOTICE_DELAY_SECONDS)
+        payload: dict[str, Any] = {"markdown": msg("long_task_done", ctx.locale, seconds=elapsed)}
+        if pre.intake.bot.platform == "feishu" and pre.intake.speaker.platform_user_id:
+            chat_type = (pre.intake.inbound.reply_context or {}).get("chat_type")
+            payload["_long_done"] = {
+                "user": pre.intake.speaker.platform_user_id,
+                "task_id": ctx.task.id,
+                "seconds": elapsed,
+                "group": chat_type == "group",
+            }
         async with ctx.session_factory() as session:
             await outbox.add(
                 session,
@@ -622,7 +634,7 @@ class FinalizeStage(ChatStageBase):
                 kind="send",
                 dedupe_key=f"{ctx.task.id}:send:long_done",
                 target={"chat_id": pre.intake.chat_id},
-                payload={"markdown": msg("long_task_done", ctx.locale, seconds=elapsed)},
+                payload=payload,
                 not_before=datetime.now(UTC) + delay,
             )
             await session.commit()

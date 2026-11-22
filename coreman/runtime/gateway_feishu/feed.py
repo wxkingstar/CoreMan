@@ -1,8 +1,9 @@
 """消息列表里的提醒：长任务和等本人确认的事项，不打开会话也看得到。
 
-- 应用消息流卡片（`im/v2/app_feed_card`，权限 `im:app_feed_card:write`）：跑满 3 分钟的对话回复
-  建一张「进行中」卡片，结束时删掉；等本人点的确认卡建一张「待确认」卡片，点过（卡片被更新）后删掉。
-  卡片点开就是和这个 AI 员工的私聊。
+- 应用消息流卡片（`im/v2/app_feed_card`，权限 `im:app_feed_card:write`）：跑满 1 分钟的对话回复
+  建一张「进行中」卡片，结束时删掉；正常做完的再建一张「已完成」卡片（会提醒，代替往会话里另发一条
+  完成消息，见 worker 的 `_notify_long_task`），24 小时后删掉；等本人点的确认卡建一张「待确认」
+  卡片，点过（卡片被更新）后删掉。卡片点开经平台跳转进对应会话（core/feishu_open）。
 - 机器人单聊即时提醒（`im/v2/feed_cards/bot_time_sentive`，权限
   `im:datasync.feed_card.time_sensitive:write`）：私聊里的长任务做完，把这个会话在消息列表临时置顶；
   本人下一次发消息、或 6 小时后取消置顶。不加急（用户决定）。
@@ -14,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
 
+from coreman.core import feishu_open
+from coreman.core.config import get_settings
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuError
 
@@ -26,8 +28,10 @@ log = get_logger(__name__)
 
 FEED_PATH = "/open-apis/im/v2/app_feed_card"
 PIN_PATH = "/open-apis/im/v2/feed_cards/bot_time_sentive"
-# 对话回复跑满这么久才算长任务：建「进行中」卡片、做完置顶。
-LONG_TASK_SECONDS = 180
+# 对话回复跑满这么久才算长任务：建「进行中」卡片、做完置顶（和 worker 的完成提醒同一门槛）。
+LONG_TASK_SECONDS = 60
+# 「已完成」卡片保留这么久，之后删掉，免得消息列表越积越多。
+DONE_SECONDS = 24 * 60 * 60
 # 置顶最多保留这么久（本人没来看也取消）。
 PIN_SECONDS = 6 * 60 * 60
 # 批量更新接口 update_fields 里「预览」的编号。
@@ -36,13 +40,18 @@ TITLE_CHARS = 60
 PREVIEW_CHARS = 120
 
 
-def bot_link(app_id: str) -> str:
-    """点开就是和这个机器人的私聊（飞书 AppLink）。"""
-    return f"https://applink.feishu.cn/client/bot/open?appId={quote(app_id, safe='')}"
+def open_link(transport: FeishuTransport, chat_id: str | None) -> str:
+    """点开进这个会话；不知道会话时进和这个机器人的私聊。"""
+    app_id = str(getattr(transport.client, "app_id", "") or "")
+    return feishu_open.link(get_settings().public_base_url, chat_id=chat_id, app_id=app_id)
 
 
 def task_biz(task_id: int) -> str:
     return f"coreman-task-{task_id}"
+
+
+def done_biz(task_id: int) -> str:
+    return f"coreman-task-{task_id}-done"
 
 
 def confirm_biz(key: str) -> str:
@@ -62,15 +71,20 @@ async def create(
     title: str,
     preview: str,
     status: tuple[str, str],
+    chat_id: str | None,
+    notify: bool = False,
 ) -> bool:
-    """建一张应用消息流卡片；`status` 是（标签文字, primary|secondary|success|danger）。"""
+    """建一张应用消息流卡片；`status` 是（标签文字, primary|secondary|success|danger）。
+
+    `notify` 为真时像新消息一样提醒本人，否则静默出现在消息列表里。
+    """
     card: dict[str, Any] = {
         "biz_id": biz_id,
         "title": _clip(title, TITLE_CHARS),
         "preview": _clip(preview, PREVIEW_CHARS),
         "status_label": {"text": status[0], "type": status[1]},
-        "link": {"link": bot_link(str(getattr(transport.client, "app_id", "") or ""))},
-        "notify": {"close_notify": True},
+        "link": {"link": open_link(transport, chat_id)},
+        "notify": {"close_notify": not notify},
     }
     try:
         await transport.call(
