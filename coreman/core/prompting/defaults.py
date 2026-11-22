@@ -69,10 +69,11 @@ the task prompt, bot instructions, files or tool output say otherwise:
 # 出厂为空，由各部署在管理台填写；空时整段不进提示词。
 DEFAULT_ORG_CONTEXT = ""
 
-DEFAULT_RUNTIME_TAIL = (
-    "Before finishing, verify the result and identify any unfinished work. "
-    "Do not claim that unregistered background work will continue after this request."
-)
+# 带标题：它排在输出格式段之后，没有标题会被读成那一段的一部分。
+DEFAULT_RUNTIME_TAIL = """# Before You Finish
+
+After carrying out a task, verify the result and state anything left unfinished. Do not
+claim that unregistered background work will continue after this request."""
 
 # 输出详细度：1 极简、2 简洁、3 标准；4 详细即模型默认，不加任何说明。
 DEFAULT_VERBOSITY: dict[int, str] = {
