@@ -60,7 +60,7 @@ async def test_the_turn_gets_the_digest_and_settles_when_it_ends_well(
     assert f"> 周五能给报价吗？{SECRET}" in text and "> 下周例会改期" in text
     # 和所有者私聊的一轮一样拿到个人工具；规则在稳定段里。
     assert "COREMAN_FEISHU_PERSONAL_TOKEN" in relay.requests[0]["env_vars"]
-    assert "## 交回事项" in relay.requests[0]["messages"][0]["content"]
+    assert "# 交回事项" in relay.requests[0]["messages"][0]["content"]
     rows = await inbox_rows(db_session, bot)
     assert [(row.status, row.delivered_task_id) for row in rows] == [("delivered", task.id)] * 2
     kind = await raw(

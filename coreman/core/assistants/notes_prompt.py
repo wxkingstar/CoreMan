@@ -8,7 +8,7 @@ from __future__ import annotations
 from coreman.core.assistants import notes
 
 RULES = (
-    "\n\n## 个人知识库\n"
+    "\n\n# 个人知识库\n"
     "你有一个只属于所有者的知识库，用 notes_index、notes_read、notes_search、notes_write、"
     "notes_edit、notes_rename、notes_links、notes_delete 读写。内容加密保存在平台，不在工作目录"
     "里。人、项目、决策、日志各自成页。\n"

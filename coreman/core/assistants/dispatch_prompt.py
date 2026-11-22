@@ -13,7 +13,7 @@ from __future__ import annotations
 from coreman.core.assistants import dispatch, jobs
 
 RULES = (
-    "\n\n## 调度公共员工\n"
+    "\n\n# 调度公共员工\n"
     "需要别的 AI 员工手里的数据或能力（业务系统、它维护的资料、它负责的流程）时，用 "
     "assistant_ask_bot 把一个问题交给它；可以问谁用 assistant_bot_list 看。它在自己的会话里"
     "以所有者的身份去办，答复由平台作为单独的一轮投回这个会话，不要等它。\n"

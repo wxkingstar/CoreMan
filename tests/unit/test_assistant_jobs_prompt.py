@@ -7,7 +7,7 @@ from coreman.core.assistants import jobs, jobs_prompt, jobs_tools
 
 def test_the_main_session_rules_name_every_job_tool_and_the_limits() -> None:
     text = jobs_prompt.RULES
-    assert text.startswith("\n\n## 子任务\n")
+    assert text.startswith("\n\n# 子任务\n")
     for name in jobs_tools.OWN:
         assert name in text, name
     assert "assistant_job_blocked" not in text
@@ -18,7 +18,7 @@ def test_the_main_session_rules_name_every_job_tool_and_the_limits() -> None:
 
 def test_the_subtask_rules_say_what_it_cannot_do() -> None:
     text = jobs_prompt.SUBTASK_RULES
-    assert text.startswith("\n\n## 你现在是子任务\n")
+    assert text.startswith("\n\n# 你现在是子任务\n")
     assert "assistant_job_blocked" in text
     for name in jobs_tools.OWN:
         assert name not in text, name

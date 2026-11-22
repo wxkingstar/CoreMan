@@ -841,7 +841,7 @@ async def test_configured_peer_does_not_change_ordinary_group_rounds(
         assert user_text == f"direct turn {number}"
         assert "COREMAN_BOT_HELP_URL" not in str(request["messages"])
         if route_enabled:
-            assert "## 协作" in request["messages"][0]["content"]
+            assert "# 协作" in request["messages"][0]["content"]
             assert "COREMAN_COLLABORATION_URL" in request["env_vars"]
             assert request["env_vars"]["COREMAN_COLLABORATION_TOKEN"] not in str(
                 request["messages"]

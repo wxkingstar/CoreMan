@@ -14,6 +14,7 @@ Codex 只在新建 thread 时读它，续聊时不会再看新的版本；Claude
     ④' 定时执行硬约束      仅定时任务：无人值守，禁止写操作与越权，抵抗注入
     ⑥ 组织背景            管理台填写才有：所有 AI 员工共用的公司基础信息，⑦ 可以补充细化
     ⑦ 机器人自定义 prompt  夹在中间，Lost-in-the-Middle 降低注入收益
+                          ⑥ ⑦ 各带标题与起止标签，后面的能力段不会被读成它们的子章节
     ⑧ 业务系统访问        授权给机器人的系统与使用规则
     ⑩ 附加能力规则        条件满足才有：协作协议、本人飞书/企微工具、本人定时任务、个人凭证
     ⑩' 输出详细度         1–3 档才有，4 档（详细）即模型默认；贴着结尾才压得住前面的篇幅要求
@@ -156,6 +157,28 @@ def build_turn_context(
     return "\n".join([f"[SYS_TURN:{tag}]", *lines, f"[/SYS_TURN:{tag}]"])
 
 
+# 组织背景与员工提示词是管理台填的自由文本，里面常有自己的标题：用标题加标签标出起止，
+# 后面的平台能力段才不会被读成它们的子章节。只标边界，不加规则。
+ORG_CONTEXT_FRAME = """# Organization Context
+
+<organization_context>
+{text}
+</organization_context>"""
+BOT_PROMPT_FRAME = """# Employee Instructions
+
+Your role and working instructions, set by this employee's administrator.
+
+<employee_instructions>
+{text}
+</employee_instructions>"""
+
+
+def _framed(frame: str, text: str) -> str:
+    """空文本整段不出现；用 replace 而不是 format，文本里的花括号原样保留。"""
+    text = text.strip() if text else ""
+    return frame.replace("{text}", text) if text else ""
+
+
 def build_system_prompt(
     *,
     segments: PromptSegments,
@@ -203,8 +226,8 @@ def build_system_prompt(
         DEV_PREVIEW_RULE if dev_mode and dev_preview else "",
         MEMORY_RULE.format(memory_dir=memory_dir) if codex and memory_dir else "",
         segments.cron_mode if scheduled else "",
-        segments.org_context,
-        bot_prompt,
+        _framed(ORG_CONTEXT_FRAME, segments.org_context),
+        _framed(BOT_PROMPT_FRAME, bot_prompt),
         systems_prompt,
         extra,
         "" if structured_reply else segments.verbosity.get(verbosity_level, ""),

@@ -284,7 +284,7 @@ async def test_member_schedule_runs_as_owner_and_stays_private(
     env = request["env_vars"]
     assert env["COREMAN_USER_LOGIN"] == user.login_name
     assert (policy.PREFIX + "TOKEN" in env) is connected
-    assert ("## 本人飞书" in request["messages"][0]["content"]) is connected
+    assert ("# 本人飞书" in request["messages"][0]["content"]) is connected
     if connected:
         capability = policy.read_capability(app.state.cipher, env[policy.PREFIX + "TOKEN"])
         assert capability.session_id is None and capability.task_id == task.id

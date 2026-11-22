@@ -8,7 +8,7 @@ from coreman.runtime.worker.chat import personal
 
 def test_rules_name_the_tools_categories_and_limits() -> None:
     text = followup_prompt.FOLLOWUP_RULES
-    assert text.startswith("\n\n## 待跟进\n")
+    assert text.startswith("\n\n# 待跟进\n")
     for name in followup_tools.OWN:
         assert name in text
     for word in ("decide", "promised", "waiting", "remind", "F012", "origin_message_id"):

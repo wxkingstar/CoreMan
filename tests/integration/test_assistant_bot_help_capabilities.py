@@ -87,7 +87,7 @@ async def test_the_round_has_the_owners_business_access_and_saved_credentials(
     assert not [key for key in env if key.startswith(WITHHELD)]
     assert cloud_policy.APPROVERS_ENV in env
     system = request["messages"][0]["content"]
-    for heading in ("## 本人飞书", "## 本人定时任务", "## 个人凭证"):
+    for heading in ("# 本人飞书", "# 本人定时任务", "# 个人凭证"):
         assert heading not in system
     block = turn_block(request)
     assert dispatch_prompt.target_note(allow_write=False) in block

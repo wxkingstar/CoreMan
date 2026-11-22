@@ -8,7 +8,7 @@ from coreman.runtime.worker.chat import personal
 
 def test_rules_tell_the_assistant_what_a_handover_is_and_what_to_do() -> None:
     text = handover_prompt.RULES
-    assert text.startswith("\n\n## 交回事项\n")
+    assert text.startswith("\n\n# 交回事项\n")
     assert handover.HEADER.split("{count}")[0] in text
     for word in (
         "assistant_mark_processing",

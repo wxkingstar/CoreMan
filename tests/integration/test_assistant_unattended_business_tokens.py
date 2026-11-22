@@ -172,7 +172,7 @@ async def test_the_cold_start_turn_gets_nothing(
     # 机器人自己配的静态变量不动。
     assert env["SHOP_REGION"] == "east"
     # 「业务系统访问」段仍在稳定段里，本轮块说明这一轮用不了。
-    assert "## 业务系统访问" in request["messages"][0]["content"]
+    assert "# 业务系统访问" in request["messages"][0]["content"]
     block = turn_block(request)
     assert system_access.WITHHELD_NOTE in block
     assert system_access.OWNER_ABSENT_NOTE not in block

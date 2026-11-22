@@ -34,7 +34,7 @@ def guidance(base_url: str, platform: str, *, group: bool = False) -> str:
         else ""
     )
     return (
-        "\n\n## 本人定时任务\n"
+        "\n\n# 本人定时任务\n"
         "用户希望你定期或在将来某个时间自动完成一件事，或者要查看、修改、暂停、删除、立即运行"
         "自己的定时任务时，使用 coreman-cron 技能"
         + fallback
