@@ -45,6 +45,7 @@ export type Pct = number | string | null
 
 /** 运行时列表项：旧的手工部署字段（主机、端口、SSH/chroot、agent 令牌）后端已不再下发。 */
 export interface RelayOut {
+  connection_health?: RuntimeHealthObservation | null
   driver_health?: RuntimeHealthObservation | null
   model_health?: RuntimeHealthObservation | null
   last_model_failure?: RuntimeHealthObservation | null

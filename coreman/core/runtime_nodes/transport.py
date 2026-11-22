@@ -41,6 +41,7 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import RuntimeCall, RuntimeChunk, RuntimeNode
 from coreman.core.db.session import make_session_factory
 from coreman.core.runtime_nodes.common import BACKENDS
+from coreman.core.runtime_nodes.errors import RuntimeRequestRejected
 
 MAX_REQUEST = 64 * 1024 * 1024
 MAX_RESPONSE = 128 * 1024 * 1024
@@ -304,13 +305,21 @@ class ReverseTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         raw = await request.aread()
         if len(raw) > MAX_REQUEST:
-            raise httpx.RequestError("运行时请求超过 64 MiB", request=request)
+            raise RuntimeRequestRejected(
+                "runtime_request_too_large",
+                "请求（含附件编码）超过运行时通道 64 MiB 上限，请缩小附件或拆分后重试。",
+                request=request,
+                request_bytes=len(raw),
+                limit_bytes=MAX_REQUEST,
+            )
         path = request.url.path
         prefix = f"/{self.provider}"
         if path.startswith(prefix + "/"):
             path = path[len(prefix) :]
         if self.provider not in BACKENDS:
-            raise httpx.RequestError("运行时 AI 类型无效", request=request)
+            raise RuntimeRequestRejected(
+                "runtime_provider_invalid", "运行时 AI 类型无效", request=request
+            )
         call_id = uuid.uuid4()
         payload = json.dumps(
             {
