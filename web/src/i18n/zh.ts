@@ -169,6 +169,7 @@ export default {
     replaces: "「{bot}」的 {key} 现在用的是「{label}」，将改用这一条。",
     updateShared: "这条凭证正在被 {bots} 使用，它们会一起生效。",
     updated: "已更新", deleted: "已删除",
+    rename: "改名", renameTitle: "修改名称", renamePrompt: "给 {key} 起一个好认的名称（最多 50 字）。只改显示，变量名和内容不变。", renameInvalid: "名称不能为空，最多 50 字", renamed: "已改名",
   },
   credentialRequest: {
     title: "填写个人凭证",

@@ -169,6 +169,7 @@ export default {
     replaces: "「{bot}」の {key} は現在「{label}」を使っています。これに置き換えます。",
     updateShared: "この認証情報は {bots} で使われており、すべてに反映されます。",
     updated: "更新しました", deleted: "削除しました",
+    rename: "名前を変更", renameTitle: "名前を変更", renamePrompt: "{key} の分かりやすい名前（50 文字まで）。表示名だけが変わり、変数名と内容はそのままです。", renameInvalid: "50 文字以内の名前を入力してください", renamed: "名前を変更しました",
   },
   credentialRequest: {
     title: "個人の認証情報の入力",

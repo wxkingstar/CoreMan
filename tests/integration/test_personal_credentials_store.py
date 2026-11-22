@@ -322,3 +322,35 @@ def test_injected_repr_does_not_leak_values():
     found = store.Injected({"DEMO_PIN": "pin-778899"}, frozenset({"pin-778899"}), ("DEMO_PIN",))
     assert "pin-778899" not in repr(found)
     assert found.names == ("DEMO_PIN",)
+
+
+async def test_resubmitting_keeps_a_name_the_owner_chose(db_session):
+    bot, user = await _owner(db_session)
+    await store.save(
+        db_session,
+        CIPHER,
+        bot_id=bot.id,
+        user_id=user.id,
+        fields=FIELDS[1:],
+        values={"DEMO_PIN": "pin-778899"},
+    )
+    cred = await db_session.scalar(select(PersonalCredential))
+    await store.rename(db_session, credential_id=cred.id, user_id=user.id, label="Demo 系统 PIN")
+    # agent 再次索取时起了别的名字：值更新，本人改过的名称不变。
+    await store.save(
+        db_session,
+        CIPHER,
+        bot_id=bot.id,
+        user_id=user.id,
+        fields=[{"key": "DEMO_PIN", "label": "PIN 码", "secret": True}],
+        values={"DEMO_PIN": "pin-000111"},
+    )
+    await db_session.commit()
+    await db_session.refresh(cred)
+    assert cred.label == "Demo 系统 PIN"
+    found = await store.injected(db_session, CIPHER, bot_id=bot.id, user_id=user.id)
+    assert found.env == {"DEMO_PIN": "pin-000111"}
+    assert (
+        await store.rename(db_session, credential_id=cred.id, user_id=bot.created_by, label="x")
+        is None
+    )

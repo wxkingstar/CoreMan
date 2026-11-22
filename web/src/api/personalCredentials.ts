@@ -34,6 +34,7 @@ export const personalCredentials = {
   items: () => call<CredentialItem[]>(http.get(items)),
   bots: () => call<CredentialBot[]>(http.get('/api/me/credential-bots')),
   updateItem: (id: string, value: string) => call<CredentialItem>(http.put(`${items}/${id}`, { value })),
+  rename: (id: string, label: string) => call<CredentialItem>(http.put(`${items}/${id}/label`, { label })),
   setBots: (id: string, botIds: string[]) => call<CredentialItem>(http.put(`${items}/${id}/bots`, { bot_ids: botIds })),
   removeItem: (id: string) => call<null>(http.delete(`${items}/${id}`)),
 }

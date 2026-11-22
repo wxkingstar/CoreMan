@@ -43,12 +43,27 @@ function replaced(row: CredentialItem, added: string[]) {
     .filter(b => added.includes(b.bot_id) && b.env_key === row.env_key)
     .map(b => t('myCredentials.replaces', { bot: b.bot_name, key: b.env_key, label: name(other) })))
 }
-const changeBots = (row: CredentialItem, ids: string[]) => act(async () => {
-  const added = ids.filter(id => !boundIds(row).includes(id))
-  const notes = replaced(row, added)
-  if (notes.length) await ElMessageBox.confirm(notes.join('\n'), t('myCredentials.replaceTitle'), { type: 'warning' })
-  await personalCredentials.setBots(row.id, ids)
-}, 'myCredentials.bound')
+/** 改绑定只更新这一行，不刷新整页、不禁用多选框：下拉框保持打开，可以接着选。 */
+async function changeBots(row: CredentialItem, ids: string[]) {
+  try {
+    const added = ids.filter(id => !boundIds(row).includes(id))
+    const notes = replaced(row, added)
+    if (notes.length) await ElMessageBox.confirm(notes.join('\n'), t('myCredentials.replaceTitle'), { type: 'warning' })
+    const updated = await personalCredentials.setBots(row.id, ids)
+    rows.value = rows.value.map(r => r.id === updated.id ? updated : r)
+    // 替换了别的凭证在某个 AI 员工上的同名变量：那几行也变了，静默重新拉一次。
+    if (notes.length) rows.value = await personalCredentials.items()
+    ElMessage.success(t('myCredentials.bound'))
+  } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
+}
+const rename = (row: CredentialItem) => act(async () => {
+  const { value } = await ElMessageBox.prompt(
+    t('myCredentials.renamePrompt', { key: row.env_key }),
+    t('myCredentials.renameTitle'),
+    { inputValue: row.label, inputValidator: (v: string) => !!v && !!v.trim() && v.trim().length <= 50, inputErrorMessage: t('myCredentials.renameInvalid') },
+  )
+  await personalCredentials.rename(row.id, value.trim())
+}, 'myCredentials.renamed')
 const update = (row: CredentialItem) => act(async () => {
   const shared = row.bindings.length > 1 ? t('myCredentials.updateShared', { bots: row.bindings.map(b => b.bot_name).join('、') }) : ''
   const { value } = await ElMessageBox.prompt(
@@ -121,6 +136,7 @@ onMounted(load)
             :data-test="'bots-' + row.id"
             multiple
             filterable
+            :reserve-keyword="false"
             :disabled="busy"
             :placeholder="t('myCredentials.unbound')"
             @update:model-value="(ids: string[]) => changeBots(row, ids)"
@@ -151,8 +167,16 @@ onMounted(load)
           {{ row.last_used_at ? formatDateTime(row.last_used_at) : t('myCredentials.never') }}
         </template>
       </el-table-column>
-      <el-table-column width="140">
+      <el-table-column width="190">
         <template #default="{ row }">
+          <el-button
+            link
+            type="primary"
+            :data-test="'rename-' + row.id"
+            @click="rename(row)"
+          >
+            {{ t('myCredentials.rename') }}
+          </el-button>
           <el-button
             link
             type="primary"

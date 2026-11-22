@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { beforeEach, expect, it, vi } from 'vitest'
-vi.mock('@/api/personalCredentials', () => ({ personalCredentials: { items: vi.fn(), bots: vi.fn(), updateItem: vi.fn(), setBots: vi.fn(), removeItem: vi.fn() } }))
+vi.mock('@/api/personalCredentials', () => ({ personalCredentials: { items: vi.fn(), bots: vi.fn(), updateItem: vi.fn(), setBots: vi.fn(), removeItem: vi.fn(), rename: vi.fn() } }))
 import { personalCredentials, type CredentialItem } from '@/api/personalCredentials'
 import MyCredentialsView from '@/views/MyCredentialsView.vue'
 import { i18n } from '@/i18n'
@@ -26,6 +26,7 @@ beforeEach(() => {
   vi.mocked(personalCredentials.updateItem).mockReset().mockResolvedValue(rows[1])
   vi.mocked(personalCredentials.setBots).mockReset().mockResolvedValue(rows[1])
   vi.mocked(personalCredentials.removeItem).mockReset().mockResolvedValue(null)
+  vi.mocked(personalCredentials.rename).mockReset().mockResolvedValue(rows[1])
 })
 
 it('is a personal page every member can open', () => {
@@ -71,5 +72,29 @@ it('deletes after confirmation', async () => {
   const wrapper = render(); await flushPromises()
   await wrapper.get('[data-test="delete-c2"]').trigger('click'); await flushPromises()
   expect(personalCredentials.removeItem).toHaveBeenCalledWith('c2')
+  wrapper.unmount()
+})
+
+it('updates only that row after binding, keeping the select usable and clearing the search', async () => {
+  const updated = { ...rows[0], bindings: [...rows[0].bindings, { bot_id: 'b2', bot_name: '运营', env_key: 'DEMO_USERNAME', last_used_at: null }] }
+  vi.mocked(personalCredentials.setBots).mockResolvedValue(updated)
+  const wrapper = render(); await flushPromises()
+  const picker = wrapper.findAllComponents({ name: 'ElSelect' }).find(c => c.attributes('data-test') === 'bots-c1')!
+  expect(picker.props('reserveKeyword')).toBe(false)
+  ;(picker as unknown as Select).vm.$emit('update:modelValue', ['b1', 'b2']); await flushPromises()
+  expect(personalCredentials.setBots).toHaveBeenCalledWith('c1', ['b1', 'b2'])
+  // 没有替换别的凭证：不重新拉整页，也不禁用多选框。
+  expect(personalCredentials.items).toHaveBeenCalledTimes(1)
+  expect(picker.props('disabled')).toBe(false)
+  expect(picker.props('modelValue')).toEqual(['b1', 'b2'])
+  wrapper.unmount()
+})
+
+it('renames a credential', async () => {
+  const prompt = vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: '  GitHub 个人令牌 ', action: 'confirm' } as never)
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('[data-test="rename-c2"]').trigger('click'); await flushPromises()
+  expect(prompt.mock.calls[0][2]).toMatchObject({ inputValue: 'PIN' })
+  expect(personalCredentials.rename).toHaveBeenCalledWith('c2', 'GitHub 个人令牌')
   wrapper.unmount()
 })

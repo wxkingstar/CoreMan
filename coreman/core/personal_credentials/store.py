@@ -161,7 +161,9 @@ async def save(
             await bind(session, current, bot_id=bot_id, env_key=key)
             continue
         _encrypt(cipher, current, values[key])
-        current.label, current.secret, current.updated_at = label, secret, utcnow()
+        # 名称本人可能在「我的凭证」里改过：已有就留着，不让 agent 起的名字覆盖。
+        current.label = current.label or label
+        current.secret, current.updated_at = secret, utcnow()
         await session.flush()
     return sorted(str(f["key"]) for f in fields)
 
@@ -306,6 +308,17 @@ async def update_value(
         return None
     _encrypt(cipher, row, value)
     row.updated_at = utcnow()
+    await session.flush()
+    return row
+
+
+async def rename(
+    session: AsyncSession, *, credential_id: uuid.UUID, user_id: uuid.UUID, label: str
+) -> PersonalCredential | None:
+    row = await _own(session, credential_id, user_id)
+    if row is None:
+        return None
+    row.label, row.updated_at = label, utcnow()
     await session.flush()
     return row
 

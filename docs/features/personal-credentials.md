@@ -52,6 +52,7 @@ AI 员工执行任务时需要某个系统的账号、密码或 API Key，可以
 - 全部解绑的凭证保留，显示为「未绑定」，之后可以再绑或在表单里选用；**删除**则所有 AI 员工都不再使用。
 - 密文字段只显示「已设置（不显示）」；账号这类非密文字段显示原值。
 - 更新就是重新填写一遍，用它的 AI 员工一起生效。
+- **改名**只改显示的名称（最多 50 字），变量名和内容不变。名称一旦有了，之后 AI 员工再次索取、在表单里重新填写时只更新值，不会用 agent 起的名字覆盖。
 - 只能操作本人的数据；平台管理员和 AI 委员会也无法查看或代管别人的凭证。
 
 接口（浏览器登录会话，写操作要求 CSRF）：
@@ -61,6 +62,7 @@ AI 员工执行任务时需要某个系统的账号、密码或 API Key，可以
 | `GET /api/me/credential-items` | 按凭证列出，每条带 `bindings`（AI 员工、变量名、最近使用时间） |
 | `GET /api/me/credential-bots` | 可以绑定的 AI 员工 |
 | `PUT /api/me/credential-items/{id}` | `{"value": …}` 更新值 |
+| `PUT /api/me/credential-items/{id}/label` | `{"label": …}` 改名称，1–50 字，空白折叠 |
 | `PUT /api/me/credential-items/{id}/bots` | `{"bot_ids": [...]}` 把绑定改成正好这些；新加的不在可选范围内时 `403`，已有的绑定可以保留或去掉 |
 | `DELETE /api/me/credential-items/{id}` | 删除整条凭证 |
 | `GET /api/me/credentials`、`PUT`/`DELETE /api/me/credentials/{bot_id}/{env_key}` | 旧的逐行接口，命令行仍在用：每个绑定一行（带 `credential_id`）；`PUT` 改这个绑定用的凭证（共用的一起变），`DELETE` 解除这个绑定，凭证没有别的 AI 员工在用就一并删除 |
