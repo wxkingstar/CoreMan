@@ -288,3 +288,16 @@ async def test_reaper_wipes_handoff_once_the_resume_task_ended(
     factory = make_session_factory(db_engine)
     counts = await reaper.run_cleanup(factory, SettingsStore(factory), utcnow())
     assert counts["credential_handoffs_wiped"] == 1
+
+
+async def test_one_time_forms_ignore_picks(db_session: AsyncSession) -> None:
+    bot, user, task, cipher, row = await _opened(db_session)
+    result = await service.submit(
+        db_session,
+        cipher,
+        row.id,
+        actor_id=user.id,
+        values={"DEMO_USERNAME": "alice"},
+        picks={"DEMO_PIN": str(uuid.uuid4())},
+    )
+    assert result.status == "invalid" and "「PIN」不能为空" in result.message

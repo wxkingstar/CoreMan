@@ -33,6 +33,10 @@ MAX_FIELDS = 20
 MAX_VALUE = 4096
 FEISHU_MAX_VALUE = 1000
 MIN_REDACT = 6
+# 表单上「选已有凭证」最多列出几条；飞书卡片下拉框也按这个数截断。
+MAX_CHOICES = 50
+# 飞书卡片里每个字段的「选已有凭证」下拉框名：前缀小写，不会和变量名（大写开头）撞上。
+PICK_PREFIX = "pick__"
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -42,8 +46,9 @@ class CredentialError(ValueError):
         self.code, self.message = code, message
 
 
-def value_aad(bot_id: uuid.UUID | str, user_id: uuid.UUID | str, env_key: str) -> str:
-    return f"personal_credentials.value_enc:{bot_id}:{user_id}:{env_key}"
+def value_aad(credential_id: uuid.UUID | str, user_id: uuid.UUID | str) -> str:
+    """密文绑定（凭证, 本人）：同一份值可以给多个 AI 员工用，但挪到别的凭证或别人名下解不开。"""
+    return f"personal_credential_items.value_enc:{credential_id}:{user_id}"
 
 
 def sealed_aad(request_id: uuid.UUID | str) -> str:

@@ -389,3 +389,89 @@ async def test_one_conversation_is_resumed_once_however_many_forms_it_has_open(
     }
     assert set(cards) == {f"om_{main.id}", f"om_{twin.id}", f"om_{narrower.id}"}
     assert all("AI 员工会继续之前的任务" in card for card in cards.values())
+
+
+async def _pin_elsewhere(session, bot, user, cipher, value="pin-778899"):
+    from tests.integration.test_group_dispatch import another_bot
+
+    other = await another_bot(session, bot, "ops_bot", "运营")
+    await store.save(
+        session,
+        cipher,
+        bot_id=other.id,
+        user_id=user.id,
+        fields=[{"key": "OPS_PIN", "label": "运营 PIN", "secret": True}],
+        values={"OPS_PIN": value},
+    )
+    await session.commit()
+    return other, await store.bound_credential(
+        session, bot_id=other.id, user_id=user.id, env_key="OPS_PIN"
+    )
+
+
+async def test_picking_an_existing_credential_shares_it(db_session):
+    bot, user, task, cipher, row = await _opened(db_session)
+    other, pin = await _pin_elsewhere(db_session, bot, user, cipher)
+    result = await service.submit(
+        db_session,
+        cipher,
+        row.id,
+        actor_id=user.id,
+        values={"DEMO_USERNAME": "alice", "DEMO_PIN": ""},
+        picks={"DEMO_PIN": str(pin.id)},
+    )
+    await db_session.commit()
+    assert result.status == "saved" and result.keys == ("DEMO_PIN", "DEMO_USERNAME")
+    found = await store.injected(db_session, cipher, bot_id=bot.id, user_id=user.id)
+    assert found.env == {"DEMO_PIN": "pin-778899", "DEMO_USERNAME": "alice"}
+    audit = await db_session.scalar(
+        select(AuditLog).where(AuditLog.action == "personal_credential.saved")
+    )
+    assert audit.diff == {"keys": ["DEMO_PIN", "DEMO_USERNAME"], "linked": ["DEMO_PIN"]}
+    # 以后在任一处改值，两个 AI 员工一起生效。
+    await store.update_value(
+        db_session, cipher, credential_id=pin.id, user_id=user.id, value="pin-000111"
+    )
+    await db_session.commit()
+    found = await store.injected(db_session, cipher, bot_id=bot.id, user_id=user.id)
+    assert found.env["DEMO_PIN"] == "pin-000111"
+
+
+async def test_a_typed_value_wins_over_a_pick(db_session):
+    bot, user, task, cipher, row = await _opened(db_session)
+    other, pin = await _pin_elsewhere(db_session, bot, user, cipher)
+    await service.submit(
+        db_session, cipher, row.id, actor_id=user.id, values=VALUES, picks={"DEMO_PIN": pin.id}
+    )
+    await db_session.commit()
+    found = await store.injected(db_session, cipher, bot_id=bot.id, user_id=user.id)
+    assert found.env == VALUES
+
+
+async def test_someone_elses_credential_cannot_be_picked(db_session):
+    bot, user, task, cipher, row = await _opened(db_session)
+    stranger = User(login_name="stranger", display_name="别人", source="sync")
+    db_session.add(stranger)
+    await db_session.flush()
+    theirs = await store.create(
+        db_session,
+        cipher,
+        user_id=stranger.id,
+        env_key="DEMO_PIN",
+        label="PIN",
+        secret=True,
+        value="pin-of-other",
+    )
+    await db_session.commit()
+    for pick in (str(theirs.id), "not-a-uuid", str(uuid.uuid4())):
+        result = await service.submit(
+            db_session,
+            cipher,
+            row.id,
+            actor_id=user.id,
+            values={"DEMO_USERNAME": "alice"},
+            picks={"DEMO_PIN": pick},
+        )
+        assert result.status == "invalid" and "选择的凭证不存在" in result.message
+    await db_session.refresh(row)
+    assert row.status == "open"

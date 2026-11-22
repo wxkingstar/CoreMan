@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { beforeEach, expect, it, vi } from 'vitest'
 vi.mock('vue-router', async (orig) => ({ ...(await orig<typeof import('vue-router')>()), useRoute: () => ({ params: { id: 'r1' } }) }))
-vi.mock('@/api/personalCredentials', () => ({ personalCredentials: { request: vi.fn(), submit: vi.fn(), list: vi.fn(), update: vi.fn(), remove: vi.fn() } }))
+vi.mock('@/api/personalCredentials', () => ({ personalCredentials: { request: vi.fn(), submit: vi.fn() } }))
 import { personalCredentials, type CredentialRequest } from '@/api/personalCredentials'
 import CredentialRequestView from '@/views/CredentialRequestView.vue'
 import { i18n } from '@/i18n'
@@ -39,7 +39,7 @@ it('submits every field once and then shows the saved state', async () => {
   await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-778899')
   await wrapper.get('form').trigger('submit'); await flushPromises()
   expect(personalCredentials.submit).toHaveBeenCalledTimes(1)
-  expect(personalCredentials.submit).toHaveBeenCalledWith('r1', { DEMO_USERNAME: 'alice', DEMO_PIN: 'pin-778899' })
+  expect(personalCredentials.submit).toHaveBeenCalledWith('r1', { DEMO_USERNAME: 'alice', DEMO_PIN: 'pin-778899' }, {})
   expect(wrapper.find('[data-test="saved"]').exists()).toBe(true)
   // 输入框此时已卸载，只能检查组件状态：提交成功后每个值都必须被清空。
   const state = (wrapper.vm as unknown as { values: Record<string, string> }).values
@@ -109,5 +109,34 @@ it('labels a one-time form as such and never says saved', async () => {
   const done = wrapper.get('[data-test="saved"]')
   expect(done.text()).toContain('已交付')
   expect(done.text()).not.toContain('已保存')
+  wrapper.unmount()
+})
+
+it('offers saved credentials and submits the pick instead of a value', async () => {
+  vi.mocked(personalCredentials.request).mockResolvedValue({
+    ...open,
+    choices: { DEMO_PIN: [{ id: 'c1', label: 'PIN', env_key: 'DEMO_PIN', bots: ['运营'] }] },
+    defaults: { DEMO_PIN: 'c1' },
+  })
+  const wrapper = render(); await flushPromises()
+  expect(wrapper.find('[data-test="pick-DEMO_PIN"]').exists()).toBe(true)
+  expect(wrapper.find('[data-test="pick-DEMO_USERNAME"]').exists()).toBe(false)
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).toHaveBeenCalledWith('r1', { DEMO_USERNAME: 'alice' }, { DEMO_PIN: 'c1' })
+  wrapper.unmount()
+})
+
+it('a typed value takes precedence over the pick', async () => {
+  vi.mocked(personalCredentials.request).mockResolvedValue({
+    ...open,
+    choices: { DEMO_PIN: [{ id: 'c1', label: 'PIN', env_key: 'DEMO_PIN', bots: [] }] },
+    defaults: { DEMO_PIN: 'c1' },
+  })
+  const wrapper = render(); await flushPromises()
+  await wrapper.get('input[data-test="field-DEMO_USERNAME"]').setValue('alice')
+  await wrapper.get('input[data-test="field-DEMO_PIN"]').setValue('pin-000111')
+  await wrapper.get('form').trigger('submit'); await flushPromises()
+  expect(personalCredentials.submit).toHaveBeenCalledWith('r1', { DEMO_USERNAME: 'alice', DEMO_PIN: 'pin-000111' }, {})
   wrapper.unmount()
 })

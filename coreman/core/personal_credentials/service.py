@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import delete, exists, select, text, update
+from sqlalchemy import delete, exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import sealed
@@ -26,6 +26,7 @@ from coreman.core.db.models import (
     CredentialRequest,
     InboundEvent,
     OutboxItem,
+    PersonalCredential,
     PlatformApp,
     Task,
     User,
@@ -77,6 +78,23 @@ async def login_available(session: AsyncSession, platform: str) -> bool:
         .limit(1)
     )
     return found is not None
+
+
+async def bindable_bots(session: AsyncSession, user_id: uuid.UUID) -> list[Bot]:
+    """「我的凭证」里能把凭证绑过去的 AI 员工：已启用、本人能对话的；个人助理只有自己的。"""
+    from coreman.core.api_tasks.service import allowed_to_use
+
+    bots = await session.scalars(
+        select(Bot)
+        .where(Bot.enabled.is_(True), Bot.platform.in_(PLATFORMS))
+        .order_by(Bot.name, Bot.id)
+    )
+    return [
+        bot
+        for bot in bots
+        if (bot.kind != "assistant" or bot.owner_id == user_id)
+        and await allowed_to_use(session, bot, user_id)
+    ]
 
 
 async def _owner(session: AsyncSession, bot_id: uuid.UUID, user_id: uuid.UUID) -> tuple[Bot, User]:
@@ -179,10 +197,7 @@ async def open_request(
     now = now or utcnow()
     keys = sorted(f.key for f in parsed.fields)
     # 同一人同一员工的并发请求在这里排队：后到的等前一个提交，再看见它发出的表单并复用。
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"credential-request:{bot.id}:{user.id}"},
-    )
+    await store.lock(session, bot.id, user.id)
     pending = await session.scalars(
         select(CredentialRequest).where(
             CredentialRequest.bot_id == bot.id,
@@ -238,6 +253,12 @@ async def open_request(
             if identity is not None and recipient is None and cap.chat_type == "group"
             else None
         )
+        # 「选已有凭证」只放进私聊里的保存类表单：下拉框里是本人凭证的名字，不能发到群里。
+        options, defaults = (
+            await store.choices(session, bot_id=bot.id, user_id=user.id, fields=row.fields)
+            if parsed.save and recipient is not None
+            else ({}, {})
+        )
         payload = {
             "card": cards.form_card(
                 row.id,
@@ -247,6 +268,8 @@ async def open_request(
                 web_url=url if await login_available(session, "feishu") else None,
                 mention_open_id=mention,
                 save=parsed.save,
+                choices=options,
+                defaults=defaults,
             )
         }
     else:
@@ -296,9 +319,11 @@ async def submit(
     *,
     actor_id: uuid.UUID,
     values: Any,
+    picks: Any = None,
     limit: int = policy.MAX_VALUE,
     now: datetime | None = None,
 ) -> Submitted:
+    """`picks`：{变量名: 本人已有凭证的 ID}，只对保存类表单有效；同一字段填了值就以填的为准。"""
     now = now or utcnow()
     row = await session.get(
         CredentialRequest, request_id, with_for_update=True, populate_existing=True
@@ -316,12 +341,20 @@ async def submit(
         return Submitted("expired", "表单已过期，请让 AI 员工重新发起")
     bot, user = await _owner(session, row.bot_id, row.user_id)
     try:
-        cleaned = policy.clean_values(row.fields, values, limit=limit)
+        chosen = await _picked(session, row, user.id, values, picks) if row.save else {}
+        rest = [f for f in row.fields if str(f["key"]) not in chosen]
+        cleaned = policy.clean_values(rest, values, limit=limit)
     except CredentialError as exc:
         return Submitted("invalid", exc.message)
     if row.save:
         keys = await store.save(
-            session, cipher, bot_id=bot.id, user_id=user.id, fields=row.fields, values=cleaned
+            session,
+            cipher,
+            bot_id=bot.id,
+            user_id=user.id,
+            fields=row.fields,
+            values=cleaned,
+            picks=chosen,
         )
         # 个人助理卡在这个凭证上的缺口：值已保存，记为已解决（没有缺口时是空查询）。
         # 凭证缺口报时记级别 0，保存即升到 1。
@@ -343,7 +376,7 @@ async def submit(
         actor_login=user.login_name,
         target_type="bot",
         target_id=str(bot.id),
-        diff={"keys": keys},
+        diff={"keys": keys, **({"linked": sorted(chosen)} if chosen else {})},
     )
     resumed: set[tuple[str | None, uuid.UUID | None]] = set()
     tail = await _settle(session, bot, user, row, keys, now, resumed)
@@ -357,6 +390,37 @@ async def submit(
     for waiting in await _waiting(session, row, keys, now):
         await _settle(session, bot, user, waiting, keys, now, resumed)
     return Submitted("saved", tail, tuple(keys))
+
+
+async def _picked(
+    session: AsyncSession,
+    row: CredentialRequest,
+    user_id: uuid.UUID,
+    values: Any,
+    picks: Any,
+) -> dict[str, uuid.UUID]:
+    """表单里选了已有凭证、又没填值的字段：核对凭证是本人的，返回 {变量名: 凭证 ID}。"""
+    if not picks:
+        return {}
+    if not isinstance(picks, dict):
+        raise CredentialError("invalid_values", "提交内容格式不对")
+    typed = values if isinstance(values, dict) else {}
+    out: dict[str, uuid.UUID] = {}
+    for field in row.fields:
+        key = str(field["key"])
+        raw, value = picks.get(key), typed.get(key)
+        if not raw or (isinstance(value, str) and value.strip()):
+            continue
+        label = str(field.get("label") or key)
+        try:
+            credential_id = uuid.UUID(str(raw))
+        except ValueError:
+            raise CredentialError("invalid_values", f"「{label}」选择的凭证不存在") from None
+        found = await session.get(PersonalCredential, credential_id)
+        if found is None or found.user_id != user_id:
+            raise CredentialError("invalid_values", f"「{label}」选择的凭证不存在")
+        out[key] = credential_id
+    return out
 
 
 async def _waiting(

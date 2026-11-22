@@ -98,11 +98,11 @@ def test_capability_round_trip_and_expiry():
         policy.read_capability(CIPHER, expired)
 
 
-def test_value_aad_binds_row_identity():
-    bot, user = uuid.uuid4(), uuid.uuid4()
-    token = CIPHER.encrypt("secret-value", policy.value_aad(bot, user, "DEMO_PIN"))
-    assert CIPHER.decrypt(token, policy.value_aad(bot, user, "DEMO_PIN")) == "secret-value"
+def test_value_aad_binds_credential_and_owner():
+    credential, user = uuid.uuid4(), uuid.uuid4()
+    token = CIPHER.encrypt("secret-value", policy.value_aad(credential, user))
+    assert CIPHER.decrypt(token, policy.value_aad(credential, user)) == "secret-value"
     with pytest.raises(ValueError):
-        CIPHER.decrypt(token, policy.value_aad(bot, uuid.uuid4(), "DEMO_PIN"))
+        CIPHER.decrypt(token, policy.value_aad(credential, uuid.uuid4()))
     with pytest.raises(ValueError):
-        CIPHER.decrypt(token, policy.value_aad(bot, user, "OTHER_KEY"))
+        CIPHER.decrypt(token, policy.value_aad(uuid.uuid4(), user))

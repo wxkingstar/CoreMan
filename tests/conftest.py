@@ -41,6 +41,8 @@ BUSINESS_TABLES = [
     "assistant_marks",
     "assistant_keys",
     "credential_requests",
+    "personal_credential_bindings",
+    "personal_credential_items",
     "personal_credentials",
     "feishu_personal_grants",
     "wecom_personal_grants",

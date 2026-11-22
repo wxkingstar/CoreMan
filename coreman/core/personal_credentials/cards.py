@@ -6,7 +6,8 @@ import re
 import uuid
 from typing import Any
 
-from coreman.core.personal_credentials.policy import FEISHU_MAX_VALUE, card_task_id
+from coreman.core.personal_credentials.policy import FEISHU_MAX_VALUE, PICK_PREFIX, card_task_id
+from coreman.core.personal_credentials.store import Choice
 
 SECURITY_NOTE = (
     "🔒 安全说明：此表单的内容直接提交给 CoreMan 加密保存，不经过聊天，不会发送给 AI 模型。"
@@ -59,20 +60,32 @@ def form_card(
     web_url: str | None = None,
     mention_open_id: str | None = None,
     save: bool = True,
+    choices: dict[str, list[Choice]] | None = None,
+    defaults: dict[str, uuid.UUID] | None = None,
 ) -> dict[str, Any]:
+    """`choices` 非空的字段多一个「选已有凭证」下拉框，输入框改为选填：选了又填了，以填的为准。"""
     task_id = card_task_id(request_id)
+    choices, defaults = choices or {}, defaults or {}
     inputs: list[dict[str, Any]] = []
     for field in fields:
+        key = str(field["key"])
+        options = choices.get(key) or []
+        if options:
+            inputs.append(_pick(key, _label(field), options, defaults.get(key)))
         element: dict[str, Any] = {
             "tag": "input",
-            "name": str(field["key"]),
-            "required": True,
+            "name": key,
+            "required": not options,
             "max_length": FEISHU_MAX_VALUE,
             "label": {"tag": "plain_text", "content": _label(field)},
             "label_position": "top",
             "placeholder": {
                 "tag": "plain_text",
-                "content": str(field.get("placeholder") or f"请输入{_label(field)}"),
+                "content": (
+                    "或者在这里填写新的值"
+                    if options
+                    else str(field.get("placeholder") or f"请输入{_label(field)}")
+                ),
             },
         }
         if field.get("secret", True):
@@ -118,6 +131,23 @@ def form_card(
         },
         "body": {"elements": elements},
     }
+
+
+def _pick(key: str, label: str, options: list[Choice], default: uuid.UUID | None) -> dict[str, Any]:
+    element: dict[str, Any] = {
+        "tag": "select_static",
+        "name": PICK_PREFIX + key,
+        "required": False,
+        "width": "fill",
+        "placeholder": {"tag": "plain_text", "content": f"{label}：选择已有凭证（可选）"},
+        "options": [
+            {"text": {"tag": "plain_text", "content": option.title}, "value": str(option.id)}
+            for option in options
+        ],
+    }
+    if default is not None:
+        element["initial_option"] = str(default)
+    return element
 
 
 def _result(request_id: uuid.UUID, title: str, lines: list[str], template: str) -> dict[str, Any]:
