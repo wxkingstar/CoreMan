@@ -459,3 +459,71 @@ async def test_heartbeat_clears_its_own_login_failure_and_sends_probe_models(cli
     await client.post(endpoint, headers=headers, json=beat("ready"))
     relay = await codex()
     assert (relay.health_status, relay.health_detail) == ("auth_fail", "codex: token expired")
+
+
+async def test_live_calls_are_claimed_without_free_slots(client, db_session, app, db_engine):
+    """节点槽位全被后台阶段占着（slots=0）：`/live/*` 与写进进程的对话照样领到，普通调用不领。"""
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    async with _caller(app, db_engine, node_id) as caller:
+        normal = asyncio.create_task(caller.post("/v1/chat/completions", json={"n": 1}))
+        live = asyncio.create_task(
+            caller.post("/live/close", json={"session_id": "s1", "reason": "user"})
+        )
+        joined = asyncio.create_task(
+            caller.post(
+                "/v1/chat/completions",
+                json={"n": 2},
+                extensions={transport.SLOTLESS_EXTENSION: True},
+            )
+        )
+        await asyncio.sleep(0.5)
+        polled = await client.post("/api/runtime/poll", headers=headers, json={"slots": 0})
+        commands = polled.json()["data"]["commands"]
+        paths = sorted((c["path"], json.loads(base64.b64decode(c["body"]))) for c in commands)
+        assert paths == [
+            ("/live/close", {"session_id": "s1", "reason": "user"}),
+            ("/v1/chat/completions", {"n": 2}),
+        ]
+        rows = list(await db_session.scalars(select(RuntimeCall).order_by(RuntimeCall.created_at)))
+        assert [r.slotless for r in rows] == [False, True, True]
+        for task in (normal, live, joined):
+            task.cancel()
+        await asyncio.gather(normal, live, joined, return_exceptions=True)
+
+
+async def test_live_calls_still_reach_a_draining_node(client, db_session, app, db_engine):
+    _, body, headers = await enrollment(client, db_session)
+    node_id = uuid.UUID(body["node_id"])
+    node = await db_session.get(RuntimeNode, node_id)
+    node.draining = True
+    await db_session.commit()
+    async with _caller(app, db_engine, node_id) as caller:
+        refused = await caller.post("/v1/chat/completions", json={})
+        assert refused.status_code == 503
+        live = asyncio.create_task(caller.post("/live/stop_task", json={"session_id": "s1"}))
+        await asyncio.sleep(0.5)
+        polled = await client.post("/api/runtime/poll", headers=headers, json={"slots": 0})
+        assert [c["path"] for c in polled.json()["data"]["commands"]] == ["/live/stop_task"]
+        live.cancel()
+        await asyncio.gather(live, return_exceptions=True)
+
+
+async def test_heartbeat_stores_live_sessions_and_background_capability(client, db_session):
+    _, body, headers = await enrollment(client, db_session)
+    beat = {
+        "claude": {"claude_background_sessions_v1": True},
+        "codex": {},
+        "version": "test",
+        "service_status": "foreground",
+        "live_sessions": ["a-1", "a-1", 7, ""],
+    }
+    endpoint = "/api/runtime/heartbeat"
+    assert (await client.post(endpoint, headers=headers, json=beat)).status_code == 200
+    node = await db_session.get(RuntimeNode, uuid.UUID(body["node_id"]), populate_existing=True)
+    assert node.live_sessions == ["a-1"]
+    assert node.capabilities["claude"]["claude_background_sessions_v1"] is True
+    legacy = {k: v for k, v in beat.items() if k != "live_sessions"}
+    assert (await client.post(endpoint, headers=headers, json=legacy)).status_code == 200
+    await db_session.refresh(node)
+    assert node.live_sessions is None

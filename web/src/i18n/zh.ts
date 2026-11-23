@@ -380,6 +380,7 @@ export default {
     rootPending: '项目主目录修改已提交，等待 Runtime 确认生效',
     rootFailed: '主目录修改失败，仍使用原目录。请检查新路径和写入权限后重试',
     rootUpgrade: '此 Runtime 暂不支持修改主目录，请先升级 Runtime',
+    backgroundUpgrade: '待升级：后台任务',
     edit: '编辑运行时',
     renameHint: '用于识别运行时，保存后 AI 员工列表中的运行时名称会同步更新。',
     teamHint: '公共池对所有团队开放。更换团队不影响已绑定的 AI 员工；之后创建或切换到该运行时的 AI 员工按新团队限制。',

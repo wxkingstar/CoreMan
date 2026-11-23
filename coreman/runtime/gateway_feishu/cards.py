@@ -335,3 +335,88 @@ def media_card(kind: str, file_key: str, name: str) -> dict[str, Any]:
     )
     card["config"]["enable_forward"] = False
     return card
+
+
+BACKGROUND_PANEL_ID = "bg_tasks"
+
+
+def background_panel(view: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    """开工那一轮卡片下方的「后台任务」区块：每项一行，进行中的带「停止」，最后一个「停掉全部」。
+
+    `view` 是 `background_runs.view` 的形状；后台观察任务刷新时整块替换（element_id 固定）。
+    """
+    import time
+    from datetime import UTC, datetime
+
+    from coreman.core.chat import background_runs
+
+    moment = datetime.fromtimestamp(now if now is not None else time.time(), UTC)
+    tasks_ = [t for t in view.get("tasks") or [] if isinstance(t, dict)]
+    state = str(view.get("state") or "running")
+    run_id = int(view.get("run_id") or 0)
+    count = len(background_runs.running(tasks_))
+    if state == "running":
+        deadline = datetime.fromtimestamp(int(view.get("deadline") or 0), UTC)
+        title = f"后台任务 · {count} 项进行中，最长可跑到 {background_runs.deadline_text(deadline)}"
+    else:
+        title = "后台任务 · " + background_runs.heading(state, tasks_).split(" ", 1)[-1]
+
+    def stop(level: str, label: str) -> dict[str, Any]:
+        return {
+            "tag": "button",
+            "type": "default",
+            "size": "small",
+            "text": {"tag": "plain_text", "content": label},
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "task_id": background_runs.card_task_id(run_id),
+                        "event_key": background_runs.EVENT_KEY,
+                        "level": level,
+                    },
+                }
+            ],
+        }
+
+    rows: list[dict[str, Any]] = []
+    for index, task in enumerate(tasks_, 1):
+        line = clip(background_runs.task_line(index, task, moment), 200)
+        if task.get("status") == "completed":
+            line += "（结果已在下方回复）"
+        text = {"tag": "markdown", "content": line, "text_size": "notation"}
+        if state == "running" and task.get("status") == "running":
+            rows.append(
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "vertical_align": "center",
+                            "elements": [text],
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "elements": [stop(str(task.get("id")), "停止")],
+                        },
+                    ],
+                }
+            )
+        else:
+            rows.append(text)
+    if state == "running" and count:
+        rows.append(stop(background_runs.ALL, "停掉全部后台任务"))
+    return {
+        "tag": "collapsible_panel",
+        "element_id": BACKGROUND_PANEL_ID,
+        "expanded": state == "running",
+        "header": {"title": {"tag": "markdown", "content": title}},
+        "border": {"color": "grey", "corner_radius": "8px"},
+        "padding": "8px",
+        "elements": rows or [{"tag": "markdown", "content": "（没有后台任务）"}],
+    }

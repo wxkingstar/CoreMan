@@ -335,3 +335,20 @@ async def test_codex_capabilities_are_optional(reply, expected):
     ) as client:
         declared = await module.optional_capabilities(client)
     assert declared.get("owner_session_view_v1") is expected
+
+
+@pytest.mark.parametrize("advertised", [None, False, "true", True])
+async def test_background_sessions_capability_comes_from_claude_health(
+    healing_daemon, monkeypatch, advertised
+):
+    """后台阶段会话：只有 claude 驱动 /health 顶层的 live_sessions 是 true 才声明。"""
+    daemon = healing_daemon
+    release = Path(daemon.config["release"]) / "runtime_daemon/bin/runtime-claude"
+    source = release.read_text().replace(
+        '{"data": [{"id": "fake-model"}]}',
+        '{"data": [{"id": "fake-model"}], "live_sessions": ' + repr(advertised) + "}",
+    )
+    release.write_text(source)
+    await daemon.discover()
+    assert daemon.capabilities["claude"]["claude_background_sessions_v1"] is (advertised is True)
+    assert "claude_background_sessions_v1" not in daemon.capabilities["codex"]

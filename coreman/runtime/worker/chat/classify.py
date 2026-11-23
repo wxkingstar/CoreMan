@@ -112,6 +112,30 @@ class ClassifyStage(ChatStageBase):
             )
         if out.finish_reason not in {"stop", "end_turn", "completed"}:
             return self._incomplete(ctx, pre, text)
+        if out.background and not out.live_joined:
+            # 主回合结束、后台任务还在跑：不配 ✅，写明后台在做、做完逐条回复。
+            from coreman.core.chat import background_runs
+
+            n = len(background_runs.running(out.background_tasks))
+            return Verdict(
+                "success",
+                "succeeded",
+                None,
+                None,
+                text + msg("background_started_suffix", locale, n=n),
+            )
+        if out.live_joined:
+            # 驱动在这条流里报了后台任务在这一轮里完成：CLI 多半把完成通知并进了这一轮（也可能
+            # 另起一轮，由观察任务单独发），所以只说「可能」。
+            from coreman.core.chat import background_runs
+
+            merged = background_runs.finished_since(out.live_join_tasks, out.background_tasks)
+            if merged and out.text_events:
+                which = "、".join(background_runs.number(i) for i, _ in merged)
+                note = msg("live_merged_note", locale, which=which)
+                return Verdict(
+                    "success", "succeeded", None, None, text + note + msg("done_suffix", locale)
+                )
         if out.text_events == 0:
             body = (
                 msg("no_text_with_tools", locale, n=out.tool_events, url=url)

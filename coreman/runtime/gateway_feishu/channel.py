@@ -74,6 +74,8 @@ TOASTS: dict[str, dict[str, str]] = {
     "busy_cancel": {"type": "info", "content": "正在放弃这条…"},
     "busy_resume": {"type": "success", "content": "好的，继续处理"},
     "busy_drop": {"type": "info", "content": "好的，不处理了"},
+    "busy_bg_wait": {"type": "success", "content": "好的，等后台做完"},
+    "busy_bg_stop": {"type": "info", "content": "正在停掉后台任务…"},
     "provision_started": {"type": "success", "content": "正在开通，好了会在这里告诉你"},
     "provision_expired": {"type": "warning", "content": "这张卡片已失效，给我发条消息会收到新的"},
     "write_confirm": {"type": "success", "content": "已确认，正在执行…"},
@@ -98,6 +100,10 @@ TOASTS: dict[str, dict[str, str]] = {
     "stream_stop": {"type": "info", "content": "正在停止…"},
     "stream_stop_denied": {"type": "warning", "content": "只有提问人可以停止"},
     "stream_stop_late": {"type": "info", "content": "这条已经结束了"},
+    "live_stop_confirm": {"type": "warning", "content": "会同时停掉后台任务，请在弹出的卡片上确认"},
+    "background_stop": {"type": "info", "content": "正在停止…"},
+    "background_stop_denied": {"type": "warning", "content": "只有提问人和员工管理员可以停止"},
+    "background_stop_late": {"type": "info", "content": "后台任务已经结束了"},
     "reply_expired": {"type": "info", "content": "这条建议已过期，直接发消息问我就好"},
 }
 # 认不出的点击（新加的卡片漏配也一样）：至少说一句收到了，不只是一个对勾。

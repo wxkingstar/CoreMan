@@ -21,6 +21,7 @@ from coreman.core.relay.sse import SseEvent, SseParser
 from coreman.core.runtime_nodes.transport import (
     NODE_ERRORS,
     SANDBOX_EXTENSION,
+    SLOTLESS_EXTENSION,
     TOTAL_TIMEOUT_EXTENSION,
     ReverseTransport,
     RuntimeQueueTimeout,
@@ -54,6 +55,20 @@ class RelayInterruptedError(RelayError):
 
 class RelayBusyError(RelayError):
     """运行时节点满载：对话排队超过上限仍未开始执行（没有任何副作用）。"""
+
+
+class LiveConflictError(RelayError):
+    """驱动拒收这条对话（409）：会话在后台阶段但属于别人（`live_owner_mismatch`）、要求接进
+    后台阶段却已不在（`not_live`），或另一条消息正接在这个进程上（`live_busy`）。没有任何副作用，
+    调用方可以调整后重发。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"live_conflict: {code}")
+        self.code = code
+
+
+class LiveNotFoundError(RelayError):
+    """`/live/*` 返回 404：这个会话不在后台阶段。"""
 
 
 @dataclass
@@ -96,6 +111,13 @@ class ChatRequest:
     # 个人助理的一轮：节点在沙箱里跑，`transcript` 是转录的交接（core/assistants/transcripts.py）。
     sandbox: bool = False
     transcript: dict[str, Any] | None = None
+    # 后台阶段（仅 Claude、节点声明了 claude_background_sessions_v1）：提问人的平台用户 id 与
+    # 整段工作的到期时间（Unix 秒）。`live_join` 表示平台认定会话正在后台阶段、这条要写进那个
+    # 进程：本轮没签发凭据，驱动发现会话已不在后台阶段时必须拒收（409 not_live），不能用这份
+    # 空环境起新进程。
+    live_owner: str = ""
+    live_deadline: int | None = None
+    live_join: bool = False
 
     def __post_init__(self) -> None:
         # 沙箱与转录交接成对出现：只有一个，说明调用方拼错了。
@@ -144,6 +166,12 @@ class ChatRequest:
         if self.sandbox:
             body["sandbox"] = True
             body["transcript"] = dict(self.transcript or {})
+        if self.backend == "claude" and self.live_owner:
+            body["live_owner"] = self.live_owner
+            if self.live_deadline is not None:
+                body["live_deadline"] = self.live_deadline
+            if self.live_join:
+                body["live_join"] = True
         return body
 
 
@@ -298,6 +326,9 @@ class RelayClient:
             extensions: dict[str, Any] = {TOTAL_TIMEOUT_EXTENSION: total_timeout}
             if request.sandbox:
                 extensions[SANDBOX_EXTENSION] = True
+            if request.live_join and request.live_owner:
+                # 写进已在后台阶段的进程，不另占节点槽位。
+                extensions[SLOTLESS_EXTENSION] = True
             # 声明总时限：经反向通道时节点满载可以排队，调用期限也按它算（直连 relay 忽略）。
             async with self._http.stream(
                 "POST",
@@ -308,6 +339,8 @@ class RelayClient:
             ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread())[:500].decode(errors="replace")
+                    if resp.status_code == 409 and (code := _error_code(body)):
+                        raise LiveConflictError(code)
                     raise RelayError(f"HTTP {resp.status_code}: {body}")
                 lines = resp.aiter_lines()
                 while not parser.done:
@@ -332,6 +365,89 @@ class RelayClient:
         # 交给调用方按错误分类，再抛「未确认终态」只会让调用方丢掉这段原话。
         if not parser.saw_finish and not parser.saw_error:
             raise IncompleteResultError("incomplete_result: SSE 未返回确认终态")
+
+    async def live_attach(
+        self,
+        session_id: str,
+        *,
+        total_timeout: float,
+        read_timeout: float = 120.0,
+    ) -> AsyncGenerator[SseEvent, None]:
+        """接上后台阶段的输出（`POST /live/attach`）：逐行解析，见到 `[DONE]` 或流断即结束。
+
+        和对话流不同，这条流没有 finish_reason，正常结束只看 `[DONE]`；断开连接不影响进程。
+
+        Raises:
+            LiveNotFoundError: 会话不在后台阶段（404）
+            RelayError: 其余 HTTP 错误、连接失败、读超时或总时长超限
+        """
+        parser = SseParser("claude")
+        timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
+        deadline = time.monotonic() + total_timeout
+        try:
+            async with self._http.stream(
+                "POST",
+                "/live/attach",
+                json={"session_id": session_id},
+                timeout=timeout,
+                extensions={TOTAL_TIMEOUT_EXTENSION: total_timeout, SLOTLESS_EXTENSION: True},
+            ) as resp:
+                if resp.status_code == 404:
+                    raise LiveNotFoundError("not_live")
+                if resp.status_code != 200:
+                    body = (await resp.aread())[:500].decode(errors="replace")
+                    raise RelayError(f"HTTP {resp.status_code}: {body}")
+                lines = resp.aiter_lines()
+                while not parser.done:
+                    line = await _next_line(lines, deadline)
+                    if line is None:
+                        break
+                    for event in parser.feed_line(line):
+                        yield event
+        except TimeoutError as exc:
+            raise RelayError(f"SSE timeout: 总时长超过 {total_timeout:.0f} 秒") from exc
+        except httpx.ReadTimeout as exc:
+            raise RelayError(f"SSE timeout: {read_timeout:.0f} 秒无字节") from exc
+        except httpx.HTTPError as exc:
+            raise RelayError(f"连接失败: {type(exc).__name__}: {exc}") from exc
+        if not parser.done:
+            raise RelayError("live_attach_eof")
+
+    async def live_control(self, action: str, body: dict[str, Any]) -> bool:
+        """`POST /live/stop_task` 或 `/live/close`；返回是否生效，会话不在后台阶段返回 False。
+
+        Raises:
+            RelayError: 其余 HTTP 错误或连接失败
+        """
+        if action not in ("stop_task", "close"):
+            raise ValueError(action)
+        try:
+            r = await self._http.post(
+                f"/live/{action}",
+                json=body,
+                timeout=httpx.Timeout(30.0),
+                extensions={SLOTLESS_EXTENSION: True},
+            )
+        except httpx.HTTPError as exc:
+            raise RelayError(f"连接失败: {type(exc).__name__}") from exc
+        if r.status_code == 404:
+            return False
+        if r.status_code >= 300:
+            raise RelayError(f"HTTP {r.status_code}: {r.text[:200]}")
+        return True
+
+
+def _error_code(body: str) -> str | None:
+    """驱动错误体 `{"error":{"code":...}}` 里的错误码。"""
+    import json
+
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if code in ("live_owner_mismatch", "not_live", "live_busy") else None
 
 
 async def _next_line(lines: AsyncIterator[str], deadline: float) -> str | None:

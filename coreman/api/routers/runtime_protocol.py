@@ -154,6 +154,9 @@ class Capability(BaseModel):
     # 守护进程的开发环境预览隧道在跑（见 runtime_daemon/devpreview.py）；
     # 有它才在开发模式提示词里加预览规则。
     dev_preview_v1: StrictBool = False
+    # Claude 驱动能让带后台任务的进程长驻（后台阶段，见 core/chat/background_runs.py）。
+    # 旧节点没有，后台任务仍由 CLI 等 10 分钟后停掉。
+    claude_background_sessions_v1: StrictBool = False
     seats: list[SeatState] = Field(default_factory=list, max_length=21)
 
     @field_validator("assistant_sandbox_v1", mode="before")
@@ -226,6 +229,8 @@ class HeartbeatIn(BaseModel):
     # 协议 2 起上报；旧节点缺省为空，管理台显示为未知。
     max_concurrent: int | None = Field(default=None, ge=1, le=256)
     active_calls: int | None = Field(default=None, ge=0, le=1024)
+    # 还在后台阶段的会话（relay session id），各驱动合并；旧节点不上报。平台据此认定丢失的会话。
+    live_sessions: list[str] | None = None
     # 节点 config.json 的 Git 主机白名单，只读展示；旧节点不上报时为空。
     git_hosts: list[str] | None = None
     # CLI 实际继承到的出站代理，只读展示；旧节点不上报时为空（管理台显示为未知）。
@@ -236,6 +241,15 @@ class HeartbeatIn(BaseModel):
     # 同一台机器上的节点是不是同一个系统用户，写坏了按没上报处理，不让心跳被拒。
     machine: str | None = None
     uid: int | None = None
+
+    @field_validator("live_sessions", mode="before")
+    @classmethod
+    def live_ids(cls, value: object) -> list[str] | None:
+        # 写坏的条目丢掉，不让心跳被拒。
+        if not isinstance(value, list):
+            return None
+        ids = (v for v in value[:256] if isinstance(v, str) and 0 < len(v) <= 100)
+        return list(dict.fromkeys(ids))
 
     @field_validator("machine", mode="before")
     @classmethod
@@ -524,6 +538,7 @@ async def heartbeat(
             protocol_version=body.protocol,
             max_concurrent=body.max_concurrent,
             active_calls=body.active_calls,
+            live_sessions=body.live_sessions,
             git_hosts=body.git_hosts,
             proxy=body.proxy.model_dump() if body.proxy else None,
             capabilities={p: getattr(body, p).model_dump() for p in BACKENDS},
@@ -730,6 +745,25 @@ async def _collect(
     )
     cancelled = [str(i) for i in body.running if i not in active]
     commands: list[dict[str, Any]] = []
+    # 不占槽位的调用（后台阶段的观察、控制与写进进程的对话）：没有空位、排空中也照领。
+    moment = now()
+    rows = list(
+        await session.scalars(
+            select(RuntimeCall)
+            .where(
+                RuntimeCall.node_id == node_id,
+                RuntimeCall.status == "queued",
+                RuntimeCall.slotless.is_(True),
+                RuntimeCall.consumer_at >= moment - timedelta(seconds=LEASE_SECONDS),
+                RuntimeCall.deadline > moment,
+            )
+            .order_by(RuntimeCall.created_at)
+            .limit(16)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for row in rows:
+        await _dispatch(session, request, node_id, row, commands)
     if not node.draining and body.slots:
         # 只看每种 AI 自己的沙箱能力：能隔离 claude、不能隔离 codex 的节点领不到 codex 的助理调用。
         capable = [p for p in BACKENDS if node_sandboxed(node, p)]
@@ -745,7 +779,7 @@ async def _collect(
         rows = list(
             await session.scalars(
                 select(RuntimeCall)
-                .where(*claimable, RuntimeCall.sandbox.is_(False))
+                .where(*claimable, RuntimeCall.sandbox.is_(False), RuntimeCall.slotless.is_(False))
                 .order_by(RuntimeCall.created_at)
                 .limit(min(body.slots, 4))
                 .with_for_update(skip_locked=True)
@@ -762,13 +796,21 @@ async def _collect(
             except Exception as exc:
                 log.warning("assistant_claim_failed", error_type=type(exc).__name__)
         for row in rows:
-            payload = json.loads(
-                request.app.state.cipher.decrypt(row.request_enc, envelope_aad(row.id))
-            )
-            row.status, row.request_enc = "running", ""
-            commands.append({"id": str(row.id), "provider": row.provider, **payload})
-            await notify_call(session, row.id, node_id)
+            await _dispatch(session, request, node_id, row, commands)
     return node.draining, cancelled, commands
+
+
+async def _dispatch(
+    session: AsyncSession,
+    request: Request,
+    node_id: uuid.UUID,
+    row: RuntimeCall,
+    commands: list[dict[str, Any]],
+) -> None:
+    payload = json.loads(request.app.state.cipher.decrypt(row.request_enc, envelope_aad(row.id)))
+    row.status, row.request_enc = "running", ""
+    commands.append({"id": str(row.id), "provider": row.provider, **payload})
+    await notify_call(session, row.id, node_id)
 
 
 async def _assistant_limit(request: Request) -> int:

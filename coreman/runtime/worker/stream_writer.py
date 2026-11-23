@@ -28,6 +28,8 @@ class StreamWriter:
         plan: agent 自己的任务清单（最后一份），[{"text", "status"}]
         activity: 卡片状态行的数据（最后动作、已知长等待、疑似卡住），见 core/chat/liveness.py
         interrupted: 收尾时的中断原因；有值时随终态写进 activity，网关把卡片标红
+        background: 后台阶段的区块数据（`background_runs.view` 的形状，进入前只有 tasks）；
+            随 activity 的 `background` 键写库，网关据此渲染卡片区块与标题
     """
 
     def __init__(self, ctx: TaskContext, *, min_interval: float = 0.5) -> None:
@@ -39,6 +41,7 @@ class StreamWriter:
         self.plan: list[dict[str, str]] = []
         self.activity: dict[str, Any] = {}
         self.interrupted: str | None = None
+        self.background: dict[str, Any] | None = None
         self._last_written: tuple[str, str, tuple[int, ...], str, str] | None = None
         self._last_flush = -1e9
         self.delivery: streams.Completion | None = None
@@ -94,6 +97,14 @@ class StreamWriter:
             {"text": self.ctx.redact(text) or "", "status": status} for text, status in items
         ]
 
+    def set_background(self, value: dict[str, Any] | None) -> None:
+        self.background = value
+
+    def _activity(self) -> dict[str, Any]:
+        if self.background is None:
+            return self.activity
+        return {**self.activity, "background": self.background}
+
     def set_thinking_line(self, text: str) -> None:
         self.extra_lines.append(text)
 
@@ -125,7 +136,7 @@ class StreamWriter:
             text,
             tuple(boundaries),
             repr(self.plan),
-            repr(self.activity),
+            repr(self._activity()),
         )
         now = self.ctx.clock()
         if not force and (
@@ -141,7 +152,7 @@ class StreamWriter:
                 pending_text=state[1],
                 segment_boundaries=list(state[2]),
                 plan=self.plan,
-                activity=self.activity,
+                activity=self._activity(),
             )
             await session.commit()
         self.delivery = delivery
@@ -167,7 +178,7 @@ class StreamWriter:
                 segment_boundaries=boundaries,
                 plan=self.plan,
             )
-            activity = {k: v for k, v in self.activity.items() if k not in ("until", "stuck")}
+            activity = {k: v for k, v in self._activity().items() if k not in ("until", "stuck")}
             if self.interrupted:
                 activity["interrupted"] = self.interrupted
             done = await streams.complete(

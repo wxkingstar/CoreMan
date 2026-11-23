@@ -130,14 +130,16 @@ def test_state_file_is_written_on_change_and_otherwise_throttled(node, monkeypat
     assert state.exists()
 
 
-async def test_full_node_drops_its_wait_when_a_slot_frees(node):
+async def test_full_node_polls_again_when_a_slot_frees(node):
     node.config["max_concurrent"] = 1
     started = asyncio.Event()
+    release = asyncio.Event()
 
     async def api(path, body, *, retry=False, budget=None):
         assert body["slots"] == 0 and body["wait"] == module.POLL_WAIT_SECONDS
         started.set()
-        await asyncio.sleep(60)
+        await release.wait()
+        return {"commands": [], "cancelled": [], "protocol": 2}
 
     node.api = api
     busy = asyncio.create_task(asyncio.sleep(60))
@@ -147,6 +149,44 @@ async def test_full_node_drops_its_wait_when_a_slot_frees(node):
         await asyncio.wait_for(started.wait(), 1)
         node.slots_freed.set()
         assert await asyncio.wait_for(polling, 1) is None
+        # 被顶替的这一轮没有取消，在后台等它返回。
+        assert len(node.late_polls) == 1
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*node.late_polls), 1)
+        assert not node.late_polls
+    finally:
+        busy.cancel()
+        await asyncio.gather(busy, return_exceptions=True)
+
+
+async def test_slotless_call_claimed_by_a_superseded_poll_still_runs(node):
+    """0 个槽位时平台也会领 /live/* 与 live_join：被顶替的那一轮领到的调用照样执行，不丢。"""
+    node.config["max_concurrent"] = 1
+    started, release = asyncio.Event(), asyncio.Event()
+    executed = []
+
+    async def api(path, body, *, retry=False, budget=None):
+        started.set()
+        await release.wait()
+        command = {"id": "close-1", "provider": "claude", "method": "POST", "path": "/live/close"}
+        return {"commands": [command], "cancelled": [], "protocol": 2}
+
+    async def execute(command):
+        executed.append(command["id"])
+
+    node.api, node.execute = api, execute
+    busy = asyncio.create_task(asyncio.sleep(60))
+    node.tasks["one"] = busy
+    polling = asyncio.create_task(node.poll_once())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        node.slots_freed.set()
+        assert await asyncio.wait_for(polling, 1) is None
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*node.late_polls), 1)
+        await asyncio.sleep(0)
+        assert executed == ["close-1"] and "close-1" in node.live_calls
+        assert not node.abandoned
     finally:
         busy.cancel()
         await asyncio.gather(busy, return_exceptions=True)

@@ -62,6 +62,8 @@ UNLISTENED_POLL_SECONDS = 0.25
 TOTAL_TIMEOUT_EXTENSION = "coreman.total_timeout"
 # 个人助理在沙箱里跑的一轮：节点领取时按助理并发上限另算（见 runtime_protocol._collect）。
 SANDBOX_EXTENSION = "coreman.sandbox"
+# 不占节点槽位的调用（后台阶段的观察、控制与写进进程的对话），见 RuntimeCall.slotless。
+SLOTLESS_EXTENSION = "coreman.slotless"
 # 等节点接单（queued→running）的上限：节点并发满了是排队，不是连接失败。
 QUEUE_WAIT_SECONDS = 120.0
 # 排队期间多久核对一次节点：掉线、停用或开始排空（不会再接单）时不必等满排队上限。
@@ -321,11 +323,13 @@ class ReverseTransport(httpx.AsyncBaseTransport):
         )
         extensions = request.extensions
         started = now()
+        slotless = extensions.get(SLOTLESS_EXTENSION) is True or path.startswith("/live/")
         async with self.factory() as session:
             node = await session.get(RuntimeNode, self.node_id)
             if not node or not node.is_active or not online(node):
                 return httpx.Response(503, text="运行时离线或未启用")
-            if node.draining and request.method == "POST":
+            # 排空中的节点照样接后台阶段的调用：等它清空的正是这些会话，停不掉就排不空。
+            if node.draining and request.method == "POST" and not slotless:
                 return httpx.Response(503, text="运行时正在排空任务")
             pending = await session.scalar(
                 select(func.count())
@@ -344,6 +348,7 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                     + timedelta(seconds=call_seconds(extensions.get(TOTAL_TIMEOUT_EXTENSION))),
                     consumer_at=started,
                     sandbox=extensions.get(SANDBOX_EXTENSION) is True,
+                    slotless=slotless,
                 )
             )
             await notify_node(session, self.node_id, call_id)
@@ -378,7 +383,7 @@ class ReverseTransport(httpx.AsyncBaseTransport):
                         continue
                     if not accepted and loop.time() >= next_check:
                         next_check = loop.time() + NODE_CHECK_SECONDS
-                        if reason := await self._unavailable():
+                        if reason := await self._unavailable(slotless=slotless):
                             raise httpx.ConnectError(reason, request=request)
                     await wait_event(stream.wake, poll_seconds())
         except TimeoutError as exc:
@@ -398,13 +403,13 @@ class ReverseTransport(httpx.AsyncBaseTransport):
             await stream.aclose()
             raise
 
-    async def _unavailable(self) -> str | None:
+    async def _unavailable(self, *, slotless: bool = False) -> str | None:
         """排队期间核对节点；返回不必再等的原因（离线、停用、排空中不会再接单）。"""
         async with self.factory() as session:
             node = await session.get(RuntimeNode, self.node_id)
             if not node or not node.is_active or not online(node):
                 return "运行时离线或未启用"
-            if node.draining:
+            if node.draining and not slotless:
                 return "运行时正在排空任务"
         return None
 

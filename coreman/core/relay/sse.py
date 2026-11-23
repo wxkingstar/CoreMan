@@ -139,6 +139,123 @@ class ActualModelEvent:
     model: str
 
 
+BACKGROUND_TASK_STATUSES = frozenset({"running", "completed", "stopped", "failed"})
+BACKGROUND_END_STATES = frozenset({"finished", "stopped", "expired", "failed"})
+BACKGROUND_MAX_TASKS = 50
+BACKGROUND_DESCRIPTION_CHARS = 120
+BACKGROUND_PROGRESS_CHARS = 80
+
+
+@dataclass(frozen=True)
+class BackgroundEvent:
+    """主回合结束、还有后台任务在跑：进程转入后台阶段（`x_runtime.background`）。"""
+
+    tasks: tuple[dict[str, Any], ...]
+    deadline: int | None
+
+
+@dataclass(frozen=True)
+class BackgroundTasksEvent:
+    """后台任务表变了（`x_runtime.background_tasks`），整份重发。"""
+
+    tasks: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class LiveJoinedEvent:
+    """这条消息写进了后台阶段里的进程（`x_runtime.live_joined`），带上此刻的后台任务。"""
+
+    tasks: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class TurnEndEvent:
+    """后台观察流里一个回合结束（`x_runtime.turn_end`）。
+
+    `merged`：这一回合并进了本人的新消息，由那条消息的回复负责；`partial`：本人接进来时这一回合
+    已经写出的半段，后续内容走新消息的回复。
+    """
+
+    merged: bool
+    partial: bool = False
+
+
+@dataclass(frozen=True)
+class BackgroundEndEvent:
+    """后台阶段结束（`x_runtime.background_end`）。"""
+
+    state: str
+    tasks: tuple[dict[str, Any], ...]
+
+
+def background_tasks(value: Any) -> tuple[dict[str, Any], ...]:
+    """驱动的后台任务快照整理成固定形状；认不出的项丢掉，字段截断。"""
+    if not isinstance(value, list):
+        return ()
+    out: list[dict[str, Any]] = []
+    for item in value[:BACKGROUND_MAX_TASKS]:
+        if not isinstance(item, dict):
+            continue
+        task_id = item.get("id")
+        status = item.get("status")
+        if not isinstance(task_id, str) or not task_id or status not in BACKGROUND_TASK_STATUSES:
+            continue
+        kind = item.get("kind")
+        out.append(
+            {
+                "id": task_id[:100],
+                "description": _line(item.get("description"), BACKGROUND_DESCRIPTION_CHARS),
+                "kind": kind if kind in ("agent", "bash") else "agent",
+                "status": status,
+                "started_at": _seconds(item.get("started_at")),
+                "ended_at": _seconds(item.get("ended_at")),
+                "last_progress": _line(item.get("last_progress"), BACKGROUND_PROGRESS_CHARS),
+                "last_progress_at": _seconds(item.get("last_progress_at")),
+            }
+        )
+    return tuple(out)
+
+
+def _line(value: Any, limit: int) -> str:
+    text = " ".join(str(value).split()) if isinstance(value, str) else ""
+    return text[:limit]
+
+
+def _seconds(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        return None
+    return int(value)
+
+
+def _runtime_events(runtime: dict[str, Any]) -> list[Any]:
+    out: list[Any] = []
+    background = runtime.get("background")
+    if isinstance(background, dict):
+        out.append(
+            BackgroundEvent(
+                background_tasks(background.get("tasks")), _seconds(background.get("deadline"))
+            )
+        )
+    if "background_tasks" in runtime:
+        out.append(BackgroundTasksEvent(background_tasks(runtime.get("background_tasks"))))
+    joined = runtime.get("live_joined")
+    if isinstance(joined, dict):
+        out.append(LiveJoinedEvent(background_tasks(joined.get("tasks"))))
+    turn_end = runtime.get("turn_end")
+    if isinstance(turn_end, dict):
+        out.append(TurnEndEvent(turn_end.get("merged") is True, turn_end.get("partial") is True))
+    end = runtime.get("background_end")
+    if isinstance(end, dict):
+        state = end.get("state")
+        out.append(
+            BackgroundEndEvent(
+                state if state in BACKGROUND_END_STATES else "failed",
+                background_tasks(end.get("tasks")),
+            )
+        )
+    return out
+
+
 SseEvent = (
     TextDelta
     | ThinkingDelta
@@ -152,6 +269,11 @@ SseEvent = (
     | FinishEvent
     | RuntimeObservationEvent
     | ActualModelEvent
+    | BackgroundEvent
+    | BackgroundTasksEvent
+    | LiveJoinedEvent
+    | TurnEndEvent
+    | BackgroundEndEvent
 )
 
 
@@ -198,6 +320,7 @@ class SseParser:
             seat = runtime.get("seat_id")
             if isinstance(seat, str) and re.fullmatch(r"default|[a-f0-9]{12}", seat):
                 out.append(RuntimeObservationEvent(seat))
+            out.extend(_runtime_events(runtime))
         model = chunk.get("x_actual_model")
         if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,150}", model):
             out.append(ActualModelEvent(model))

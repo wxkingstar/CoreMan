@@ -173,6 +173,37 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "no_text_no_tools": "AI 已完成处理，但未生成文本回复。请尝试换个方式描述您的需求。",
         "done_suffix": "\n\n✅ 回复已生成",
+        "background_started_suffix": "\n\n⏳ 已在后台开始 {n} 项，完成后会逐条回复在这条消息下",
+        "live_joined_line": "🔁 接着后台进行中的会话处理，后台还有 {n} 项在跑",
+        "live_merged_note": "\n\n（后台任务 {which} 在这一轮里完成，结果可能已并入这条回复）",
+        "background_done_prefix": "**后台任务 {which} 完成**",
+        "background_turn_prefix": "**后台任务有新进展**",
+        "background_stopped_notice": (
+            "⏹ 后台任务已停止（已跑 {elapsed}）。没做完的：\n{lines}\n\n"
+            "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
+        ),
+        "background_expired_notice": (
+            "⏹ 后台任务到了任务时限，已停止（已跑 {elapsed}）。没做完的：\n{lines}\n\n"
+            "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
+        ),
+        "background_lost_notice": (
+            "❌ 后台任务因运行节点中断而停止（已跑 {elapsed}）。工作区里已经写下的改动还在，"
+            "需要的话说「接着做」。"
+        ),
+        "busy_bg_title": "后台任务还在进行",
+        "busy_bg_ask": "上一位提问人交代的 {n} 项后台任务还在跑，你的消息会等它们做完再处理。",
+        "busy_bg_opt_wait": "等后台做完",
+        "busy_bg_opt_stop": "停掉后台任务，先处理我的",
+        "busy_bg_wait_title": "好的，等后台做完",
+        "busy_bg_wait_desc": "后台任务结束后接着处理你的消息。",
+        "busy_bg_stopped_title": "正在停掉后台任务",
+        "busy_bg_stopped_desc": "后台任务停下后马上处理你的消息。",
+        "busy_bg_done_title": "后台已经结束",
+        "busy_bg_done_desc": "你的消息会照常处理。",
+        "live_stop_confirm_title": "确定停下吗？",
+        "live_stop_confirm_desc": "停下这次回答会同时停掉 {n} 个后台任务。",
+        "live_stop_confirm_ok": "确定停下",
+        "live_stop_confirm_cancel": "不停了",
         "session_link_prefix": "📎 查看实时聊天记录：[链接>>]({url})\n\n",
         "thinking_start": "🤔 正在思考中...",
         "thinking_end": "回复生成完成",
@@ -529,6 +560,49 @@ MESSAGES: dict[str, dict[str, str]] = {
             "別の表現でご要望をお試しください。"
         ),
         "done_suffix": "\n\n✅ 返信を生成しました",
+        "background_started_suffix": (
+            "\n\n⏳ バックグラウンドで {n} 件を開始しました。完了ごとにこのメッセージへ返信します"
+        ),
+        "live_joined_line": (
+            "🔁 進行中のバックグラウンド会話の続きで処理します（残り {n} 件実行中）"
+        ),
+        "background_done_prefix": "**バックグラウンドタスク {which} が完了しました**",
+        "live_merged_note": (
+            "\n\n（バックグラウンドタスク {which} がこの間に完了しました。"
+            "結果はこの返信に含まれている場合があります）"
+        ),
+        "background_turn_prefix": "**バックグラウンドタスクに進展がありました**",
+        "background_stopped_notice": (
+            "⏹ バックグラウンドタスクを停止しました（実行時間 {elapsed}）。未完了：\n{lines}\n\n"
+            "「続けて」と送れば、会話記録から止まったところを続けます。"
+        ),
+        "background_expired_notice": (
+            "⏹ タスクの制限時間に達したため停止しました（実行時間 {elapsed}）。"
+            "未完了：\n{lines}\n\n"
+            "「続けて」と送れば、会話記録から止まったところを続けます。"
+        ),
+        "background_lost_notice": (
+            "❌ 実行ノードが中断したため、バックグラウンドタスクが停止しました"
+            "（実行時間 {elapsed}）。"
+            "作業ディレクトリに書かれた変更は残っています。「続けて」と送れば続けます。"
+        ),
+        "busy_bg_title": "バックグラウンドタスク実行中",
+        "busy_bg_ask": (
+            "前の依頼者のバックグラウンドタスク {n} 件が実行中です。"
+            "終わってからこのメッセージを処理します。"
+        ),
+        "busy_bg_opt_wait": "終わるまで待つ",
+        "busy_bg_opt_stop": "バックグラウンドを止めて先に処理",
+        "busy_bg_wait_title": "了解、終わるまで待ちます",
+        "busy_bg_wait_desc": "バックグラウンドタスクが終わったら処理します。",
+        "busy_bg_stopped_title": "バックグラウンドタスクを停止しています",
+        "busy_bg_stopped_desc": "停止したらすぐにこのメッセージを処理します。",
+        "busy_bg_done_title": "バックグラウンドは終了しています",
+        "busy_bg_done_desc": "このメッセージは通常どおり処理します。",
+        "live_stop_confirm_title": "停止しますか？",
+        "live_stop_confirm_desc": "この回答を止めると、バックグラウンドタスク {n} 件も停止します。",
+        "live_stop_confirm_ok": "停止する",
+        "live_stop_confirm_cancel": "やめる",
         "session_link_prefix": "📎 リアルタイムの会話ログ：[リンク>>]({url})\n\n",
         "thinking_start": "🤔 考え中...",
         "thinking_end": "回答の生成が完了しました",

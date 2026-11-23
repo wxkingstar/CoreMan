@@ -121,6 +121,8 @@ COLUMN_REFERENCES = {
     "coreman/core/assistants/transcripts.py": 1,  # 上传时 defer 掉旧的转录，不读它
     "coreman/core/bus/tasks.py": 3,  # 明文键 serialize_session、stale_hold
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
+    # 后台阶段的观察任务、排队消息：明文键 run_id / background_hold；个人助理不进后台阶段
+    "coreman/core/chat/background_runs.py": 4,
     "coreman/core/chat/group_observe.py": 2,  # 只处理群消息，助理不收群消息
     # patch_state：助理的行取值后 open_value 再整块封存；普通机器人的行在库里 `||` 合并
     "coreman/core/chat/interactions.py": 2,
@@ -135,12 +137,15 @@ COLUMN_REFERENCES = {
     "coreman/core/reminders.py": 1,  # 明文键 user_id
     # 确认卡过期时找到发出去的那张卡：只按下划线开头的明文键（消息编号）取值
     "coreman/core/systems_catalog/confirm.py": 1,
-    "coreman/runtime/gateway_common/inbound.py": 7,  # 明文键
+    # 明文键；后台阶段的排队（background_hold / background_offer）只给飞书普通员工
+    "coreman/runtime/gateway_common/inbound.py": 11,
     "coreman/runtime/gateway_feishu/assistant_inbound.py": 1,  # 下划线开头的明文键
     "coreman/runtime/gateway_feishu/reply_buttons.py": 2,  # 下划线开头的明文键
     "coreman/runtime/gateway_feishu/transport.py": 2,  # 下划线开头的明文键
     "coreman/runtime/scheduler/reaper.py": 1,  # 任务报错：取值后 open_value
     "coreman/runtime/worker/busy_choice.py": 1,  # 明文键 platform_user_id
+    # 停下前的确认卡：下划线开头的明文键（消息编号、目标任务）
+    "coreman/runtime/worker/stream_stop.py": 2,
     "coreman/runtime/worker/card_actions.py": 2,  # 明文键与 card.task_id 的明文镜像
     "coreman/runtime/worker/chat/feishu_quote.py": 4,  # 两处取值后 open_value，两处明文键过滤
     "coreman/runtime/worker/choice_flow.py": 1,  # card.task_id 的明文镜像
@@ -202,6 +207,8 @@ WRITE_STATEMENTS = {
     # 其余只写状态
     "coreman/core/chat/interactions.py": 5,
     "coreman/core/chat/chat_logs.py": 5,  # 五处都封存
+    # 后台阶段结束时放行排队的消息：只改 run_after、去掉明文键 background_hold；个人助理不进后台阶段
+    "coreman/core/chat/background_runs.py": 1,
     "coreman/core/pricing.py": 1,  # 补算成本：只写 cost_usd
     # 云服务审批的挂起单：新建时没有理由；另一条只写状态。理由经 ORM 写入，flush 钩子封存
     "coreman/core/cloud_proxy/service.py": 2,

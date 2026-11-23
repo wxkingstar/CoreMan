@@ -54,6 +54,8 @@ Outcome = Literal[
     "busy_cancel",
     "busy_resume",
     "busy_drop",
+    "busy_bg_wait",
+    "busy_bg_stop",
     # 个人助理的开通卡片（没有助理记录时，由 AssistantInbound.on_unprovisioned 处理）。
     "provision_started",
     "provision_expired",
@@ -82,6 +84,12 @@ Outcome = Literal[
     "stream_stop",
     "stream_stop_denied",
     "stream_stop_late",
+    # 停下的这一轮写在后台阶段的进程里：先弹确认（会连带停掉后台任务）。
+    "live_stop_confirm",
+    # 后台任务区块上的「停止」「停掉全部后台任务」：已收下、没有权限、已经结束。
+    "background_stop",
+    "background_stop_denied",
+    "background_stop_late",
     # 建议追问超过有效期。
     "reply_expired",
 ]
@@ -93,6 +101,8 @@ _BUSY_KEYS = frozenset(
         busy_choice.CANCEL,
         busy_choice.RESUME,
         busy_choice.DROP,
+        busy_choice.BG_WAIT,
+        busy_choice.BG_STOP,
     }
 )
 
@@ -237,7 +247,35 @@ async def _stop_click(
         return "stream_stop_denied"
     if target.status not in tasks.OPEN or target.cancel_requested_at is not None:
         return "stream_stop_late"
+    if target.payload.get("live_join") and action.get("level") != stream_stop.CONFIRMED:
+        from coreman.core.chat import background_runs
+        from coreman.core.db.models import BackgroundRun
+
+        run = await session.get(BackgroundRun, int(target.payload["live_join"]))
+        if run is not None and run.state == "running" and background_runs.running(run.tasks or []):
+            return "live_stop_confirm"
     return "stream_stop"
+
+
+async def _background_click(
+    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
+) -> Outcome | None:
+    """后台任务区块上的按钮：只为选 toast，真正的核对和停止在 worker。"""
+    from coreman.core.chat import background_runs
+    from coreman.core.db.models import BackgroundRun
+
+    action = message.card_action or {}
+    run_id = background_runs.parse_card_task_id(str(action.get("task_id") or ""))
+    if message.kind != "card_action" or run_id is None:
+        return None
+    run = await session.get(BackgroundRun, run_id)
+    if run is None or run.bot_id != bot_id:
+        return None
+    if run.state != "running":
+        return "background_stop_late"
+    if not await background_runs.can_stop(session, run, message.sender.platform_user_id or ""):
+        return "background_stop_denied"
+    return "background_stop"
 
 
 async def admit(
@@ -263,6 +301,7 @@ async def admit(
             _busy_click(message)
             or _card_click(message)
             or await _stop_click(session, bot.id, message)
+            or await _background_click(session, bot.id, message)
         )
         if outcome in _INITIATOR_ONLY:
             initiator = await _initiator_clicked(session, bot.id, message)

@@ -309,6 +309,8 @@ async def test_ordinary_only_poll_never_touches_the_assistant_path(
         event.remove(engine, "before_cursor_execute", record)
     assert claimed == [str(c) for c in calls[:4]]
     claims = [s for s in statements if "FROM runtime_calls" in s and "FOR UPDATE" in s]
+    # 不占槽位的调用（后台阶段）另有一条领取查询，与助理无关。
+    claims = [s for s in claims if "slotless IS true" not in s]
     assert len(claims) == 1 and "sandbox IS false" in claims[0]
     assert not any("assistant_node_concurrency" in s for s in statements)
 

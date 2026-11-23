@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from coreman.core.chat import busy_choice, stream_stop, topics
+from coreman.core.chat import background_runs, busy_choice, stream_stop, topics
 from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_form, parse_reply
@@ -172,6 +172,7 @@ def _normalize_event(
             and busy_choice.parse_card_task_id(task_id) is None
             and topics.parse_card_task_id(task_id) is None
             and stream_stop.parse_card_task_id(task_id) is None
+            and background_runs.parse_card_task_id(task_id) is None
         ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")

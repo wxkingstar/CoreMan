@@ -54,6 +54,8 @@ class RuntimeNode(TimestampMixin, Base):
     proxy: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # 最近一次注册或心跳的来源 IP（平台看到的地址，经 NAT 时是出口 IP）。
     ip: Mapped[str | None] = mapped_column(INET)
+    # 心跳上报的后台阶段会话（relay session id 列表，各驱动合并）；旧节点不上报时为空。
+    live_sessions: Mapped[list[str] | None] = mapped_column(JSONB)
 
 
 class RuntimeInstallLink(TimestampMixin, Base):
@@ -93,6 +95,9 @@ class RuntimeCall(Base):
     error: Mapped[str | None] = mapped_column(Text)
     # 个人助理在沙箱里跑的一轮：领取时按节点的助理并发上限另算，排在普通调用之后。
     sandbox: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # 不占节点槽位的调用：`/live/*` 控制与观察，以及写进已在后台阶段的进程的对话。节点槽位全被
+    # 后台阶段占满时它们照样领得到，否则平台连占着槽位的会话都停不掉。
+    slotless: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
 
 class RuntimeChunk(Base):

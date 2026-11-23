@@ -9,11 +9,15 @@ from coreman.core.bus import outbox
 from coreman.core.chat import dispatch, group_observe
 from coreman.core.db.models import Task
 from coreman.core.i18n.messages import msg
+from coreman.core.relay.client import LiveConflictError
 from coreman.core.relay.sse import (
     ActualModelEvent,
     AskUserQuestionEvent,
+    BackgroundEvent,
+    BackgroundTasksEvent,
     FinishEvent,
     ImageDelta,
+    LiveJoinedEvent,
     PlanUpdate,
     RateLimitEvent,
     RelayErrorEvent,
@@ -138,6 +142,12 @@ class ConverseStage(ChatStageBase):
                 await supervisor.on_progress(now, pre.writer.pending_text, pre.writer.boundaries)
                 if out.ask_user:
                     return out
+        except LiveConflictError as exc:
+            # 驱动拒收、还没开始执行：交给处理器调整后重发（见 handler.run）。
+            ctx.log.info("live_conflict", code=exc.code)
+            out.live_conflict = exc.code
+            out.error = exc
+            return out
         except Exception as exc:  # noqa: BLE001 任何异常都只算这一轮失败，统一进 _classify
             ctx.log.warning("task_failed", error=type(exc).__name__)
             out.error = exc
@@ -151,6 +161,30 @@ class ConverseStage(ChatStageBase):
             await gen.aclose()
             await client.aclose()
             await images.aclose()
+
+    def _apply_background(
+        self,
+        ctx: TaskContext,
+        pre: Prepared,
+        out: Outcome,
+        event: BackgroundTasksEvent | BackgroundEvent | LiveJoinedEvent,
+    ) -> None:
+        """后台任务的帧：快照记进 Outcome，卡片区块的数据随 activity 写库。"""
+        from coreman.core.chat import background_runs
+
+        tasks_ = ctx.redact_json(list(event.tasks))
+        writer = pre.writer
+        if isinstance(event, LiveJoinedEvent):
+            out.live_joined, out.live_join_tasks = True, list(tasks_)
+            writer.set_thinking_line(
+                msg("live_joined_line", ctx.locale, n=len(background_runs.running(tasks_)))
+            )
+        elif isinstance(event, BackgroundEvent):
+            out.background, out.background_deadline = True, event.deadline
+        out.background_tasks = background_runs.merge(out.background_tasks, tasks_)
+        if not out.live_joined:
+            # 本人接着发的那一轮不画区块：区块在开工那一轮的卡片上，由观察任务更新。
+            writer.set_background({"tasks": out.background_tasks})
 
     async def _observe_ack(self, ctx: TaskContext, pre: Prepared) -> None:
         """插话回合跑久了：引用触发消息回一句「我看一下」，让大家知道有人在处理。"""
@@ -170,6 +204,9 @@ class ConverseStage(ChatStageBase):
             await session.commit()
 
     def _apply(self, ctx: TaskContext, pre: Prepared, out: Outcome, event: SseEvent) -> None:
+        if isinstance(event, BackgroundTasksEvent | BackgroundEvent | LiveJoinedEvent):
+            self._apply_background(ctx, pre, out, event)
+            return
         if isinstance(event, RuntimeObservationEvent):
             out.runtime_seat_id = event.seat_id
             return

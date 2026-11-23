@@ -371,6 +371,7 @@ const en = {
     rootPending: 'Project root change submitted; waiting for Runtime acknowledgement',
     rootFailed: 'Root change failed; the original root is still active. Check the new path and write permissions, then retry',
     rootUpgrade: 'Upgrade this Runtime to enable root editing',
+    backgroundUpgrade: 'Upgrade for background tasks',
     edit: 'Edit runtime', renameHint: 'A name to identify this runtime. Changes also appear in the AI employee list.',
     teamHint: 'The shared pool is open to every team. Changing the team does not affect AI employees already bound; AI employees created on or switched to this runtime later follow the new team.',
     visibility: 'Visibility',

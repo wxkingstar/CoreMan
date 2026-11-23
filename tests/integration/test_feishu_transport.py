@@ -2355,3 +2355,74 @@ def test_feed_card_text_avoids_characters_feishu_shows_escaped():
     from coreman.runtime.gateway_feishu.feed import _clip
 
     assert _clip("⏳ 运行命令：cd /tmp && a <b>", 120) == "⏳ 运行命令：cd /tmp ＆＆ a ＜b＞"
+
+
+async def test_background_panel_rides_on_the_final_card_and_refreshes_in_place(
+    db_session, db_engine
+):
+    """进了后台阶段的一轮：终稿卡片带上后台区块，之后的出站条目整块替换区块并改标题。"""
+    import uuid as _uuid
+
+    from coreman.core.chat import background_runs
+    from coreman.core.db.models import BackgroundRun
+    from coreman.runtime.gateway_feishu.cards import BACKGROUND_PANEL_ID
+
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    task = {"id": "a", "description": "订单导出", "kind": "agent", "status": "running"}
+    run = BackgroundRun(
+        bot_id=bot.id,
+        session_key="oc1",
+        relay_session_id=_uuid.uuid4(),
+        origin_task_id=row.task_id,
+        owner_platform_user_id="ou_1",
+        platform="feishu",
+        chat_id="oc1",
+        chat_type="group",
+        tasks=[task],
+        deadline=datetime.now(UTC) + timedelta(hours=1),
+        card_ref={"task_id": row.task_id},
+    )
+    db_session.add(run)
+    await db_session.flush()
+    await streams.update(
+        db_session, row.task_id, activity={"background": background_runs.view(run)}
+    )
+    await streams.complete(
+        db_session,
+        row.task_id,
+        final_text="已在后台开始 1 项",
+        activity={"background": background_runs.view(run)},
+    )
+    await db_session.commit()
+    await transport.round()
+    [final] = [
+        json.loads(body["card"]["data"])
+        for method, path, body in api.calls
+        if method == "PUT" and path == "/open-apis/cardkit/v1/cards/card1"
+    ]
+    panels = [e for e in final["body"]["elements"] if e.get("element_id") == BACKGROUND_PANEL_ID]
+    assert len(panels) == 1
+    assert "⏳ 已开工 · 后台 1 项进行中" in json.dumps(final, ensure_ascii=False)
+
+    run.tasks = [{**task, "status": "completed"}]
+    await background_runs.end(db_session, run, "finished")
+    await background_runs.queue_card(db_session, run, "t1")
+    await db_session.commit()
+    await transport.round()
+    [element] = [
+        json.loads(body["element"])
+        for method, path, body in api.calls
+        if method == "PUT" and path.endswith(f"/elements/{BACKGROUND_PANEL_ID}")
+    ]
+    assert "全部完成" in element["header"]["title"]["content"]
+    headings = [
+        json.loads(body["partial_element"])["header"]["title"]["content"]
+        for method, path, body in api.calls
+        if method == "PATCH" and path.endswith("/elements/thinking_panel")
+    ]
+    assert headings[-1] == "✅ 后台全部完成"

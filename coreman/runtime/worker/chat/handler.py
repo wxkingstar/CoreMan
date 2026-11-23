@@ -19,8 +19,11 @@ relay 检查排在最后：公告、拒绝、命令这几条路都不碰 relay�
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import tasks
@@ -57,12 +60,123 @@ class ChatTaskHandler(
         self.timing = timing
         self._on_first_event: Callable[[], None] | None = None  # 测试钩子
 
+    # 驱动拒收（409）后重发的次数与间隔：会话属于别人时等它关掉（停后台任务最多半分钟）。
+    LIVE_RETRIES = 8
+    LIVE_RETRY_SECONDS = 5.0
+
     async def run(self, ctx: TaskContext) -> None:
         pre = await self._prepare(ctx)
         if pre is None:
             return
         outcome = await self._converse(ctx, pre)
+        for _ in range(self.LIVE_RETRIES):
+            if outcome.live_conflict is None or ctx.cancel_event.is_set():
+                break
+            pre = await self._resend_live(ctx, pre, outcome.live_conflict)
+            outcome = await self._converse(ctx, pre)
         await self._finalize(ctx, pre, outcome)
+
+    async def _resend_live(self, ctx: TaskContext, pre: Prepared, code: str) -> Prepared:
+        """驱动拒收后重建请求再发：流与对话记录沿用，还没有任何内容写出去。
+
+        - `not_live`：要接进去的后台阶段刚好结束了，按普通一轮重建（照常签发凭据）。
+        - `live_owner_mismatch`：会话还在别人的后台阶段里（多半正在关），等几秒再按当时的状态重建。
+        - `live_busy`：另一条消息正接在这个进程上，等几秒再接（次数有上限）。
+        """
+        if code != "not_live":
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ctx.cancel_event.wait(), self.LIVE_RETRY_SECONDS)
+        else:
+            # 进程已经不在：那一段后台阶段交给它的观察任务收完（驱动的墓碑会补发结束帧），
+            # 这一轮按新进程开，自己可能再进后台阶段。
+            from coreman.core.chat import background_runs
+
+            async with ctx.session_factory() as session:
+                run = await background_runs.running_for(
+                    session, pre.intake.bot.id, pre.intake.session_key, lock=True
+                )
+                if run is not None and run.relay_session_id == pre.info.relay_session_id:
+                    await background_runs.replace(session, run)
+                await session.commit()
+        async with ctx.session_factory() as session:
+            rebuilt = await self._open(
+                session,
+                ctx,
+                pre.intake,
+                pre.relay,
+                pre.started_clock,
+                reuse=pre,
+                allow_join=code != "not_live",
+            )
+            await session.commit()
+        ctx.log.info("live_resend", code=code, joined=rebuilt.request.live_join)
+        return rebuilt
+
+    # 群里别人的消息等后台结束：再认领时离放行时刻太近（或已过）也至少隔这么久再看。
+    HOLD_MIN_SECONDS = 15.0
+
+    async def _hold_for_background(self, ctx: TaskContext, intake: Intake) -> bool:
+        """会话正在后台阶段、这一轮又不能写进那个进程：排队等它结束。返回 True 表示已处置。
+
+        另起进程续同一个会话会让 CLI 把后台任务误判成已停、会话记录分叉；不带 owner 的请求又会
+        被驱动拒收。所以会话有一段在跑时，这一轮要么写进去（本人、能接的轮次，判据与
+        `_live_mode` 同一个 `_joinable`），要么等：群里别人的消息等后台结束时放行（网关已发过
+        选择卡片），主动插话直接让掉，正在关的几秒后再看。早该结束还没结束的，就地按到期收尾。
+        """
+        from coreman.core.chat import background_runs
+
+        async with ctx.session_factory() as session:
+            run = await background_runs.running_for(
+                session, intake.bot.id, intake.session_key, lock=True
+            )
+            if run is None:
+                return False
+            now = datetime.now(UTC)
+            if background_runs.overdue(run, now):
+                # 到期 + 宽限都过了还挂着：看护进程没来得及收，这里收掉、放行排队的消息。
+                await background_runs.conclude(session, run, "expired", f"hold:{ctx.task.id}")
+                await session.commit()
+                return False
+            owner = (
+                self._joinable(ctx, intake)
+                and intake.speaker.platform_user_id == run.owner_platform_user_id
+            )
+            if owner and run.close_requested_at is None:
+                await session.commit()
+                return False
+            if ctx.task.payload.get("origin") == "observe":
+                await tasks.finish(
+                    session,
+                    ctx.task.id,
+                    status="cancelled",
+                    error_code="observe_yielded",
+                    only_active=True,
+                )
+                await session.commit()
+                return True
+            closing = run.close_requested_at is not None
+            seconds = (
+                self.LIVE_RETRY_SECONDS
+                if closing
+                else max(
+                    (background_runs.hold_until(run) - now).total_seconds(),
+                    self.HOLD_MIN_SECONDS,
+                )
+            )
+            deferred = await tasks.defer(session, ctx.task.id, seconds=seconds)
+            if deferred:
+                current = await tasks.get(session, ctx.task.id)
+                if current is not None:
+                    current.payload = {
+                        **current.payload,
+                        **({} if closing else {"background_hold": str(run.id)}),
+                        "background_waited": True,
+                    }
+            await session.commit()
+        if not deferred:
+            await self._cancelled_before_open(ctx)
+        ctx.log.info("background_hold", run_id=run.id, closing=closing)
+        return True
 
     async def _expire_topic_hold(self, ctx: TaskContext) -> None:
         from coreman.core.chat import topics
@@ -107,7 +221,9 @@ class ChatTaskHandler(
             # 个人助理只在能隔离运行的节点上跑：所在运行时不行就不派，私聊告诉所有者。
             if await assistant_runtime.paused(ctx, intake):
                 return None
-        if ctx.task.attempts > 1 and await self._outdated(ctx, intake):
+        # 等过后台阶段的消息不是被新消息替代：它本来就排在后面。
+        waited = bool(ctx.task.payload.get("background_waited"))
+        if ctx.task.attempts > 1 and not waited and await self._outdated(ctx, intake):
             return None
         if ctx.task.payload.get("origin") == "observe" and await self._observe_yields(ctx, intake):
             return None
@@ -119,6 +235,8 @@ class ChatTaskHandler(
             if held:
                 return None
             intake, parts = queued_batch.apply(intake, parts, entries)
+        if await self._hold_for_background(ctx, intake):
+            return None
         if not await self._take_session(ctx, intake):
             return None
         try:

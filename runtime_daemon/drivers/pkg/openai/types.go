@@ -37,6 +37,12 @@ type ChatCompletionRequest struct {
 	Settings         string            `json:"settings,omitempty"`        // JSON string passed verbatim to `claude --settings` (shallow-merged into existing settings.json)
 	ResumeFallback   string            `json:"resume_fallback,omitempty"` // turn-block note used only if --resume finds no session and the turn starts a new one
 	ForkSessionID    string            `json:"fork_session_id,omitempty"` // session to fork from when session_id does not exist yet; falls back to resume_fallback when it is missing too
+	// Background phase (Claude): the asker owning a process kept alive for
+	// background tasks, its deadline (Unix seconds), and whether this request
+	// may only join such a process (it carries no credentials to start one).
+	LiveOwner    string `json:"live_owner,omitempty"`
+	LiveDeadline int64  `json:"live_deadline,omitempty"`
+	LiveJoin     bool   `json:"live_join,omitempty"`
 }
 
 type StreamOptions struct {

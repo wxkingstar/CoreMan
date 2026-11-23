@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.permissions import can_switch_relay
 from coreman.core.bus import outbox, streams, tasks
@@ -21,6 +22,7 @@ from coreman.core.chat.rate_limit import (
     quota_warning,
 )
 from coreman.core.db.models import (
+    BackgroundRun,
     BotMember,
     RelayServer,
     Task,
@@ -236,6 +238,22 @@ class FinalizeStage(ChatStageBase):
                 only_active=True,
                 bot_id=ctx.task.bot_id,
             )
+            # 流里收到了 background 帧、请求也没被我们断开：进程已经在后台阶段，不论这一轮怎么
+            # 收尾都要记下来，否则进程没人看着、本人下一条消息也会被写进一个平台不知道的进程。
+            run = (
+                await self._enter_background(session, ctx, pre, out)
+                if owned
+                and out.background
+                and not out.live_joined
+                and not out.cancelled
+                and pre.request.live_owner
+                else None
+            )
+            if run is not None and verdict.task_status == "cancelled":
+                # 停下落在最后一帧和收尾之间：后台任务一并停掉。
+                from coreman.core.chat import background_runs
+
+                await background_runs.request_close(session, run, "user")
             collaboration_silent = False
             if owned and intake.bot.platform == "feishu":
                 from coreman.runtime.worker.chat.collaboration import final_transition
@@ -375,6 +393,13 @@ class FinalizeStage(ChatStageBase):
         if not owned:
             ctx.log.warning("task_already_finalized", status=verdict.task_status, elapsed_s=elapsed)
             return
+        if run is not None:
+            from coreman.core.chat import background_runs
+
+            pre.writer.set_background(background_runs.view(run))
+        elif not out.live_joined:
+            # 没进后台阶段（被停、出错）：主回合里收到过的后台任务快照不再画区块。
+            pre.writer.set_background(None)
         # 节点失联、读超时、硬超时这类中断：卡片标红、群里 @ 提问人（网关按 activity 处理）。
         pre.writer.interrupted = liveness.interrupt_reason(
             verdict.error_code, verdict.error_message
@@ -426,7 +451,9 @@ class FinalizeStage(ChatStageBase):
             # 无论谁先，终稿都只由后手那一边负责送达，不会两边都以为对方会送。
             done = await pre.writer.complete(verdict.final_text, pending_card=card)
             await self._push_if_proactive(ctx, pre, verdict, done, card)
-            await self._notify_long_task(ctx, pre, verdict, done, elapsed)
+            if run is None:
+                # 进了后台阶段的不算做完：完成由后台逐条回复。
+                await self._notify_long_task(ctx, pre, verdict, done, elapsed)
         # 额度表 / 预警是抢到终态之后才接上的，记录里的回复要补成用户实际收到的这一份。
         if not logged:
             # 同事务里没写成（已记告警）：交给写入端事后补写；中途出错没走到这里的，由巡检结掉。
@@ -642,6 +669,54 @@ class FinalizeStage(ChatStageBase):
             )
             await session.commit()
         ctx.log.info("long_task_notice_queued", elapsed_s=elapsed)
+
+    async def _enter_background(
+        self, session: AsyncSession, ctx: TaskContext, pre: Prepared, out: Outcome
+    ) -> BackgroundRun:
+        """主回合结束时还有后台任务：记一段后台阶段，建观察任务接上节点。
+
+        和任务终态同一事务：要么两样都有，要么都没有。同一会话还挂着一段 running（上一段的
+        收尾没走完）：同一个会话的记为被新进程接替，不是同一个会话的按丢失结掉，再记新的。
+        """
+        from coreman.core.chat import background_runs
+
+        intake = pre.intake
+        old = await background_runs.running_for(
+            session, intake.bot.id, intake.session_key, lock=True
+        )
+        if old is not None and old.relay_session_id == pre.info.relay_session_id:
+            # 这一轮没有写进旧进程（它已不在）：旧的一段交给它的观察任务收完。
+            await background_runs.replace(session, old)
+        elif old is not None:
+            await background_runs.end(session, old, "lost")
+        deadline = out.background_deadline or pre.request.live_deadline or 0
+        run = BackgroundRun(
+            bot_id=intake.bot.id,
+            session_key=intake.session_key,
+            relay_session_id=pre.info.relay_session_id,
+            origin_task_id=ctx.task.id,
+            owner_platform_user_id=pre.request.live_owner,
+            owner_user_id=intake.speaker.user_id,
+            node_id=pre.relay.runtime_node_id,
+            relay_server_id=pre.relay.id,
+            platform=intake.bot.platform,
+            chat_id=intake.chat_id,
+            chat_type=intake.chat_type,
+            origin_message_id=intake.inbound.reply_context.get("message_id"),
+            tasks=list(out.background_tasks),
+            deadline=datetime.fromtimestamp(deadline, UTC),
+            card_ref={"task_id": ctx.task.id},
+        )
+        session.add(run)
+        await session.flush()
+        run.secrets_enc = background_runs.seal_secrets(ctx.cipher, run, ctx.secrets)
+        await background_runs.enqueue_watch(session, run)
+        ctx.log.info(
+            "background_started",
+            run_id=run.id,
+            running=len(background_runs.running(run.tasks)),
+        )
+        return run
 
     async def _after_finalize(self, ctx: TaskContext, pre: Prepared, verdict: Verdict) -> None:
         """收尾之后的挂钩（清理本轮独有的状态）。只在这一轮真的抢到终态时才会走到。"""

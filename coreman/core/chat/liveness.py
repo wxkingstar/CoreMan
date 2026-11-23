@@ -257,6 +257,13 @@ def final_heading(activity: dict[str, Any]) -> str:
     reason = activity.get("interrupted")
     if isinstance(reason, str) and reason:
         return INTERRUPTED_PREFIX + reason
+    background = activity.get("background")
+    if isinstance(background, dict) and background.get("state"):
+        # 进了后台阶段的一轮：标题跟着后台的状态走（已开工 / 全部完成 / 停止），不用 ✅。
+        from coreman.core.chat import background_runs
+
+        tasks = [t for t in background.get("tasks") or [] if isinstance(t, dict)]
+        return background_runs.heading(str(background["state"]), tasks)
     return DONE_HEADING
 
 

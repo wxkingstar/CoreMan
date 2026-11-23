@@ -256,6 +256,10 @@ async def switch_relay(
     if bot.effort_level:
         # 自动换来的模型不支持 xhigh / max 时降到它支持的最高档，否则下发给 relay 的就是非法档位。
         bot.effort_level = fit_effort(new_model, bot.effort_level, catalog)
+    # 还在后台阶段的会话先关掉：进程在旧运行时上，带着旧模型与旧凭据。
+    from coreman.core.chat import background_runs
+
+    await background_runs.close_for_bot(session, bot.id)
     # 会话键都保留：带过去的原样续用，带不过去的换新会话、首轮补上原会话最近的对话。
     await sessions.carry_over(
         session, bot.id, backend=backend_of(new_model, target.model_provider), keep=carried
