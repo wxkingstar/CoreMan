@@ -200,3 +200,33 @@ def test_pick_idle_server_respects_visibility() -> None:
     assert (
         pick_idle_server(relays, current=cur, bot=bot, user=manager, creator_team_id=None) is hidden
     )
+
+
+def test_pick_idle_server_skips_unhealthy() -> None:
+    """账号被封停（auth_fail）时节点仍报已登录、7 天停在 0%：不能被当成最空闲的推荐出去。"""
+    bot = Bot(
+        bot_key="b",
+        platform="wecom",
+        name="b",
+        created_by=uuid.uuid4(),
+        model="vllm/claude-sonnet-4-6",
+        working_dir="/d",
+        credentials_enc="x",
+    )
+    bot.team_id = None
+    user = User(login_name="m", display_name="m")
+    user.role = "member"
+    user.team_id = None
+    cur = _relay("cur", pct7=100)
+    held = _relay("held", pct7=0)
+    held.health_status = "auth_fail"
+    down = _relay("down", pct7=1)
+    down.health_status = "down"
+    ok = _relay("ok", pct7=40)
+    ok.health_status = "healthy"
+    fresh = _relay("fresh", pct7=50)
+    fresh.health_status = "unknown"
+    relays = [cur, held, down, ok, fresh]
+    assert pick_idle_server(relays, current=cur, bot=bot, user=user, creator_team_id=None) is ok
+    ok.health_status = "timeout"
+    assert pick_idle_server(relays, current=cur, bot=bot, user=user, creator_team_id=None) is fresh
