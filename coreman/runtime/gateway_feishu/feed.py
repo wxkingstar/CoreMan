@@ -1,9 +1,10 @@
 """消息列表里的提醒：长任务和等本人确认的事项，不打开会话也看得到。
 
-- 应用消息流卡片（`im/v2/app_feed_card`，权限 `im:app_feed_card:write`）：跑满 1 分钟的对话回复
-  建一张「进行中」卡片，结束时删掉；正常做完的再建一张「已完成」卡片（会提醒，代替往会话里另发一条
-  完成消息，见 worker 的 `_notify_long_task`），24 小时后删掉；等本人点的确认卡建一张「待确认」
-  卡片，点过（卡片被更新）后删掉。卡片点开经平台跳转进对应会话（core/feishu_open）。
+- 应用消息流卡片（`im/v2/app_feed_card`，权限 `im:app_feed_card:write`）：只给群聊建，一个群一张
+  （`feishu_open.chat_biz`）。回复跑满 1 分钟是「进行中」，结束时删掉；正常做完再改成「已完成」
+  并提醒一次（代替往会话里另发一条完成消息，见 worker 的 `_notify_long_task`）。点开定位到那一轮
+  的回复并删掉卡片，没点开的 24 小时后删。等本人点的确认卡建一张「待确认」卡片，点过（卡片被
+  更新）后删掉。批量接口整体成功也可能逐张失败，看 failed_cards。
 - 机器人单聊即时提醒（`im/v2/feed_cards/bot_time_sentive`，权限
   `im:datasync.feed_card.time_sensitive:write`）：私聊里的长任务做完，把这个会话在消息列表临时置顶；
   本人下一次发消息、或 6 小时后取消置顶。不加急（用户决定）。
@@ -30,28 +31,47 @@ FEED_PATH = "/open-apis/im/v2/app_feed_card"
 PIN_PATH = "/open-apis/im/v2/feed_cards/bot_time_sentive"
 # 对话回复跑满这么久才算长任务：建「进行中」卡片、做完置顶（和 worker 的完成提醒同一门槛）。
 LONG_TASK_SECONDS = 60
-# 「已完成」卡片保留这么久，之后删掉，免得消息列表越积越多。
+# 「已完成」卡片没点开时保留这么久，之后删掉。
 DONE_SECONDS = 24 * 60 * 60
 # 置顶最多保留这么久（本人没来看也取消）。
 PIN_SECONDS = 6 * 60 * 60
-# 批量更新接口 update_fields 里「预览」的编号。
-FIELD_PREVIEW = "3"
+# 批量更新接口 update_fields 的编号：标题、预览、状态标签、跳转链接、展示时间与排序时间刷到当前、
+# 提醒一次。
+FIELD_TITLE, FIELD_PREVIEW, FIELD_STATUS, FIELD_LINK = "1", "3", "10", "12"
+FIELD_SHOWN_AT, FIELD_SORTED_AT, FIELD_NOTIFY = "101", "102", "103"
+# failed_cards 的原因（实测返回数字）：这张卡片还没建、已经建过。
+NOT_CREATED, DUPLICATE = "2", "4"
+# 回复收尾后过这么久才删「进行中」卡片：给「已完成」改写留出先到的机会，两边谁先谁后都对。
+END_GRACE_SECONDS = 30
 TITLE_CHARS = 60
 PREVIEW_CHARS = 120
 
 
-def open_link(transport: FeishuTransport, chat_id: str | None) -> str:
-    """点开进这个会话；不知道会话时进和这个机器人的私聊。"""
+def open_link(
+    transport: FeishuTransport,
+    chat_id: str | None,
+    *,
+    position: str | None = None,
+    clear: tuple[int, str] | None = None,
+) -> str:
+    """点开进这个会话（有位置就定位到那条消息）；不知道会话时进和这个机器人的私聊。
+
+    `clear` 是（任务号, 提问人）：点开时顺带删掉这张卡片。
+    """
+    cfg = get_settings()
     app_id = str(getattr(transport.client, "app_id", "") or "")
-    return feishu_open.link(get_settings().public_base_url, chat_id=chat_id, app_id=app_id)
+    return feishu_open.link(
+        cfg.public_base_url,
+        chat_id=chat_id,
+        app_id=app_id,
+        position=position,
+        clear=(cfg.master_key_bytes, str(transport.bot_id), *clear) if clear else None,
+    )
 
 
 def task_biz(task_id: int) -> str:
+    """升级前「进行中」卡片按任务建的编号：收尾时还要能删掉。"""
     return f"coreman-task-{task_id}"
-
-
-def done_biz(task_id: int) -> str:
-    return f"coreman-task-{task_id}-done"
 
 
 def confirm_biz(key: str) -> str:
@@ -59,8 +79,17 @@ def confirm_biz(key: str) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
-    text = " ".join(text.split())
+    # 飞书把消息流卡片的文字按 HTML 转义后原样显示（「&&」显示成「&amp;&amp;」）：换成全角。
+    text = " ".join(text.split()).translate(_HTML_CHARS)
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+_HTML_CHARS = str.maketrans({"&": "＆", "<": "＜", ">": "＞"})
+
+
+def _failed(result: dict[str, Any]) -> list[Any]:
+    """批量接口整体成功也可能逐张失败（无权限、未创建、重复……），原因在 failed_cards 里。"""
+    return list((result.get("data") or {}).get("failed_cards") or [])
 
 
 async def create(
@@ -71,7 +100,7 @@ async def create(
     title: str,
     preview: str,
     status: tuple[str, str],
-    chat_id: str | None,
+    link: str,
     notify: bool = False,
 ) -> bool:
     """建一张应用消息流卡片；`status` 是（标签文字, primary|secondary|success|danger）。
@@ -83,11 +112,16 @@ async def create(
         "title": _clip(title, TITLE_CHARS),
         "preview": _clip(preview, PREVIEW_CHARS),
         "status_label": {"text": status[0], "type": status[1]},
-        "link": {"link": open_link(transport, chat_id)},
+        "link": {"link": link},
         "notify": {"close_notify": not notify},
     }
+    return await _create(transport, card, user_id) is None
+
+
+async def _create(transport: FeishuTransport, card: dict[str, Any], user_id: str) -> str | None:
+    """建卡；成功返回 None，否则返回失败原因（逐张失败的 reason，或接口错误）。"""
     try:
-        await transport.call(
+        result = await transport.call(
             "POST",
             FEED_PATH,
             params={"user_id_type": "user_id"},
@@ -95,8 +129,67 @@ async def create(
         )
     except FeishuError as exc:
         log.info("feishu_feed_card_failed", code=exc.code, action="create")
-        return False
-    return True
+        return "error"
+    if failed := _failed(result):
+        reason = str(failed[0].get("reason"))
+        log.info("feishu_feed_card_failed", reason=reason, action="create")
+        return reason
+    return None
+
+
+async def upsert(
+    transport: FeishuTransport,
+    *,
+    biz_id: str,
+    user_id: str,
+    title: str,
+    preview: str,
+    status: tuple[str, str],
+    link: str,
+    notify: bool = False,
+) -> bool:
+    """有这张卡片就整张改写并挪到最前（`notify` 时提醒一次），没有就新建。"""
+    fields = [FIELD_TITLE, FIELD_PREVIEW, FIELD_STATUS, FIELD_LINK, FIELD_SHOWN_AT, FIELD_SORTED_AT]
+    if notify:
+        fields.append(FIELD_NOTIFY)
+    card: dict[str, Any] = {
+        "biz_id": biz_id,
+        "title": _clip(title, TITLE_CHARS),
+        "preview": _clip(preview, PREVIEW_CHARS),
+        "status_label": {"text": status[0], "type": status[1]},
+        "link": {"link": link},
+    }
+    reason = await _update(transport, card, user_id, fields)
+    if reason in (NOT_CREATED, "NOT_CREATED"):
+        reason = await _create(transport, {**card, "notify": {"close_notify": not notify}}, user_id)
+        if reason in (DUPLICATE, "DUPLICATE"):
+            # 同时有另一轮刚建好这张卡片：改写它。
+            reason = await _update(transport, card, user_id, fields)
+    return reason is None
+
+
+async def _update(
+    transport: FeishuTransport, card: dict[str, Any], user_id: str, fields: list[str]
+) -> str | None:
+    """整张改写；成功返回 None，否则返回失败原因。"""
+    try:
+        result = await transport.call(
+            "PUT",
+            f"{FEED_PATH}/batch",
+            params={"user_id_type": "user_id"},
+            json={
+                "feed_cards": [{"app_feed_card": card, "user_id": user_id, "update_fields": fields}]
+            },
+        )
+    except FeishuError as exc:
+        log.info("feishu_feed_card_failed", code=exc.code, action="update")
+        return "error"
+    if failed := _failed(result):
+        reason = str(failed[0].get("reason"))
+        if reason not in (NOT_CREATED, "NOT_CREATED"):
+            log.info("feishu_feed_card_failed", reason=reason, action="update")
+        return reason
+    return None
 
 
 async def update_preview(

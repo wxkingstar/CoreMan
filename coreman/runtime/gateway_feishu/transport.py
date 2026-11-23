@@ -18,6 +18,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
+from coreman.core import feishu_open
 from coreman.core.assistants import sealed
 from coreman.core.bus import outbox, streams
 from coreman.core.chat import liveness
@@ -139,6 +140,9 @@ class FeishuTransport:
         self._headings: dict[int, tuple[str, float]] = {}
         # 流式期间推上去的消息列表预览：变了才改。
         self._previews: dict[int, str] = {}
+        # 每张群卡片（biz, 提问人）当前归哪一轮：之后有一轮接管了，前一轮的删卡就不动它。
+        # 只在内存里：网关重启后不知道归属，删卡照常执行（最多早删一张）。
+        self._feed_owner: dict[tuple[str, str], int] = {}
         # 常驻连接（子进程的应用独占锁连接，AUTOCOMMIT）：出站锁在它上面以会话级锁拿一次，
         # 持有到进程退出，每一轮就不必再占一条池连接跨越整轮。
         self._guard = guard
@@ -409,29 +413,37 @@ class FeishuTransport:
         return title
 
     async def long_task_feed(self, row: TaskStream, delivery: FeishuDelivery) -> None:
-        """对话回复跑满 1 分钟：给提问人建一张「进行中」的消息流卡片，之后预览跟着最后动作走。"""
-        requester = _requester(row)
-        if requester is None or row.running_since is None:
+        """群里的对话回复跑满 1 分钟：提问人的「进行中」消息流卡片，之后预览跟着最后动作走。
+
+        一个群一张卡片（`chat_biz`），同一群的下一轮复用；私聊不建（私聊那一行自己就显示进展，
+        做完临时置顶）。
+        """
+        requester, chat = _requester(row), str(row.reply_context.get("chat_id") or "")
+        if requester is None or not chat or row.reply_context.get("chat_type") != "group":
+            return
+        if row.running_since is None:
             return
         if (datetime.now(UTC) - row.running_since).total_seconds() < feed.LONG_TASK_SECONDS:
             return
         state = dict(delivery.layout or {})
         preview = liveness.preview(row.activity, datetime.now(UTC)) or "正在处理…"
+        biz = feishu_open.chat_biz(chat)
         if not state.get("feed"):
-            created = await feed.create(
+            created = await feed.upsert(
                 self,
-                biz_id=feed.task_biz(row.task_id),
+                biz_id=biz,
                 user_id=requester,
                 title=f"{self.bot_name}：正在处理你的请求",
                 preview=preview,
                 status=("进行中", "primary"),
-                chat_id=str(row.reply_context.get("chat_id") or "") or None,
+                # 不带删卡签名：点开看一眼进度，卡片不该因此消失。
+                link=feed.open_link(self, chat),
             )
-            state["feed"] = {"ok": created, "preview": preview}
+            if created:
+                self._feed_owner[(biz, requester)] = row.task_id
+            state["feed"] = {"ok": created, "biz": biz, "preview": preview}
         elif state["feed"].get("ok") and state["feed"].get("preview") != preview:
-            await feed.update_preview(
-                self, biz_id=feed.task_biz(row.task_id), user_id=requester, preview=preview
-            )
+            await feed.update_preview(self, biz_id=biz, user_id=requester, preview=preview)
             state["feed"] = {**state["feed"], "preview": preview}
         else:
             return
@@ -453,7 +465,28 @@ class FeishuTransport:
         requester = _requester(row)
         if requester is None:
             return
-        if ((delivery.layout or {}).get("feed") or {}).get("ok"):
+        marker = (delivery.layout or {}).get("feed") or {}
+        if marker.get("ok") and marker.get("biz"):
+            # 「已完成」改写和这里各走各的：晚一点删，删之前看这一轮有没有已经改成「已完成」。
+            await outbox.add(
+                session,
+                bot_id=self.bot_id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"feed_end:{row.task_id}",
+                target={"user_id": requester},
+                payload={
+                    "_feed_delete": {
+                        "biz": marker["biz"],
+                        "user": requester,
+                        "task": row.task_id,
+                        "end": True,
+                    }
+                },
+                not_before=datetime.now(UTC) + timedelta(seconds=feed.END_GRACE_SECONDS),
+            )
+        elif marker.get("ok"):
+            # 升级前建的「进行中」卡片按任务编号，不和别的卡片共用。
             await feed.delete(self, biz_id=feed.task_biz(row.task_id), user_id=requester)
         started, ended = row.running_since, row.completed_at or datetime.now(UTC)
         if (
@@ -1219,8 +1252,7 @@ class FeishuTransport:
             await feed.pin(self, item.payload["_unpin"], False)
             return
         if isinstance(item.payload.get("_feed_delete"), dict):
-            marker = item.payload["_feed_delete"]
-            await feed.delete(self, biz_id=str(marker.get("biz")), user_id=str(marker.get("user")))
+            await self.expire_feed(item.payload["_feed_delete"])
             return
         if isinstance(item.payload.get("_long_done"), dict) and await self.long_done_feed(item):
             return
@@ -1412,49 +1444,100 @@ class FeishuTransport:
             title=f"{self.bot_name}：有一项操作等你确认",
             preview=title or "点开会话处理",
             status=("待确认", "danger"),
-            chat_id=str(item.target.get("chat_id") or "") or None,
+            link=feed.open_link(self, str(item.target.get("chat_id") or "") or None),
         ):
             item.payload = {**item.payload, "_feed": {"biz": biz, "user": user}}
 
     async def long_done_feed(self, item: OutboxItem) -> bool:
-        """长任务完成提醒：给提问人建一张会提醒的「已完成」消息流卡片，代替往会话里再发一条。
+        """长任务完成提醒：不往会话里再发一条。返回 False 时照旧发 `markdown` 那条。
 
-        只有提问人收到，群里不多一条消息；点开进这个会话。卡片建不成（缺权限等）返回 False，
-        照旧把 `markdown` 那条完成消息发到会话里。卡片 24 小时后删掉。
+        - 群聊：提问人这个群的消息流卡片改成「已完成」并提醒一次，点开定位到这一轮的回复、
+          顺带删掉卡片；没点开的 24 小时后删。
+        - 私聊：收尾时已经把会话临时置顶，那就够了；置顶没成功才发文字。
         """
         meta = item.payload["_long_done"]
         user, task_id = meta.get("user"), meta.get("task_id")
         chat = str(item.target.get("chat_id") or "")
         if not isinstance(user, str) or not user or not isinstance(task_id, int) or not chat:
             return False
-        preview = f"耗时 {meta.get('seconds')} 秒"
-        if meta.get("group") and (name := await self.chat_name(chat)):
-            preview += f" · {name}"
-        biz = feed.done_biz(task_id)
-        if not await feed.create(
+        if not meta.get("group"):
+            return user in self._pinned
+        seconds = f"耗时 {meta.get('seconds')} 秒"
+        question = str(meta.get("question") or "")
+        if question:
+            preview = f"「{question}」· {seconds}"
+        else:
+            name = await self.chat_name(chat)
+            preview = f"{seconds} · {name}" if name else seconds
+        biz = feishu_open.chat_biz(chat)
+        if not await feed.upsert(
             self,
             biz_id=biz,
             user_id=user,
             title=f"{self.bot_name}：回复已生成",
-            preview=f"{preview} · 点开查看",
+            preview=preview,
             status=("已完成", "success"),
-            chat_id=chat,
+            link=feed.open_link(
+                self, chat, position=await self.reply_position(task_id), clear=(task_id, user)
+            ),
             notify=True,
         ):
             return False
+        self._feed_owner[(biz, user)] = task_id
         async with self.factory() as session:
             await outbox.add(
                 session,
                 bot_id=self.bot_id,
                 platform="feishu",
                 kind="send",
-                dedupe_key=f"feed_done_delete:{task_id}",
+                dedupe_key=f"feed_ttl:{task_id}",
                 target={"user_id": user},
-                payload={"_feed_delete": {"biz": biz, "user": user}},
+                payload={"_feed_delete": {"biz": biz, "user": user, "task": task_id}},
                 not_before=datetime.now(UTC) + timedelta(seconds=feed.DONE_SECONDS),
             )
             await session.commit()
         return True
+
+    async def expire_feed(self, marker: dict[str, Any]) -> None:
+        """删卡片：点开（不带 `task`）直接删；某一轮的删卡（收尾、到期）只删还归这一轮的卡片。
+
+        收尾删「进行中」（`end`）时，这一轮已经改成「已完成」就留着，由到期清理删。
+        """
+        biz, user, task = str(marker.get("biz")), str(marker.get("user")), marker.get("task")
+        key = (biz, user)
+        if isinstance(task, int):
+            owner = self._feed_owner.get(key)
+            if owner is not None and owner != task:
+                return
+            if marker.get("end") and await self._done_card_made(task):
+                return
+        await feed.delete(self, biz_id=biz, user_id=user)
+        if not isinstance(task, int) or self._feed_owner.get(key) == task:
+            self._feed_owner.pop(key, None)
+
+    async def _done_card_made(self, task_id: int) -> bool:
+        async with self.factory() as session:
+            return (
+                await session.scalar(
+                    select(OutboxItem.id).where(OutboxItem.dedupe_key == f"feed_ttl:{task_id}")
+                )
+            ) is not None
+
+    async def reply_position(self, task_id: int) -> str | None:
+        """这一轮回复卡片在会话里的位置（消息接口的 message_position），读不到返回 None。"""
+        async with self.factory() as session:
+            delivery = await session.get(FeishuDelivery, task_id)
+        mid = delivery.message_id if delivery is not None else None
+        if not mid:
+            return None
+        try:
+            result = await self.call("GET", f"/open-apis/im/v1/messages/{api_id(mid)}")
+        except FeishuError as exc:
+            log.info("feishu_message_position_failed", code=exc.code)
+            return None
+        items = (result.get("data") or {}).get("items") or [{}]
+        position = items[0].get("message_position")
+        return str(position) if position not in (None, "") else None
 
     async def chat_name(self, chat_id: str) -> str:
         """群名；读不到（缺权限、机器人已出群）时返回空串。"""
