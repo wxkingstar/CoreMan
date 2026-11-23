@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 from coreman.core.crypto import Cipher
 from coreman.core.prompting.defaults import (
+    BACKGROUND_TASKS_RULE,
     DEFAULT_CRON_MODE,
     DEV_MODE_RULE,
     DEV_PREVIEW_RULE,
@@ -194,6 +195,7 @@ def build_system_prompt(
     dev_mode: bool = False,
     memory_dir: str = "",
     dev_preview: bool = False,
+    background_tasks: bool = False,
 ) -> str:
     """按固定顺序拼稳定段；空段直接跳过，段间恒为一个空行。
 
@@ -210,6 +212,9 @@ def build_system_prompt(
     Claude Code 自带记忆说明。输出契约同样只给这两种后端。
 
     `dev_preview` 表示员工所在节点开了开发环境预览；只在开发模式下追加预览规则。
+
+    `background_tasks` 表示这位员工的后台任务由平台看着做完、逐项通知（Claude 运行时、节点
+    声明了 claude_background_sessions_v1）；追加后台任务的两条规则。
     """
     codex = backend in {"codex", "opencode"}
     parts = [
@@ -224,6 +229,7 @@ def build_system_prompt(
         # 开发模式的根目录本身就是仓库，规则随仓库维护；其余员工按 docs/ 分篇存规则。
         DEV_MODE_RULE if dev_mode else RULES_LAYOUT_RULE,
         DEV_PREVIEW_RULE if dev_mode and dev_preview else "",
+        BACKGROUND_TASKS_RULE if background_tasks and not codex else "",
         MEMORY_RULE.format(memory_dir=memory_dir) if codex and memory_dir else "",
         segments.cron_mode if scheduled else "",
         _framed(ORG_CONTEXT_FRAME, segments.org_context),

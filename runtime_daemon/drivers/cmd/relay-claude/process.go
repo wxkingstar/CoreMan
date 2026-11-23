@@ -172,6 +172,11 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 	if req.SessionID != "" {
 		args = append(args, "--resume", req.SessionID)
 	}
+	return args, userMessageLine(prompt)
+}
+
+// userMessageLine is one stream-json user message line for claude's stdin.
+func userMessageLine(prompt []promptBlock) string {
 	// A text-only turn stays a plain string; blocks are needed only for images.
 	var content any = prompt
 	switch {
@@ -184,7 +189,7 @@ func buildClaudeArgs(req *openai.ChatCompletionRequest, model string, prompt []p
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": content},
 	})
-	return args, string(input) + "\n"
+	return string(input) + "\n"
 }
 
 // launchClaude starts a `claude` subprocess and returns its stdout-line
@@ -226,7 +231,10 @@ func claudeStderrReason(line string) string {
 	return ""
 }
 
-func launchClaude(args []string, prompt, workingDir string, envVars map[string]string, watchdogTimeout time.Duration) (*exec.Cmd, <-chan string, <-chan claudeProcessResult, error) {
+// launchClaude starts claude and writes the first message. With keepStdin the
+// stdin pipe stays open after it (see claudeProc); otherwise stdin ends right
+// after the message, as it always did.
+func launchClaude(args []string, prompt, workingDir string, envVars map[string]string, watchdogTimeout time.Duration, keepStdin bool) (*claudeProc, <-chan string, <-chan claudeProcessResult, error) {
 	cmd := exec.Command("claude", args...)
 	// Own process group so KillGroup can reap the whole tree (node wrapper +
 	// native claude binary) instead of orphaning the native child.
@@ -235,7 +243,16 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
-	cmd.Stdin = strings.NewReader(prompt)
+	p := &claudeProc{cmd: cmd, tasks: newBGTracker(), exited: make(chan struct{})}
+	if keepStdin {
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to create stdin pipe: %v", err)
+		}
+		p.stdin = stdin
+	} else {
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -246,7 +263,19 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		return nil, nil, nil, fmt.Errorf("failed to create stderr pipe: %v", err)
 	}
 	if err := proc.Start(cmd); err != nil {
+		if p.stdin != nil {
+			p.stdin.Close()
+		}
 		return nil, nil, nil, fmt.Errorf("failed to start claude: %v", err)
+	}
+	if p.stdin != nil {
+		// The first message is written off the caller's goroutine: a large
+		// message (base64 images) can exceed the pipe buffer.
+		go func() {
+			if err := p.writeLine([]byte(prompt)); err != nil {
+				log.Printf("writing first message to claude stdin: %v", err)
+			}
+		}()
 	}
 
 	sessErrCh := make(chan claudeProcessResult, 1)
@@ -325,7 +354,11 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 		s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 		for s.Scan() {
 			disarm()
-			lines <- s.Text()
+			line := s.Text()
+			if p.stdin != nil && !p.observe(line) {
+				continue
+			}
+			lines <- line
 		}
 		// stdout EOF: the process has closed stdout, the watchdog's job is
 		// over. Disarm BEFORE cmd.Wait() reaps the child — a timer firing in
@@ -347,10 +380,11 @@ func launchClaude(args []string, prompt, workingDir string, envVars map[string]s
 				waitErr = fmt.Errorf("%s: %w", failureReason, waitErr)
 			}
 		}
+		p.markExited(waitErr)
 		sessErrCh <- claudeProcessResult{SessionMissing: sessionMissing, SessionInUse: sessionInUse, BadTurnPoint: badTurnPoint, Err: waitErr}
 	}()
 
-	return cmd, lines, sessErrCh, nil
+	return p, lines, sessErrCh, nil
 }
 
 // lastOutputNote summarizes the trailing non-empty stdout line (node stack
@@ -379,20 +413,29 @@ func lastOutputNote(buffered []string) string {
 type procHandle struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
+	proc    *claudeProc
 	aborted bool
 }
 
 // publish records a freshly-launched process. Returns false when the handler
 // has already aborted — the caller must kill the newcomer and stop instead of
 // proceeding (this closes the launch-after-abort orphan window).
-func (h *procHandle) publish(cmd *exec.Cmd) bool {
+func (h *procHandle) publish(p *claudeProc) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.aborted {
 		return false
 	}
-	h.cmd = cmd
+	h.cmd = p.cmd
+	h.proc = p
 	return true
+}
+
+// current returns the published process (nil before the first launch).
+func (h *procHandle) current() *claudeProc {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.proc
 }
 
 // abort marks the request as cancelled and returns the process to kill. A nil
@@ -413,6 +456,12 @@ func (h *procHandle) abort() *exec.Cmd {
 // failed); the handler sends SSE headers before that and uses the returned
 // procHandle to kill the current process on disconnect.
 func startClaudeStream(args []string, prompt, workingDir string, envVars map[string]string) (<-chan string, <-chan error, *procHandle) {
+	return startClaudeStreamOpts(args, prompt, workingDir, envVars, false)
+}
+
+// startClaudeStreamOpts is startClaudeStream with the stdin mode: keepStdin
+// keeps each launched process's stdin open for later messages (live sessions).
+func startClaudeStreamOpts(args []string, prompt, workingDir string, envVars map[string]string, keepStdin bool) (<-chan string, <-chan error, *procHandle) {
 	lines := make(chan string, 128)
 	ready := make(chan error, 1)
 	handle := &procHandle{}
@@ -425,12 +474,13 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 	go func() {
 		defer close(lines)
 
-		cmd, innerLines, sessErrCh, err := launchClaude(args, prompt, workingDir, envVars, watchdogTimeout)
+		p, innerLines, sessErrCh, err := launchClaude(args, prompt, workingDir, envVars, watchdogTimeout, keepStdin)
 		if err != nil {
 			ready <- err
 			return
 		}
-		if !handle.publish(cmd) {
+		cmd := p.cmd
+		if !handle.publish(p) {
 			proc.KillGroup(cmd)
 			go func() { <-sessErrCh }()
 			for range innerLines {
@@ -566,12 +616,13 @@ func startClaudeStream(args []string, prompt, workingDir string, envVars map[str
 			if fallback {
 				retryPrompt = withResumeFallback(prompt, resumeFallback(sessionArg(retryArgs)))
 			}
-			cmd, innerLines, sessErrCh, err = launchClaude(retryArgs, retryPrompt, workingDir, envVars, watchdogTimeout)
+			p, innerLines, sessErrCh, err = launchClaude(retryArgs, retryPrompt, workingDir, envVars, watchdogTimeout, keepStdin)
 			if err != nil {
 				ready <- err
 				return
 			}
-			if !handle.publish(cmd) {
+			cmd = p.cmd
+			if !handle.publish(p) {
 				proc.KillGroup(cmd)
 				go func() { <-sessErrCh }()
 				for range innerLines {
@@ -629,7 +680,7 @@ func runClaude(args []string, prompt, workingDir string, envVars map[string]stri
 }
 
 func runClaudeAttempt(args []string, prompt, workingDir string, envVars map[string]string, attempt int) (events []claudeEvent, lastText, result string, usage *openai.UsageInfo, rawUsage *claudeUsage, costUSD float64, err error) {
-	_, lines, sessErrCh, err := launchClaude(args, prompt, workingDir, envVars, firstLineTimeout)
+	_, lines, sessErrCh, err := launchClaude(args, prompt, workingDir, envVars, firstLineTimeout, false)
 	if err != nil {
 		return
 	}

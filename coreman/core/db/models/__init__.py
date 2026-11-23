@@ -66,6 +66,7 @@ from coreman.core.db.models.assistants import (
     AssistantTranscript,
     AssistantWatch,
 )
+from coreman.core.db.models.background_runs import BACKGROUND_STATES, BackgroundRun
 from coreman.core.db.models.bots import (
     BOT_KEY_RE,
     BOT_KINDS,
@@ -188,6 +189,8 @@ __all__ = [
     "FeishuPersonalGrant",
     "FeishuPersonalSend",
     "RuntimeNode",
+    "BackgroundRun",
+    "BACKGROUND_STATES",
     "RuntimeInstallLink",
     "RuntimeCall",
     "RuntimeChunk",

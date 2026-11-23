@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox, tasks
 from coreman.core.bus.tasks import NewTask
-from coreman.core.chat import busy_choice, interactions, stream_stop, topics
+from coreman.core.chat import background_runs, busy_choice, interactions, stream_stop, topics
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem
 from coreman.core.feishu_personal import inflow
@@ -32,6 +32,7 @@ from coreman.core.wecom.cards import (
     parse_task_id,
     waiting_card,
 )
+from coreman.runtime.worker.background_watch import handle_card as handle_background_card
 from coreman.runtime.worker.busy_choice import handle as handle_busy
 from coreman.runtime.worker.choice_flow import advance_choice, record_answer
 from coreman.runtime.worker.context import TaskContext
@@ -88,9 +89,17 @@ class CardActionHandler:
             inbound = await load_inbound(session, ctx.task)
             icon = str(await ctx.settings_store.get("card_icon_url", default="") or "")
             task_id = str(action.get("task_id") or "")
-            if bot.platform == "feishu" and task_id.startswith(stream_stop.CARD_PREFIX):
+            if bot.platform == "feishu" and (
+                task_id.startswith(stream_stop.CARD_PREFIX)
+                or task_id.startswith(background_runs.CARD_PREFIX)
+            ):
                 # 流式卡片不经出站箱发出：按投递记录核对卡片，不走下面「卡片是我们发的」那道查询。
-                result = await handle_stream_stop(session, ctx, bot, inbound, action)
+                # 后台任务区块在开工那一轮的卡片上，同理。
+                result = (
+                    await handle_stream_stop(session, ctx, bot, inbound, action)
+                    if task_id.startswith(stream_stop.CARD_PREFIX)
+                    else await handle_background_card(session, ctx, bot, inbound, action)
+                )
                 await tasks.finish(
                     session,
                     ctx.task.id,

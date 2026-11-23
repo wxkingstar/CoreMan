@@ -284,6 +284,10 @@ class Agent:
         """本实例正在执行的任务；由运行时守护进程按其在途调用提供。"""
         return []
 
+    def live_sessions(self) -> list[str]:
+        """本实例处于后台阶段的会话（进程长驻、后台任务还在跑）；由运行时守护进程提供。"""
+        return []
+
     def project_dir_for(self, path: Path) -> Path:
         """Claude Code 按目录存会话与记忆的位置：路径里非字母数字的字符都换成 -。"""
         base = (self.home / ".claude/projects").resolve()
@@ -1361,14 +1365,18 @@ class Agent:
             }
         if kind == "status":
             tasks = self.active_tasks()
+            # 后台阶段的会话也是在途工作：升级、换席位前要等它们结束。
+            live = self.live_sessions()
             return {
                 "success": True,
                 "hostname": socket.gethostname(),
                 "user": self.home.name,
                 "active_tasks": tasks,
                 "processes": tasks,
-                "active": bool(tasks),
-                "count": len(tasks),
+                "live_sessions": live,
+                "live_count": len(live),
+                "active": bool(tasks or live),
+                "count": len(tasks) + len(live),
             }
         if kind == "probe-rate-limits":
             return self.start_background(kind, self.probe_rate_limits)

@@ -50,6 +50,11 @@
 **Go 驱动（driver）**
 ：节点内的 `runtime-claude` / `runtime-codex` 进程（源码在 `runtime_daemon/drivers/cmd/relay-*`），通过 Unix socket 提供 OpenAI 兼容接口，把请求转换为 CLI 调用并翻译流式事件。基于开源项目 clawrelay-api 修改，见 [第三方声明](../THIRD_PARTY_NOTICES.md)。
 
+**后台阶段（background phase，表名 `background_runs`）**
+：Claude 主回合结束时还有后台子任务在跑，驱动不让进程退出，平台记一段后台阶段，由不占槽位的
+`background_watch` 任务经 `/live/attach` 跟到结束，用 `background_control` 任务调 `/live/stop_task` 与
+`/live/close`。同一会话最多一段在跑。见 [飞书接入：Claude 后台任务](feishu.md#claude-后台任务)。
+
 **模型目录（model catalog）**
 ：`model_catalog` 表，按 provider 维护可选模型、默认模型与退役状态。平台默认模型由目录派生，不单独保存。
 

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import httpx
 
-from runtime_daemon import PROTOCOL_VERSION, __version__, worktree
+from runtime_daemon import PROTOCOL_VERSION, __version__, live, worktree
 from runtime_daemon.agent import (
     COMMAND_CANCEL,
     SEAT_OPERATIONS,
@@ -49,6 +49,7 @@ from runtime_daemon.lifecycle import (
     record_fatal,
     write_manage_command,
 )
+from runtime_daemon.live import LiveTable
 from runtime_daemon.logs import (
     LogRotator,
     appended_stderr_file,
@@ -501,6 +502,9 @@ class RuntimeAgent(Agent):
             dict(v) for v in list(self.daemon.task_info.values()) if v["provider"] == self.provider
         ]
 
+    def live_sessions(self) -> list[str]:
+        return self.daemon.live_table.ids() if self.provider == "claude" else []
+
     def seat_operation(self, kind: str, data: dict) -> dict:
         """席位的增删、登录与切换（见 seats）。不占实例锁：等管理员授权期间其它操作照常。"""
         seats, provider = self.daemon.seats, self.provider
@@ -789,6 +793,9 @@ class Daemon:
         self.agents: dict[str, RuntimeAgent] = {}
         self.tasks: dict[str, asyncio.Task] = {}
         self.task_info: dict[str, dict] = {}
+        # claude 各代驱动手上的后台阶段会话（见 live），以及正在转发的 /live/* 调用（不占槽位）。
+        self.live_table = LiveTable()
+        self.live_calls: set[str] = set()
         self.capabilities = {p: {"installed": False} for p in PROVIDERS}
         self.operations_lock = threading.Lock()
         # 局域网直连换机：配了 network_zone 与 direct_address 才有，各实例共用一个下载口。
@@ -1113,9 +1120,13 @@ class Daemon:
             }
             keep = []
             for provider, gen, process in self.retired:
-                if (provider, gen) in busy and process.poll() is None:
+                # 后台阶段的会话也算在途：进程还活着就等它们结束。
+                held = provider == "claude" and self.live_table.holds(gen)
+                if ((provider, gen) in busy or held) and process.poll() is None:
                     keep.append((provider, gen, process))
                     continue
+                if provider == "claude":
+                    self.live_table.forget(gen)
                 if process.poll() is None:
                     process.terminate()
                     threading.Thread(
@@ -1224,7 +1235,10 @@ class Daemon:
                         if provider == "claude":
                             health = await client.get("/health")
                             health.raise_for_status()
-                            declared = health.json().get("capabilities", {})
+                            health_body = health.json()
+                            declared = health_body.get("capabilities", {})
+                            # 后台阶段会话：驱动 /health 顶层的 live_sessions 为 true 才声明。
+                            cap[live.CAPABILITY] = health_body.get("live_sessions") is True
                         else:
                             # Codex 以前不读 /health：读不到只是不声明能力，不影响可用性。
                             declared = await optional_capabilities(client)
@@ -1265,7 +1279,9 @@ class Daemon:
         session_events = method == "GET" and bool(
             re.fullmatch(r"/session/[A-Za-z0-9_-]{1,200}/events", path)
         )
-        if not session_events and (method, path) not in {
+        # 后台阶段会话只有 claude 驱动有。
+        live_path = (method, path) in live.PATHS and provider == "claude"
+        if not (session_events or live_path) and (method, path) not in {
             ("GET", "/health"),
             ("GET", "/v1/models"),
             ("GET", "/v1/stats"),
@@ -1284,10 +1300,25 @@ class Daemon:
             )
             if refused is not None:
                 raise AssistantOnlyRefused(refused)
+        if live_path:
+            return live.validate(path, data)
         if path == "/v1/chat/completions":
-            directory = self.agents[provider].workspace(data.get("working_dir", ""))
-            directory.mkdir(parents=True, exist_ok=True)
-            data["working_dir"] = str(directory)
+            joining = data.get("live_join", False)
+            if joining is not False:
+                # 写进已在后台阶段的会话：驱动只用会话标识和消息，进程形态的字段（工作目录、
+                # 环境变量等）一律忽略，平台可以不带。会话不在后台阶段时驱动回 409 not_live。
+                sid = data.get("session_id")
+                if joining is not True or provider != "claude":
+                    raise ValueError("live_join 无效")
+                if not isinstance(sid, str) or not live.SESSION_ID.fullmatch(sid):
+                    raise ValueError("会话标识无效")
+            if joining is True and not data.get("working_dir"):
+                data.pop("working_dir", None)
+                data.pop("worktree", None)
+            else:
+                directory = self.agents[provider].workspace(data.get("working_dir", ""))
+                directory.mkdir(parents=True, exist_ok=True)
+                data["working_dir"] = str(directory)
             if not isinstance(data.get("worktree", False), bool):
                 raise ValueError("worktree 必须是布尔值")
             # API inputs are rooted; CLI tools retain their original permission semantics.
@@ -1334,14 +1365,23 @@ class Daemon:
         identity, provider = command["id"], command["provider"]
         frames = FrameBatcher(lambda batch: self.send_frames(identity, batch))
         operation_name = ""
+        chat_gen = None
 
         try:
             data = self.validate_command(command)
+            if (command["method"], command["path"]) in live.PATHS:
+                # 后台阶段的观察与控制：不记在途对话（会话本身已按后台会话计数）。
+                await self.execute_live(command, data, frames)
+                return
             if command["path"] == "/v1/chat/completions" and "sandbox" in data:
                 # 个人助理的一轮：在沙箱里另起驱动（见 assistant_turns），帧与收尾都在里面发。
                 await self.assistant.run(identity, provider, data, frames)
                 return
-            if command["path"] == "/v1/chat/completions":
+            live_join = command["path"] == "/v1/chat/completions" and data.get("live_join") is True
+            if live_join:
+                # 写进后台阶段的会话：会话已按后台会话占了槽位，这条调用不再另占。
+                self.live_calls.add(identity)
+            if command["path"] == "/v1/chat/completions" and not live_join:
                 await self.attach_memory(provider, data)
             if command["path"] == "/v1/chat/completions" and data.pop("worktree", False):
                 # 开发模式：工作目录是 Git 仓库时换成本会话的 worktree（建时要拉远端，放线程里）。
@@ -1362,6 +1402,11 @@ class Daemon:
                 "working_dir": data.get("working_dir", ""),
             }
             gen = self.driver_gen[provider]
+            if command["path"] == "/v1/chat/completions":
+                # 会话在旧驱动上处于后台阶段时，新消息要写进那个进程，不能在新驱动上另起一个。
+                gen = await self.driver_gen_for(provider, data.get("session_id", ""))
+                self.task_info[identity]["session_id"] = data.get("session_id", "")
+                chat_gen = gen
             if command["path"] != "/":
                 # 经驱动的请求记下驱动代次：换席位后旧驱动等这些请求结束才停。
                 self.task_info[identity]["driver_gen"] = gen
@@ -1451,9 +1496,129 @@ class Daemon:
                 await frames.finish(error="execution_failed")
         finally:
             self.task_info.pop(identity, None)
+            self.live_calls.discard(identity)
+            if provider == "claude" and chat_gen is not None:
+                # 这轮可能让会话进入了后台阶段：这代驱动要等下一次读到会话表后才能回收。
+                self.live_table.call_ended[chat_gen] = time.monotonic()
             self.slots_freed.set()
             if self.retired:
                 self.reap_retired()
+
+    async def execute_live(self, command: dict, data: dict, frames: FrameBatcher) -> None:
+        """/live/*：列表由守护进程合并各代驱动的结果，其余按会话所在的驱动原样转发、流式回传。"""
+        if command["path"] == "/live/list":
+            await self.refresh_live(force=True)
+            sessions = [
+                item
+                for gen in sorted(self.live_table.sessions)
+                for item in self.live_table.sessions[gen]
+            ]
+            await frames.add(
+                json.dumps({"sessions": sessions}, ensure_ascii=False).encode(),
+                status_code=200,
+                content_type="application/json",
+            )
+            await frames.finish()
+            return
+        gen = await self.driver_gen_for("claude", data["session_id"])
+        # attach 可以连几个小时：驱动每 20 秒发一行保活，120 秒读超时只拦真断了的连接。
+        async with httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=str(self.socket_path("claude", gen))),
+            base_url="http://runtime",
+            timeout=httpx.Timeout(120, connect=10),
+        ) as local:
+            async with local.stream(command["method"], command["path"], json=data) as response:
+                await frames.add(
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type", "application/json"),
+                )
+                async for part in response.aiter_bytes():
+                    await frames.add(part)
+        await frames.finish()
+
+    async def driver_gen_for(self, provider: str, session_id: str) -> int:
+        """会话该走哪代驱动：在某代驱动上处于后台阶段就走那代，否则走当前这代。"""
+        current = self.driver_gen[provider]
+        if provider != "claude" or not session_id:
+            return current
+        if any(p == "claude" for p, _, _ in list(self.retired)):
+            # 换代期间旧驱动上可能刚有会话进入后台阶段，缓存不够新。
+            await self.refresh_live(force=True)
+        gen = self.live_table.gen_of(session_id)
+        return current if gen is None else gen
+
+    def live_gens(self) -> list[int]:
+        """还在跑的 claude 驱动代次：当前这代和还没回收的旧驱动。"""
+        gens = [
+            gen
+            for p, gen, process in list(self.retired)
+            if p == "claude" and process.poll() is None
+        ]
+        process = self.drivers.get("claude")
+        if process is not None and process.poll() is None:
+            gens.append(self.driver_gen["claude"])
+        return gens
+
+    async def fetch_live(self, gen: int) -> list[dict]:
+        async with httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=str(self.socket_path("claude", gen))),
+            base_url="http://runtime",
+            timeout=live.LIST_TIMEOUT,
+        ) as client:
+            response = await client.get("/live/list")
+        if response.status_code == 404:
+            # 还没有后台阶段的旧驱动。
+            return []
+        response.raise_for_status()
+        return live.parse_sessions(response.json())
+
+    async def refresh_live(self, *, force: bool = False) -> None:
+        """读各代 claude 驱动的后台阶段会话（缓存 LIST_TTL 秒）。读不到按没有处理，不抛错。"""
+        table = self.live_table
+        before = self.occupied_slots()
+        async with table.lock:
+            if not force and time.monotonic() - table.checked < live.LIST_TTL:
+                return
+            gens = self.live_gens()
+            for gen in [g for g in table.sessions if g not in gens]:
+                # 进程已经退出：它手上的后台会话都没了。
+                table.sessions.pop(gen, None)
+            for gen in gens:
+                started = time.monotonic()
+                try:
+                    sessions = await self.fetch_live(gen)
+                except (httpx.HTTPError, OSError, ValueError) as exc:
+                    failures = table.failures.get(gen, 0) + 1
+                    table.failures[gen] = failures
+                    if failures == 1:
+                        LOG.warning("claude driver live list unavailable: %s", type(exc).__name__)
+                    if failures < live.FAILURE_LIMIT:
+                        continue
+                    sessions = []
+                else:
+                    table.failures.pop(gen, None)
+                table.sessions[gen] = sessions
+                table.fetched[gen] = started
+            table.checked = time.monotonic()
+        if self.occupied_slots() < before:
+            self.slots_freed.set()
+        if self.retired:
+            self.reap_retired()
+
+    def occupied_slots(self) -> int:
+        """占用的槽位：在跑的调用（/live/* 与 live_join 不算）加上后台阶段会话，每会话一个。"""
+        calls = [
+            k for k, t in list(self.tasks.items()) if not t.done() and k not in self.live_calls
+        ]
+        # 普通对话恰好续的是后台阶段的会话：已按调用计过，会话不再重复计。
+        held = {
+            info.get("session_id")
+            for identity, info in list(self.task_info.items())
+            if identity not in self.live_calls
+            and info.get("provider") == "claude"
+            and info.get("session_id")
+        }
+        return len(calls) + len([s for s in self.live_table.ids() if s not in held])
 
     @property
     def max_concurrent(self) -> int:
@@ -1497,7 +1662,10 @@ class Daemon:
             "service_status": self.config.get("service_status", "foreground"),
             # Shown in the console so an overloaded node is visible before calls time out.
             "max_concurrent": self.max_concurrent,
-            "active_calls": len([task for task in self.tasks.values() if not task.done()]),
+            # 后台阶段的会话各占一个槽位，一并算进去。
+            "active_calls": self.occupied_slots(),
+            # claude 各代驱动上处于后台阶段的会话；平台据此认定哪些后台会话已丢失。
+            "live_sessions": self.live_table.ids(),
             # Read-only in the console, so a rejected Git source can be explained there.
             "git_hosts": self.git_hosts,
             # Which proxy the CLIs inherit, so the console can warn when there is none.
@@ -1558,6 +1726,7 @@ class Daemon:
     async def heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
             delay = HEARTBEAT_SECONDS
+            await self.refresh_live()
             try:
                 result = await self.api("/api/runtime/heartbeat", self.heartbeat_body())
                 self.apply_root_change(result.get("root_change"))
@@ -1594,8 +1763,10 @@ class Daemon:
         """One claim round; None when a wait with no free slots was interrupted."""
         self.tasks = {k: t for k, t in self.tasks.items() if not t.done()}
         self.cancel_requested.intersection_update(self.tasks)
+        self.live_calls.intersection_update(self.tasks)
+        await self.refresh_live()
         abandoned = set(self.abandoned)
-        slots = max(0, self.max_concurrent - len(self.tasks))
+        slots = max(0, self.max_concurrent - self.occupied_slots())
         body = {
             "running": [k for k in self.tasks if k not in self.cancel_requested],
             "abandoned": list(abandoned),
@@ -1647,6 +1818,8 @@ class Daemon:
                     )
             return result
         for command in result["commands"]:
+            if (command.get("method"), command.get("path")) in live.PATHS:
+                self.live_calls.add(command["id"])
             self.tasks[command["id"]] = asyncio.create_task(self.execute(command))
         return result
 

@@ -16,7 +16,7 @@ import (
 // heartbeatInterval paces the SSE comment heartbeats (`: keepalive`) that keep
 // idle-timeout proxies and clients from cutting a quiet stream. Package var so
 // tests can shorten it.
-var heartbeatInterval = 30 * time.Second
+var heartbeatInterval = 20 * time.Second
 
 // abortClaudeAndHarvestUsage 中断 V1 进程并在后台限时收割该轮 usage：
 // SIGINT → 最多 10s 内解析残余行中的 result（modelUsage 有真实值）→
@@ -28,41 +28,84 @@ var heartbeatInterval = 30 * time.Second
 // 一轮的消耗整个丢掉，这正是 V1 中断轮从不记账的根因。
 func abortClaudeAndHarvestUsage(cmd *exec.Cmd, lines <-chan string, model, sessionID string) {
 	proc.InterruptGroup(cmd)
-	{
-		deadline := time.After(10 * time.Second)
-	harvest:
-		for {
-			select {
-			case line, ok := <-lines:
-				if !ok {
-					return // producer closed only after Wait; never kill a recycled PID
-				}
-				if line == "" {
-					continue
-				}
-				var event claudeEvent
-				if err := json.Unmarshal([]byte(line), &event); err != nil {
-					continue
-				}
-				if event.Type != "result" {
-					continue
-				}
-				meterResult(sessionID, &event)
-				if pm := perModelCounts(&event, model); pm != nil {
-					stats.RecordTurn(model, pm)
-					log.Printf("interrupted-turn usage recorded: model=%s session=%s per_model=%+v total_cost=$%.4f",
-						model, sessionID, pm, event.TotalCostUSD)
-				}
-				break harvest
-			case <-deadline:
-				log.Printf("interrupted-turn usage harvest timed out (10s): model=%s session=%s", model, sessionID)
-				break harvest
-			}
+	if harvestResult(lines, model, sessionID, 10*time.Second) {
+		return // producer closed only after Wait; never kill a recycled PID
+	}
+	// Backstop kill (idempotent if SIGINT already ended it) and drain the
+	// remaining lines so the producer goroutine reaches cmd.Wait(). Never
+	// signal after the producer closed lines: the PID may be recycled.
+	proc.KillGroup(cmd)
+	for range lines { //nolint:revive // intentional drain
+	}
+}
+
+// abortTurn stops the request's turn after the client left (or the turn
+// asked the user a question). A process with background tasks running gets
+// an interrupt over stdin — it ends the turn and the tasks, then the process
+// exits — instead of SIGINT to its group; otherwise as before.
+func abortTurn(handle *procHandle, lines <-chan string, model, sessionID string) {
+	cmd := handle.abort()
+	if cmd == nil {
+		for range lines {
 		}
-		// Backstop kill (idempotent if SIGINT already ended it) and drain the
-		// remaining lines so the producer goroutine reaches cmd.Wait().
-		proc.KillGroup(cmd)
+		return
+	}
+	p := handle.current()
+	if p == nil || p.stdin == nil || len(p.tasks.running()) == 0 {
+		abortClaudeAndHarvestUsage(cmd, lines, model, sessionID)
+		return
+	}
+	log.Printf("[live] session %s: request gone with background tasks running; interrupting", sessionID)
+	if err := p.interrupt(); err != nil {
+		abortClaudeAndHarvestUsage(cmd, lines, model, sessionID)
+		return
+	}
+	if harvestResult(lines, model, sessionID, 10*time.Second) {
+		return
+	}
+	// The result closed stdin; give the CLI a moment to exit on its own.
+	select {
+	case <-p.exited:
 		for range lines { //nolint:revive // intentional drain
+		}
+		return
+	case <-time.After(5 * time.Second):
+	}
+	proc.KillGroup(cmd)
+	for range lines { //nolint:revive // intentional drain
+	}
+}
+
+// harvestResult reads lines until the turn's result and records its usage.
+// closed reports that lines ended (the process was already reaped).
+func harvestResult(lines <-chan string, model, sessionID string, timeout time.Duration) (closed bool) {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return true
+			}
+			if line == "" {
+				continue
+			}
+			var event claudeEvent
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				continue
+			}
+			if event.Type != "result" {
+				continue
+			}
+			meterResult(sessionID, &event)
+			if pm := perModelCounts(&event, model); pm != nil {
+				stats.RecordTurn(model, pm)
+				log.Printf("interrupted-turn usage recorded: model=%s session=%s per_model=%+v total_cost=$%.4f",
+					model, sessionID, pm, event.TotalCostUSD)
+			}
+			return false
+		case <-deadline:
+			log.Printf("interrupted-turn usage harvest timed out (%s): model=%s session=%s", timeout, model, sessionID)
+			return false
 		}
 	}
 }
@@ -149,7 +192,15 @@ func waitClaudeReady(w http.ResponseWriter, r *http.Request, flusher http.Flushe
 // channel-mode handler); this function owns only the per-request process
 // lifecycle, heartbeats and disconnect handling.
 func handleStreamResponse(w http.ResponseWriter, r *http.Request, args []string, prompt, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string) {
-	lines, ready, handle := startClaudeStream(args, prompt, workingDir, envVars)
+	handleStreamResponseLive(w, r, args, prompt, chatID, created, model, includeUsage, workingDir, envVars, sessionID, nil)
+}
+
+// handleStreamResponseLive is handleStreamResponse with an optional
+// background phase: with live set the process keeps stdin open, the stream
+// reports background task changes, and a turn that ends with background tasks
+// running hands the process to the live registry (see live.go).
+func handleStreamResponseLive(w http.ResponseWriter, r *http.Request, args []string, prompt, chatID string, created int64, model string, includeUsage bool, workingDir string, envVars map[string]string, sessionID string, live *liveStart) {
+	lines, ready, handle := startClaudeStreamOpts(args, prompt, workingDir, envVars, live != nil)
 
 	flusher, heartbeatTicker, ok := sseHandshake(w, ready, handle, lines)
 	if !ok {
@@ -167,6 +218,12 @@ func handleStreamResponse(w http.ResponseWriter, r *http.Request, args []string,
 	t := newSSETranslator(chatID, created, model, sessionID, identityMeter{}, "")
 	t.private = openai.PersonalPrivate(envVars)
 
+	var frames *taskFrames
+	if live != nil {
+		frames = newTaskFrames(handle.current().tasks)
+		defer frames.stop()
+	}
+
 processLines:
 	for {
 		var line string
@@ -175,16 +232,17 @@ processLines:
 		case <-r.Context().Done():
 			// disconnect (= upstream stop): SIGINT + harvest the aborted turn's
 			// usage before the backstop kill (A3).
-			if cmd := handle.abort(); cmd != nil {
-				abortClaudeAndHarvestUsage(cmd, lines, model, sessionID)
-			} else {
-				for range lines {
-				}
-			}
+			abortTurn(handle, lines, model, sessionID)
 			return
 		case <-heartbeatTicker.C:
 			fmt.Fprintf(w, ": keepalive\n\n")
 			flusher.Flush()
+			continue
+		case <-frames.due():
+			if b := frames.poll(true); b != nil {
+				w.Write(b)
+				flusher.Flush()
+			}
 			continue
 		case line, ok = <-lines:
 			if !ok {
@@ -195,15 +253,34 @@ processLines:
 			continue
 		}
 
+		if live != nil {
+			if typ, _ := lineHead(line); typ == "result" && handle.current().takeResult() {
+				// The turn is over but background tasks still run: answer now
+				// and leave the process to the session's background phase.
+				p := handle.current()
+				tasks, _ := p.tasks.snapshot()
+				w.Write(runtimeFrame("background", map[string]any{"tasks": tasksOrEmpty(tasks), "deadline": live.deadline}))
+				flusher.Flush()
+				t.feed(w, flusher, line, includeUsage)
+				t.flushAggLog()
+				sessionStore.LogDone(sessionID, t.StreamUsage())
+				startLive(sessionID, p, lines, model, live)
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+		}
+
 		if t.feed(w, flusher, line, includeUsage) == outcomeAskUserDone {
 			if cmd := handle.abort(); cmd != nil && cmd.Process != nil {
 				log.Printf("[ASK_USER_QUESTION] interrupting Claude process group pid=%d (usage harvest, then kill)", cmd.Process.Pid)
-				abortClaudeAndHarvestUsage(cmd, lines, model, sessionID)
-			} else {
-				for range lines {
-				}
 			}
+			abortTurn(handle, lines, model, sessionID)
 			return
+		}
+		if b := frames.poll(false); b != nil {
+			w.Write(b)
+			flusher.Flush()
 		}
 	}
 

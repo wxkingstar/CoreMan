@@ -28,6 +28,9 @@ PROGRESS = "busy_progress"
 RESUME = "busy_resume"
 DROP = "busy_drop"
 CANCEL = "busy_cancel"
+# 会话正在后台阶段（别人交代的后台任务还在跑）时的两个选项。
+BG_WAIT = "busy_bg_wait"
+BG_STOP = "busy_bg_stop"
 # 等确认的消息最多留这么久，没人回就作废。
 HOLD_SECONDS = 2 * 60 * 60
 # 这么久没有新动作才提示，工具跑一两分钟不吐字是常态。
@@ -115,6 +118,41 @@ def offer_card(
                 button(STOP, "busy_opt_stop", "default"),
                 button(PROGRESS, "busy_opt_progress", "default"),
                 button(CANCEL, "busy_opt_cancel", "default"),
+            ]
+        },
+        "task_id": tid,
+    }
+
+
+def background_offer_card(
+    platform: str, task_id: int, *, running: int, locale: str = "zh"
+) -> dict[str, Any]:
+    """会话正在后台阶段、这条消息要等它：「等后台做完」或「停掉后台任务，先处理我的」。
+
+    只有飞书会进后台阶段，这里只出飞书卡片。
+    """
+    tid = card_task_id(task_id)
+
+    def button(key: str, label: str, kind: str) -> dict[str, Any]:
+        return {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": msg(label, locale)},
+            "type": kind,
+            "width": "fill",
+            "behaviors": [{"type": "callback", "value": {"task_id": tid, "event_key": key}}],
+        }
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": msg("busy_bg_title", locale)},
+        },
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": msg("busy_bg_ask", locale, n=running)},
+                button(BG_WAIT, "busy_bg_opt_wait", "primary"),
+                button(BG_STOP, "busy_bg_opt_stop", "default"),
             ]
         },
         "task_id": tid,

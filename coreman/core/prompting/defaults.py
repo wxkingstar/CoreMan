@@ -198,6 +198,18 @@ otherwise tell the user and ask before touching it.
 
 If the working directory is not such a worktree, this section does not apply."""
 
+# Claude 后台任务的追加段：节点的驱动能让带后台任务的进程长驻（心跳声明
+# claude_background_sessions_v1）才给，平台会在每项完成时主动通知提问人。
+BACKGROUND_TASKS_RULE = """# Background Tasks
+
+1. You may hand long work to background subtasks. The platform notifies the requester each
+   time one finishes, so say "已在后台开始 N 项，完成后会逐条通知你" (started N items in
+   the background, each will be reported as it finishes); do not promise to report
+   everything together once all of them are done.
+2. When asked about progress, go by the actual state of the background tasks. When a task
+   shows `stopped`, say who stopped it and where it stopped; do not take it over and redo
+   it on your own unless the requester asks."""
+
 # 开发模式的追加段：节点开了开发环境预览（心跳声明 dev_preview_v1）才给。
 DEV_PREVIEW_RULE = """# Development Preview
 

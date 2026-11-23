@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy import select
@@ -55,6 +56,8 @@ async def handle(
     if target.status != "queued":
         return "late", card("late")
     choice = str(action.get("event_key") or "")
+    if choice in (busy_choice.BG_WAIT, busy_choice.BG_STOP):
+        return await _background_choice(session, target, choice, card)
     if target.payload.get("stale_hold"):
         if choice == busy_choice.DROP:
             await tasks.finish(session, target.id, status="cancelled", error_code="user_dropped")
@@ -106,3 +109,28 @@ async def handle(
         # 停下的是已经开跑的：新一轮的本轮块据此告诉模型上一条做到一半被停了，别接着做它。
         target.payload = {**target.payload, "stopped_previous": True}
     return "stop", card("stopped")
+
+
+async def _background_choice(
+    session: AsyncSession,
+    target: Task,
+    choice: str,
+    card: Callable[[str], dict[str, Any]],
+) -> tuple[str, dict[str, Any] | None]:
+    """会话在后台阶段时排队的消息：等后台做完，或停掉后台任务先处理这条。
+
+    停掉的权限同「停止」命令：能在这个会话里发消息的人都能停（点卡片的就是发这条消息的人）。
+    关掉之后驱动收尾，后台阶段结束时放行这条消息。
+    """
+    from coreman.core.chat import background_runs
+    from coreman.core.db.models import BackgroundRun
+
+    held = target.payload.get("background_hold")
+    run = await session.get(BackgroundRun, int(held), with_for_update=True) if held else None
+    if run is None or run.state != "running":
+        return "late", card("bg_done")
+    if choice == busy_choice.BG_WAIT:
+        target.payload = {**target.payload, "busy_wait": True}
+        return "wait", card("bg_wait")
+    await background_runs.request_close(session, run, "user")
+    return "stop", card("bg_stopped")

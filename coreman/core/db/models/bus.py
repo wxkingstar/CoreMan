@@ -50,6 +50,8 @@ TASK_KINDS = (
     "assistant_bot_help",
     "assistant_cold_start",
     "systems_batch_run",
+    "background_watch",
+    "background_control",
 )
 TASK_LANES = ("normal", "fast")
 TASK_STATUSES = ("queued", "claimed", "running", "succeeded", "failed", "cancelled", "timed_out")

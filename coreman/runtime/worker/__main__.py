@@ -12,6 +12,10 @@ from coreman.runtime.worker.assistant_jobs import (
     AssistantJobResultHandler,
     AssistantSubtaskHandler,
 )
+from coreman.runtime.worker.background_watch import (
+    BackgroundControlHandler,
+    BackgroundWatchHandler,
+)
 from coreman.runtime.worker.card_actions import CardActionHandler
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.choice_submit import ChoiceSubmitHandler
@@ -47,6 +51,8 @@ asyncio.run(
             "relay_switch": RelaySwitchHandler(),
             "group_observe": GroupObserveHandler(),
             "systems_batch_run": SystemsBatchRunHandler(),
+            "background_watch": BackgroundWatchHandler(),
+            "background_control": BackgroundControlHandler(),
         }
     ).run()
 )

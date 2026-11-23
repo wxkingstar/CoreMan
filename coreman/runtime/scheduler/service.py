@@ -254,6 +254,14 @@ class SchedulerService(Service):
                         await session.commit()
                 except Exception as exc:  # noqa: BLE001 审批闸门一直出错，也不能挡住后面的清理
                     self._log.warning("assistant_approval_tick_failed", error=type(exc).__name__)
+                from coreman.core.chat import background_runs
+
+                try:
+                    async with self._factory() as session:
+                        counts.update(await background_runs.tick(session, now))
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001 后台阶段看护出错不能挡住后面的清理
+                    self._log.warning("background_runs_tick_failed", error=type(exc).__name__)
                 from coreman.core.assistants import transcripts as assistant_transcripts
 
                 try:

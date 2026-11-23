@@ -26,7 +26,7 @@ import (
 	"clawrelay-api/pkg/sessions"
 )
 
-var version = "2.2.0"
+var version = "2.3.0"
 
 // buildCommit is stamped at build time via:
 //
@@ -121,6 +121,24 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+
+	// A session in its background phase answers in its live process (see
+	// live.go); one that is ending is waited out, so a session never has
+	// two processes.
+	if s := lookupLive(req.SessionID); s != nil {
+		if joinLive(w, r, s, &req) {
+			return
+		}
+		if !req.LiveJoin {
+			waitLiveEnded(s)
+		}
+	}
+	if req.LiveJoin {
+		// The platform sent no credentials for a joined turn: never start a
+		// process from it. It rebuilds the turn and resends without live_join.
+		writeLiveError(w, http.StatusConflict, "not_live", "the session is not in its background phase")
+		return
+	}
 	if req.SessionID != "" && req.ResumeFallback != "" {
 		resumeFallbacks.Store(req.SessionID, req.ResumeFallback)
 		defer resumeFallbacks.Delete(req.SessionID)
@@ -177,11 +195,24 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := req.SessionID
 	sessionStore.LogRequest(sessionID, &req)
 
+	// A background phase needs a session to come back to and a platform that
+	// set its deadline; other turns keep closing stdin after the message.
+	var live *liveStart
+	if req.Stream && !hasTools && sessionID != "" && req.LiveDeadline > 0 {
+		live = &liveStart{owner: req.LiveOwner, deadline: req.LiveDeadline, private: openai.PersonalPrivate(envVars)}
+		withCeiling := make(map[string]string, len(envVars)+1)
+		for k, v := range envVars {
+			withCeiling[k] = v
+		}
+		withCeiling["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = liveCeilingEnv(req.LiveDeadline, time.Now())
+		envVars = withCeiling
+	}
+
 	if req.Stream {
 		if hasTools {
 			handleBufferedStreamResponse(w, r, args, stdinData, chatID, created, model, includeUsage, workingDir, envVars, sessionID)
 		} else {
-			handleStreamResponse(w, r, args, stdinData, chatID, created, model, includeUsage, workingDir, envVars, sessionID)
+			handleStreamResponseLive(w, r, args, stdinData, chatID, created, model, includeUsage, workingDir, envVars, sessionID, live)
 		}
 	} else {
 		handleNonStreamResponse(w, r, args, stdinData, chatID, created, model, hasTools, workingDir, envVars, sessionID)
@@ -209,11 +240,14 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":  "healthy",
-		"backend": "claude",
-		"version": version,
-		"commit":  buildCommit,
-		"mode":    relayMode,
+		// Background phase: /live/* and live_owner/live_deadline/live_join.
+		"live_sessions": true,
+		"live_count":    liveCount(),
+		"status":        "healthy",
+		"backend":       "claude",
+		"version":       version,
+		"commit":        buildCommit,
+		"mode":          relayMode,
 		"capabilities": map[string]bool{
 			// Feishu personal tools mount on top of the bot's normal
 			// capabilities. The retired feishu_personal_restricted_v1 is not
@@ -312,6 +346,10 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/sessions", sessionStore.ListHandler())
 	mux.HandleFunc("/session/", sessionStore.PageHandler())
+	mux.HandleFunc("/live/attach", liveAttachHandler)
+	mux.HandleFunc("/live/stop_task", liveStopTaskHandler)
+	mux.HandleFunc("/live/close", liveCloseHandler)
+	mux.HandleFunc("/live/list", liveListHandler)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -337,6 +375,7 @@ func main() {
 	log.Printf("  GET  /health")
 	log.Printf("  GET  /sessions")
 	log.Printf("  GET  /session/{id}")
+	log.Printf("  POST /live/attach | /live/stop_task | /live/close, GET /live/list")
 
 	var listener net.Listener
 	var err error

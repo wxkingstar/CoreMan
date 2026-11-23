@@ -38,6 +38,8 @@ from coreman.runtime.base import HEALTH_PORTS, Service
 from coreman.runtime.worker.context import TaskContext
 
 LANES = ("normal", "fast")
+# 不占槽位的任务：后台阶段的观察任务只是挂着一条流，一挂就是几小时，算进槽位会把对话挤掉。
+UNSLOTTED = frozenset({"background_watch"})
 CHANNELS = ("tasks_queued", "task_cancel", "config_changed")
 
 
@@ -146,9 +148,18 @@ class WorkerService(Service):
         ]
         self.ready = True
 
+    def _hand_over(self) -> None:
+        """排空时让观察任务就地交接（建下一个、自己结束），不拖住退出。"""
+        from coreman.runtime.worker.background_watch import DRAIN_REASON
+
+        for _run, ctx in self._running.values():
+            if ctx.task.kind in UNSLOTTED:
+                ctx.request_cancel(DRAIN_REASON)
+
     async def on_shutdown(self) -> None:
         self.draining = True
         self.ready = False
+        self._hand_over()
         deadline = time.monotonic() + self._stop_grace
         # 循环而不是一次 wait：认领循环可能在 _stop 置位的同一瞬间又抓了一个任务进来。
         while self._running:
@@ -195,7 +206,11 @@ class WorkerService(Service):
         """这条车道还能再接几个任务。fast 独占 fast_lane_slots，normal 拿剩下的。"""
         fast = await self._fast_slots()
         limit = fast if lane == "fast" else max(await self._max_concurrent() - fast, 0)
-        used = sum(1 for _run, ctx in self._running.values() if ctx.task.lane == lane)
+        used = sum(
+            1
+            for _run, ctx in self._running.values()
+            if ctx.task.lane == lane and ctx.task.kind not in UNSLOTTED
+        )
         return limit - used
 
     # ---- 认领 -------------------------------------------------------------
@@ -343,6 +358,7 @@ class WorkerService(Service):
                     await session.commit()
                 if drain and not self.draining:
                     self.draining = True
+                    self._hand_over()
                     self._log.info("drain_requested")
             except Exception:  # noqa: BLE001 心跳失败下一轮再来
                 self._log.exception("heartbeat_failed")

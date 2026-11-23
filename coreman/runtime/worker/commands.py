@@ -89,6 +89,10 @@ async def do_reset(
 ) -> str:
     try:
         await _clear_states(session, bot_id, session_key, platform_user_id)
+        from coreman.core.chat import background_runs
+
+        # 后台阶段先关掉：进程还在续这个会话，清掉之后的新消息要起新进程。
+        await background_runs.close_for_session(session, bot_id, session_key, "reset")
         await sessions.clear(session, bot_id, session_key)
         # 排着的审批续接要回的是被清掉的那个会话，留着只会在空会话里跑
         for t in await tasks.open_for_session(session, bot_id, session_key, APPROVAL_RESUME_KIND):
@@ -152,6 +156,12 @@ async def do_stop(
     for t in await tasks.active_for_session(session, bot_id, session_key):
         if t.id != ctx.task.id and await tasks.request_cancel(session, t.id, "user_stop"):
             stopped += 1
+    from coreman.core.chat import background_runs
+
+    # 「停止」同样停掉这个会话的后台任务（停下回答的那一轮本来也会连带停掉它们）。
+    run = await background_runs.running_for(session, bot_id, session_key, lock=True)
+    if run is not None and await background_runs.request_close(session, run, "user"):
+        stopped += 1
     # A credential or approval resume still queued behind the running turn would restart the work
     # once it ends.
     for kind in (RESUME_KIND, APPROVAL_RESUME_KIND):

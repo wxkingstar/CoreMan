@@ -257,7 +257,17 @@ async def _enqueue_task(
             new.payload["topic_hold"] = True
             new.run_after = topics.hold_until()
             topic_offer = True
-    if message.chat_type == "group" and new.kind == "chat" and not helper_reply:
+    background_offer = (
+        new.kind == "chat"
+        and not helper_reply
+        and await _hold_for_background(session, bot, message, new)
+    )
+    if (
+        message.chat_type == "group"
+        and new.kind == "chat"
+        and not helper_reply
+        and not background_offer
+    ):
         await _queue_behind_others(session, bot, message, new, event_id)
     offer = (
         new.kind == "chat"
@@ -268,6 +278,8 @@ async def _enqueue_task(
     task = await enqueue(session, new)
     if task is not None and offer:
         await _offer_busy_choice(session, bot, message, task.id, event_id)
+    if task is not None and background_offer:
+        await _offer_background_choice(session, bot, message, task.id, event_id, new)
     if task is not None and topic_offer:
         await outbox.add(
             session,
@@ -280,6 +292,77 @@ async def _enqueue_task(
             payload={"card": topics.offer_card(task.id), "_reply": True},
         )
     return task
+
+
+async def _hold_for_background(
+    session: AsyncSession, bot: InboundBot, message: InboundMessage, new: NewTask
+) -> bool:
+    """会话正在后台阶段、这条不是开工那一轮的提问人发的：排队等后台结束；返回要不要发选择卡片。
+
+    进程里带着前一位提问人的凭据，别人的消息不能写进去，另起进程续同一会话又会让会话记录分叉。
+    同一个人连发几条只发一张卡。
+    """
+    from sqlalchemy import select
+
+    from coreman.core.chat import background_runs
+
+    sender = message.sender.platform_user_id or ""
+    run = await background_runs.running_for(session, bot.id, str(new.session_key))
+    if run is None or not sender or sender == run.owner_platform_user_id:
+        return False
+    new.payload["serialize_session"] = True
+    new.payload["background_hold"] = str(run.id)
+    new.payload["background_waited"] = True
+    new.run_after = background_runs.hold_until(run)
+    offered = await session.scalar(
+        select(Task.id)
+        .where(
+            Task.bot_id == bot.id,
+            Task.session_key == new.session_key,
+            Task.kind == "chat",
+            Task.status == "queued",
+            Task.cancel_requested_at.is_(None),
+            Task.payload["background_hold"].astext == str(run.id),
+            Task.payload["background_offer"].astext == "true",
+            Task.payload["platform_user_id"].astext == sender,
+        )
+        .limit(1)
+    )
+    if offered is not None:
+        return False
+    new.payload["background_offer"] = True
+    return True
+
+
+async def _offer_background_choice(
+    session: AsyncSession,
+    bot: InboundBot,
+    message: InboundMessage,
+    task_id: int,
+    event_id: int,
+    new: NewTask,
+) -> None:
+    from coreman.core.chat import background_runs, busy_choice
+
+    run = await background_runs.running_for(session, bot.id, str(new.session_key))
+    count = len(background_runs.running(run.tasks or [])) if run is not None else 0
+    target: dict[str, Any] = {"chat_id": message.chat_id}
+    payload: dict[str, Any] = {
+        "card": busy_choice.background_offer_card(message.platform, task_id, running=count)
+    }
+    message_id = message.reply_context.get("message_id")
+    if message.platform == "feishu" and message_id:
+        target["message_id"] = message_id
+        payload["_reply"] = True
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform=message.platform,
+        kind="send",
+        dedupe_key=f"inbound:{event_id}:busy",
+        target=target,
+        payload=payload,
+    )
 
 
 async def _queue_behind_own(
@@ -396,6 +479,8 @@ async def _queue_behind_others(
             Task.cancel_requested_at.is_(None),
             Task.payload["origin"].astext.is_distinct_from("observe"),
             Task.payload["platform_user_id"].astext.is_distinct_from(sender),
+            # 等后台阶段结束的消息不算：开工那一轮的提问人接着发的要能马上写进进程。
+            Task.payload["background_hold"].astext.is_(None),
         )
         .limit(1)
     )

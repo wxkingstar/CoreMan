@@ -771,6 +771,11 @@ async def patch_bot(
             await rebuild_prompt(session, bot)
     # 换工作目录 = 换上下文，旧 relay 会话必须作废；以「值真的变了」为准。换模型不清：与在
     # 同一运行时上切换模型一样接着原会话聊，后端变了的由 get_or_create 自动换新会话。
+    if before["working_dir"] != bot.working_dir or before["model"] != bot.model:
+        # 后台阶段的进程带着旧工作目录、旧模型，先关掉；之后的消息起新进程。
+        from coreman.core.chat import background_runs
+
+        await background_runs.close_for_bot(session, bot.id)
     if before["working_dir"] != bot.working_dir:
         await sessions.clear_bot(session, bot.id)
     diff = diff_dict(before, _public(bot), AUDIT_MASKED_KEYS)

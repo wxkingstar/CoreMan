@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +26,7 @@ from coreman.core.chat.redaction import collect_secrets
 from coreman.core.cloud_proxy import confirm as cloud_confirm
 from coreman.core.db.models import (
     CHAT_LOG_RUNNING,
+    BackgroundRun,
     Bot,
     RelayServer,
     RuntimeNode,
@@ -103,6 +104,26 @@ async def previous_speaker(session: AsyncSession, info: sessions.SessionInfo) ->
     return Speaker(
         "", info.previous_speaker_user_id, login, name or (None if login else "上一位发言者")
     )
+
+
+LIVE_JOINED_NOTE = (
+    "- 本轮写进了后台阶段里还在运行的同一个进程：业务系统令牌、凭据与环境沿用开工那一轮，"
+    "本轮没有重新签发；后台任务的实际状态以会话里的任务通知为准。"
+)
+
+
+@dataclass(frozen=True)
+class LiveMode:
+    """这一轮的后台阶段参数：发给驱动的 owner 与到期时间；`run` 非空表示写进正在后台阶段的进程。"""
+
+    owner: str
+    deadline: int
+    run: BackgroundRun | None = None
+    secrets: frozenset[str] = frozenset()
+
+    @property
+    def joined(self) -> bool:
+        return self.run is not None
 
 
 MOBILE_NOTE = (
@@ -183,8 +204,15 @@ class OpenStage(ChatStageBase):
         intake: Intake,
         relay: RelayServer,
         started: float,
+        *,
+        reuse: Prepared | None = None,
+        allow_join: bool = True,
     ) -> Prepared:
-        """会话、提示词、env、请求体与 task_streams 一次建好。"""
+        """会话、提示词、env、请求体与 task_streams 一次建好。
+
+        `reuse` 是重发：要求接进后台阶段的一轮被驱动拒收（会话刚好结束），按普通一轮重建请求
+        （照常签发凭据），沿用已经开好的流与对话记录。`allow_join=False` 时不再尝试接进去。
+        """
         # 换机事务持有 bot 行锁；等待提交后从当前实例构造请求，避免派发到旧实例。
         bot = await session.scalar(select(Bot).where(Bot.id == intake.bot.id).with_for_update())
         current_relay = (
@@ -249,8 +277,8 @@ class OpenStage(ChatStageBase):
             if fresh_speaker.user_id != intake.speaker.user_id:
                 fresh_speaker = Speaker(intake.speaker.platform_user_id, None, None, None)
             intake = replace(intake, speaker=fresh_speaker)
-        writer = StreamWriter(ctx)
-        queued = self._queued_seconds(ctx)
+        writer = reuse.writer if reuse is not None else StreamWriter(ctx)
+        queued = self._queued_seconds(ctx) if reuse is None else None
         if queued is not None:
             writer.set_thinking_line(msg("queued_notice", ctx.locale, seconds=queued))
         backend = backend_of(bot.model, relay.model_provider)
@@ -279,6 +307,16 @@ class OpenStage(ChatStageBase):
                     "assistant_transcript_prepare_failed", error_type=type(exc).__name__
                 )
                 raise AssistantDispatchError from None
+        live = await self._live_mode(
+            session, ctx, intake, relay, backend, info, sandbox=transcript is not None
+        )
+        joined = live is not None and live.joined and allow_join
+        if live is not None and live.joined and not joined:
+            live = None
+        if joined:
+            assert live is not None and live.run is not None
+            current_task.payload = {**current_task.payload, "live_join": live.run.id}
+            ctx.task.payload = {**ctx.task.payload, "live_join": live.run.id}
         # An alert turn is started by external text with nobody watching, so read-only is enforced
         # by withholding the means to write: bot and skill env, the cloud proxy, the catalog MCP.
         alert_turn = ctx.task.payload.get("origin") == alert_sources.ORIGIN
@@ -297,7 +335,7 @@ class OpenStage(ChatStageBase):
         unprompted = origin in ("observe", "dispatch") and not bot.unprompted_system_tokens
         catalog_mount = (
             None
-            if alert_turn or cold_start
+            if alert_turn or cold_start or joined
             else await catalog_policy.mount_for(
                 session,
                 relay=relay,
@@ -319,7 +357,8 @@ class OpenStage(ChatStageBase):
             catalog=catalog_mount,
             mcp_supported=mcp_ok,
             unattended=unattended,
-            withhold=cold_start,
+            # 写进后台阶段的进程：环境沿用开工那一轮，本轮签发了也用不上，还会留下误导的签发记录。
+            withhold=cold_start or joined,
             unprompted=unprompted,
             # 调度员只安排不干活，本来就不用这些系统：不必告诉它「本轮不可用」。
             unprompted_note=origin != "dispatch",
@@ -348,7 +387,7 @@ class OpenStage(ChatStageBase):
             # 调度员只安排不干活：调度回合不挂业务系统令牌。
             env.update(access.env)
         # 各处把会变的本轮状态写进 ctx.turn_notes，组成本轮块；重新开流时从头攒。
-        ctx.turn_notes = [access.note]
+        ctx.turn_notes = [LIVE_JOINED_NOTE if joined else access.note]
         if alert_turn:
             ctx.turn_notes.append(alert_sources.ALERT_NOTE)
         from coreman.core.chat import group_observe
@@ -493,7 +532,11 @@ class OpenStage(ChatStageBase):
             extra, env, personal_secrets = await credentials.stored_only(
                 session, ctx, intake, extra, env
             )
-        elif ctx.task.payload.get("origin") not in ("observe", "dispatch", alert_sources.ORIGIN):
+        elif not joined and ctx.task.payload.get("origin") not in (
+            "observe",
+            "dispatch",
+            alert_sources.ORIGIN,
+        ):
             # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
             # 真要做就由它认领、等对方 @ 它，走正常回合。
             from coreman.runtime.worker.chat.collaboration import configure
@@ -533,7 +576,9 @@ class OpenStage(ChatStageBase):
             bot=bot,
             # 个人助理调度来的一轮不挂云签名代理：它的写操作要所有者另行审批，结果回不到助理。
             # 助理无人在场的一轮挂上，写由代理按任务类型拒绝；冷启动那一轮不挂。
-            user_id=None if alert_turn or cold_start or bot_help else intake.speaker.user_id,
+            user_id=None
+            if alert_turn or cold_start or bot_help or joined
+            else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
             session_key=intake.session_key,
@@ -582,6 +627,7 @@ class OpenStage(ChatStageBase):
             extra,
             memory_dir=await memory.prompt_dir(session, relay, backend, bot.working_dir),
             dev_preview=bot.dev_mode and await dev_preview.supported(session, relay, backend),
+            background_tasks=await self._background_prompt(session, intake, relay, backend),
         )
         turn_context = build_turn_context(
             tag=tag,
@@ -593,7 +639,10 @@ class OpenStage(ChatStageBase):
         ctx.private_turn = wecom_personal.mounted(env) or ctx.task.kind == BOT_HELP_KIND
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
         # 出站闸门必须按最终的这一份建；个人凭证按值强制脱敏，不看键名。
-        ctx.secrets = collect_secrets(env) | personal_secrets
+        # 写进后台阶段的进程时，进程里还是开工那一轮的凭据：出站按那一份一起过滤。
+        ctx.secrets = (
+            collect_secrets(env) | personal_secrets | (live.secrets if live else frozenset())
+        )
         session_url = await session_link(session, ctx, intake, relay, info.relay_session_id)
         # 只记键名：env 的值里混着机器人配的密钥，一个都不能进日志流。
         ctx.log.info("request_built", backend=backend, env_keys=env_keys_for_log(env))
@@ -612,7 +661,14 @@ class OpenStage(ChatStageBase):
             fork_session_id=fork_session_id,
             sandbox=transcript is not None,
             transcript=transcript.body() if transcript is not None else None,
+            live_owner=live.owner if live else "",
+            live_deadline=live.deadline if live else None,
+            live_join=joined,
         )
+        if reuse is not None:
+            # 正文沿用已经组装好的那一份（含下载好的媒体）。
+            request = replace(request, user_content=reuse.request.user_content)
+            return replace(reuse, intake=intake, relay=relay, info=info, request=request)
         reply_context = dict(intake.inbound.reply_context or {})
         if bot.platform == "feishu":
             # 飞书回复卡片里的回复按钮只有这一轮的提问人能点：网关编译终稿时从这里取。
@@ -684,6 +740,71 @@ class OpenStage(ChatStageBase):
         self._after_supervisor(pre)
         return pre
 
+    async def _live_mode(
+        self,
+        session: AsyncSession,
+        ctx: TaskContext,
+        intake: Intake,
+        relay: RelayServer,
+        backend: str,
+        info: sessions.SessionInfo,
+        *,
+        sandbox: bool,
+    ) -> LiveMode | None:
+        """这一轮能不能进后台阶段、要不要写进正在后台阶段的进程。
+
+        只给飞书上普通员工、提问人当面发起的对话：主动插话、调度、告警、协作、API、个人助理
+        这些回合要么没人可通知，要么回复交给平台解析，都按原来的一轮一进程跑。
+        """
+        from coreman.core.chat import background_runs
+
+        payload = ctx.task.payload
+        if (
+            sandbox
+            or ctx.task.kind not in background_runs.OWNER_KINDS
+            or intake.bot.platform != "feishu"
+            or is_assistant(intake.bot)
+            or not intake.speaker.platform_user_id
+            or self._structured_reply(ctx)
+            or payload.get("origin") in ("observe", "dispatch", alert_sources.ORIGIN)
+            or payload.get("collaboration_id")
+            or payload.get("human_collaboration_id")
+            or payload.get("api_task_id")
+            or not await background_runs.supported(session, relay, backend)
+        ):
+            return None
+        run = await background_runs.running_for(session, intake.bot.id, intake.session_key)
+        if (
+            run is not None
+            and run.close_requested_at is None
+            and run.owner_platform_user_id == intake.speaker.platform_user_id
+            and run.relay_session_id == info.relay_session_id
+        ):
+            return LiveMode(
+                intake.speaker.platform_user_id,
+                int(run.deadline.timestamp()),
+                run,
+                background_runs.open_secrets(ctx.cipher, run),
+            )
+        # 主回合加后台阶段一共不超过员工的任务超时：从这一轮开始算。
+        return LiveMode(
+            intake.speaker.platform_user_id,
+            int(time.time()) + int(intake.bot.sse_timeout_seconds),
+        )
+
+    async def _background_prompt(
+        self, session: AsyncSession, intake: Intake, relay: RelayServer, backend: str
+    ) -> bool:
+        """系统提示要不要带后台任务的两条规则：只看员工与节点（不看这一轮的来源），
+        同一会话里各轮的稳定段保持一致，缓存不失效。"""
+        from coreman.core.chat import background_runs
+
+        return (
+            intake.bot.platform == "feishu"
+            and not is_assistant(intake.bot)
+            and await background_runs.supported(session, relay, backend)
+        )
+
     async def _session_info(
         self, session: AsyncSession, ctx: TaskContext, intake: Intake, backend: str
     ) -> sessions.SessionInfo:
@@ -751,6 +872,7 @@ class OpenStage(ChatStageBase):
         extra: str = "",
         memory_dir: str = "",
         dev_preview: bool = False,
+        background_tasks: bool = False,
     ) -> str:
         """本轮的 system prompt（稳定段）。续跑时也使用当前配置与系统授权；身份在本轮块里。"""
         from coreman.core.prompting.rich_cards import rich_cards_prompt
@@ -768,6 +890,7 @@ class OpenStage(ChatStageBase):
             dev_mode=intake.bot.dev_mode,
             memory_dir=memory_dir,
             dev_preview=dev_preview,
+            background_tasks=background_tasks,
         )
 
     async def _dispatch_note(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> str:

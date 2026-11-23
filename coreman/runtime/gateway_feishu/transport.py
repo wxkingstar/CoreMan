@@ -50,8 +50,10 @@ from coreman.core.platforms.feishu import FeishuClient, FeishuError
 from coreman.core.platforms.feishu_content import bounded, sent_text
 from coreman.runtime.gateway_feishu import feed
 from coreman.runtime.gateway_feishu.cards import (
+    BACKGROUND_PANEL_ID,
     NEW_SESSION_LABEL_CHARS,
     STREAMING_CONFIG,
+    background_panel,
     interaction_card,
     media_card,
     new_session_card,
@@ -680,7 +682,7 @@ class FeishuTransport:
                 plan=row.plan,
                 mobile=_mobile_private(row),
             )
-            card, summary = compiled.cards[0], compiled.summary
+            card, summary = _with_background(compiled.cards[0], row), compiled.summary
         else:
             # 升级前就已改成整卡替换的流式卡片：沿用旧路径直到结束。
             card = stream_card(
@@ -718,7 +720,7 @@ class FeishuTransport:
                 compiled = await self.plain_cards(
                     thinking, answer, row.session_url, heading, plan=row.plan
                 )
-                await self.put_card(row.task_id, card_id, compiled.cards[0])
+                await self.put_card(row.task_id, card_id, _with_background(compiled.cards[0], row))
         if row.is_complete:
             # 流式卡片发出时只是个卡片实体引用，正文到这里才定下来。
             await self.remember(
@@ -1247,6 +1249,9 @@ class FeishuTransport:
             )
             item.payload = {**item.payload, "_feishu_message_id": mid}
             return
+        if isinstance(item.payload.get("_background_card"), dict):
+            await self.update_background(item.payload["_background_card"])
+            return
         if isinstance(item.payload.get("_unpin"), str):
             self._pinned.discard(item.payload["_unpin"])
             await feed.pin(self, item.payload["_unpin"], False)
@@ -1359,6 +1364,54 @@ class FeishuTransport:
         else:
             text = str(item.payload.get("markdown") or item.payload.get("text") or "…")
             await self.send_posts(chat, text, f"outbox:{item.id}")
+
+    async def update_background(self, ref: dict[str, Any]) -> None:
+        """刷新开工那一轮卡片上的后台区块与标题。按库里此刻的状态画，重试或乱序也不会退回旧状态。
+
+        卡片还没定稿（终稿还没推）就稍后重试；卡片已经降级成普通消息的不画。
+        """
+        from coreman.core.chat import background_runs
+        from coreman.core.db.models import BackgroundRun
+
+        task_id = ref.get("task_id")
+        run_id = ref.get("run_id")
+        if not isinstance(task_id, int) or not isinstance(run_id, int):
+            raise FeishuError(-2, "invalid background card ref")
+        async with self.factory() as session:
+            delivery = await session.get(FeishuDelivery, task_id)
+            run = await session.get(BackgroundRun, run_id)
+        if run is None or run.bot_id != self.bot_id or delivery is None or delivery.fallback:
+            return
+        if not delivery.card_id or not delivery.is_static:
+            raise FeishuError(-1, "card not finalized yet")
+        card_id = api_id(delivery.card_id)
+        view = background_runs.view(run)
+        element = background_panel(view)
+        seq = await self.sequence(task_id)
+        await self.call(
+            "PUT",
+            f"/open-apis/cardkit/v1/cards/{card_id}/elements/{BACKGROUND_PANEL_ID}",
+            json={
+                "sequence": seq,
+                "uuid": stable_uuid(f"bg:{task_id}:{seq}"),
+                "element": card_json(element),
+            },
+        )
+        title = background_runs.heading(run.state, list(run.tasks or []))
+        try:
+            await self.call(
+                "PATCH",
+                f"/open-apis/cardkit/v1/cards/{card_id}/elements/thinking_panel",
+                json={
+                    "sequence": await self.sequence(task_id),
+                    "partial_element": card_json(
+                        {"header": {"title": {"tag": "markdown", "content": title}}}
+                    ),
+                },
+            )
+        except FeishuError as exc:
+            # 标题是锦上添花：改不上不重试整条（区块已经更新）。
+            log.warning("feishu_background_heading_failed", code=exc.code, task_id=task_id)
 
     async def send_reply_file(self, item: OutboxItem) -> str:
         """回复里链接的本地文件：worker 已上传换好 file_key，这里引用提问发出。
@@ -1626,6 +1679,16 @@ def _card_markdown(card: dict[str, Any]) -> str:
         for e in (card.get("body") or {}).get("elements") or []
         if e.get("tag") == "markdown" and e.get("element_id") != "thinking"
     )
+
+
+def _with_background(card: dict[str, Any], row: TaskStream) -> dict[str, Any]:
+    """进了后台阶段的一轮：终稿卡片下方接上后台任务区块（之后由观察任务整块刷新）。"""
+    view = (row.activity or {}).get("background")
+    if not isinstance(view, dict) or not view.get("run_id"):
+        return card
+    body = dict(card.get("body") or {})
+    body["elements"] = [*(body.get("elements") or []), background_panel(view)]
+    return {**card, "body": body}
 
 
 def _mobile_private(row: TaskStream) -> bool:

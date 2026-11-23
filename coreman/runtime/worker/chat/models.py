@@ -91,6 +91,15 @@ class Outcome:
     error: Exception | None = None
     # 主动插话跑得久，已经在群里先回过「我看一下」。
     observe_acked: bool = False
+    # 后台阶段：主回合结束时还有后台任务（`x_runtime.background`），带最后一份快照与到期时间。
+    background: bool = False
+    background_tasks: list[dict[str, Any]] = field(default_factory=list)
+    background_deadline: int | None = None
+    # 这条消息写进了后台阶段里的进程（`x_runtime.live_joined`），带上那一刻的后台任务。
+    live_joined: bool = False
+    live_join_tasks: list[dict[str, Any]] = field(default_factory=list)
+    # 驱动拒收（409）：`live_owner_mismatch` / `not_live`，还没开始执行，可以调整后重发。
+    live_conflict: str | None = None
 
     @property
     def counted(self) -> int:
