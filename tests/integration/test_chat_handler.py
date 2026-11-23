@@ -703,11 +703,9 @@ async def test_feishu_long_task_reminder_carries_the_feed_card_details(
     """飞书：完成提醒带上提问人与耗时，网关据此改发「已完成」消息流卡片；文字留作兜底。"""
     bot, _, _ = await seed_bot(db_session)
     bot.platform = "feishu"
-    t = await chat_task(db_session, bot, "hi")
+    t = await chat_task(db_session, bot, "@demo-bot 帮我  看看\n这单", chat_type="group")
     event = await db_session.get(InboundEvent, t.inbound_event_id)
     assert event is not None
-    event.reply_context = {**event.reply_context, "chat_type": "group"}
-    await db_session.commit()
     now = [1000.0]
     ctx = build_ctx(
         db_engine,
@@ -726,6 +724,7 @@ async def test_feishu_long_task_reminder_carries_the_feed_card_details(
             "task_id": t.id,
             "seconds": 75,
             "group": True,
+            "question": "帮我 看看 这单",
         },
     }
 

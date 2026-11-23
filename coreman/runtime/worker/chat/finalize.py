@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -619,12 +620,13 @@ class FinalizeStage(ChatStageBase):
         delay = timedelta(seconds=self.LONG_TASK_NOTICE_DELAY_SECONDS)
         payload: dict[str, Any] = {"markdown": msg("long_task_done", ctx.locale, seconds=elapsed)}
         if pre.intake.bot.platform == "feishu" and pre.intake.speaker.platform_user_id:
-            chat_type = (pre.intake.inbound.reply_context or {}).get("chat_type")
             payload["_long_done"] = {
                 "user": pre.intake.speaker.platform_user_id,
                 "task_id": ctx.task.id,
                 "seconds": elapsed,
-                "group": chat_type == "group",
+                "group": pre.intake.chat_type == "group",
+                # 卡片预览写上问的是什么：同一个群里几轮的卡片才分得清。
+                "question": _question(pre.intake.text),
             }
         async with ctx.session_factory() as session:
             await outbox.add(
@@ -879,3 +881,13 @@ class FinalizeStage(ChatStageBase):
         await pre.supervisor.push(text, dedupe_key=f"{ctx.task.id}:send:final")
         # 卡片排在终稿之后：先正文后选项卡，顺序反了用户会对着一张没头没尾的卡片发愣。
         await self._queue_card(ctx, pre, card)
+
+
+def _question(text: str) -> str:
+    """提问的开头一句：去掉 @ 提及，压成一行，最多 30 个字。"""
+    text = " ".join(_MENTION.sub(" ", text or "").split())
+    return text if len(text) <= QUESTION_CHARS else text[: QUESTION_CHARS - 1] + "…"
+
+
+QUESTION_CHARS = 30
+_MENTION = re.compile(r"@\S+")
