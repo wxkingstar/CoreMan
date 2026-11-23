@@ -38,7 +38,7 @@ onMounted(load)
 <template>
   <section class="assistants">
     <div class="cm-page-header">
-      <h1>{{ t('menu.assistants') }}</h1>
+      <h2>{{ t('menu.assistants') }}</h2>
       <p class="cm-page-intro">
         {{ t('assistant.admin.intro') }}
       </p>
