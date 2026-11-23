@@ -33,6 +33,9 @@ WARN_5H_PCT = 90
 WARN_7D_PCT = 95
 # claude 与 minimax 的模型可以互换着跑（同一套 Anthropic 协议），codex、opencode 只能落回自己。
 _PROVIDER_SETS = {"claude": {"claude", "minimax"}, "codex": {"codex"}, "opencode": {"opencode"}}
+# 最近一次实际调用或探测失败的实例不推荐：账号被封停时节点仍报「已登录」，而用不了的实例
+# 7 天使用率恰好最低（停在 0%），不排除就会被当成最空闲的推荐出去。
+_UNHEALTHY = ("down", "auth_fail", "timeout")
 
 
 def is_rate_limited(text: str) -> bool:
@@ -160,7 +163,7 @@ def pick_idle_server(
     user: User,
     creator_team_id: uuid.UUID | None,
 ) -> RelayServer | None:
-    """挑一台能接手的实例：同族 provider、在用、有采集数据、两道策略都过，取 7 天最空的。
+    """挑一台能接手的实例：同族 provider、在用、健康、有采集数据、两道策略都过，取 7 天最空的。
 
     没有采集数据的一律不推荐——「不知道空不空」不是「空」，切过去可能撞得更快。
     可见性与团队策略都要查，与 `switch_relay` 执行时一致：只查团队策略的话，
@@ -174,6 +177,7 @@ def pick_idle_server(
         and r.id != current.id
         and r.model_provider in providers
         and r.rate_limit_7d_used_pct is not None
+        and r.health_status not in _UNHEALTHY
         and relay_visible(user, r)
         and relay_allowed_for_bot(user, r, bot_team_id=bot.team_id, creator_team_id=creator_team_id)
     ]
