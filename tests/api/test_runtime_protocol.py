@@ -485,8 +485,13 @@ async def test_live_calls_are_claimed_without_free_slots(client, db_session, app
             ("/live/close", {"session_id": "s1", "reason": "user"}),
             ("/v1/chat/completions", {"n": 2}),
         ]
-        rows = list(await db_session.scalars(select(RuntimeCall).order_by(RuntimeCall.created_at)))
-        assert [r.slotless for r in rows] == [False, True, True]
+        # 三个调用并发创建，created_at 先后不固定：按状态核对，领走的两个都不占槽位。
+        rows = list(await db_session.scalars(select(RuntimeCall)))
+        assert sorted((r.status, r.slotless) for r in rows) == [
+            ("queued", False),
+            ("running", True),
+            ("running", True),
+        ]
         for task in (normal, live, joined):
             task.cancel()
         await asyncio.gather(normal, live, joined, return_exceptions=True)
