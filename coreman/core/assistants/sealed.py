@@ -169,12 +169,12 @@ COLUMNS: dict[type, dict[str, Kind]] = {
         "activity": JsonSpec(plain=frozenset({"at", "until", "expect", "stuck", "interrupted"})),
     },
     # `_reply_used` 带着被点的按钮文字（置灰时写回卡片）、`_fallback_markdown` 是卡片全文的纯文本
-    # 兜底（摘要、紧急汇报、续卡），都不随其它记账键留明文。
+    # 兜底（摘要、紧急汇报、续卡）、`_long_done` 带着提问的开头一句，都不随其它记账键留明文。
     OutboxItem: {
         "payload": JsonSpec(
             underscore=True,
             mirrors=(("card", "task_id"),),
-            secret=frozenset({"_reply_used", "_fallback_markdown"}),
+            secret=frozenset({"_reply_used", "_fallback_markdown", "_long_done"}),
         )
     },
     ChatLog: {

@@ -39,8 +39,10 @@ PIN_SECONDS = 6 * 60 * 60
 # 提醒一次。
 FIELD_TITLE, FIELD_PREVIEW, FIELD_STATUS, FIELD_LINK = "1", "3", "10", "12"
 FIELD_SHOWN_AT, FIELD_SORTED_AT, FIELD_NOTIFY = "101", "102", "103"
-# failed_cards 的原因：这张卡片还没建（实测返回数字 2）。
-NOT_CREATED = "2"
+# failed_cards 的原因（实测返回数字）：这张卡片还没建、已经建过。
+NOT_CREATED, DUPLICATE = "2", "4"
+# 回复收尾后过这么久才删「进行中」卡片：给「已完成」改写留出先到的机会，两边谁先谁后都对。
+END_GRACE_SECONDS = 30
 TITLE_CHARS = 60
 PREVIEW_CHARS = 120
 
@@ -113,6 +115,11 @@ async def create(
         "link": {"link": link},
         "notify": {"close_notify": not notify},
     }
+    return await _create(transport, card, user_id) is None
+
+
+async def _create(transport: FeishuTransport, card: dict[str, Any], user_id: str) -> str | None:
+    """建卡；成功返回 None，否则返回失败原因（逐张失败的 reason，或接口错误）。"""
     try:
         result = await transport.call(
             "POST",
@@ -122,11 +129,12 @@ async def create(
         )
     except FeishuError as exc:
         log.info("feishu_feed_card_failed", code=exc.code, action="create")
-        return False
+        return "error"
     if failed := _failed(result):
-        log.info("feishu_feed_card_failed", reason=failed[0].get("reason"), action="create")
-        return False
-    return True
+        reason = str(failed[0].get("reason"))
+        log.info("feishu_feed_card_failed", reason=reason, action="create")
+        return reason
+    return None
 
 
 async def upsert(
@@ -144,13 +152,26 @@ async def upsert(
     fields = [FIELD_TITLE, FIELD_PREVIEW, FIELD_STATUS, FIELD_LINK, FIELD_SHOWN_AT, FIELD_SORTED_AT]
     if notify:
         fields.append(FIELD_NOTIFY)
-    card = {
+    card: dict[str, Any] = {
         "biz_id": biz_id,
         "title": _clip(title, TITLE_CHARS),
         "preview": _clip(preview, PREVIEW_CHARS),
         "status_label": {"text": status[0], "type": status[1]},
         "link": {"link": link},
     }
+    reason = await _update(transport, card, user_id, fields)
+    if reason in (NOT_CREATED, "NOT_CREATED"):
+        reason = await _create(transport, {**card, "notify": {"close_notify": not notify}}, user_id)
+        if reason in (DUPLICATE, "DUPLICATE"):
+            # 同时有另一轮刚建好这张卡片：改写它。
+            reason = await _update(transport, card, user_id, fields)
+    return reason is None
+
+
+async def _update(
+    transport: FeishuTransport, card: dict[str, Any], user_id: str, fields: list[str]
+) -> str | None:
+    """整张改写；成功返回 None，否则返回失败原因。"""
     try:
         result = await transport.call(
             "PUT",
@@ -161,24 +182,14 @@ async def upsert(
             },
         )
     except FeishuError as exc:
-        log.info("feishu_feed_card_failed", code=exc.code, action="upsert")
-        return False
-    failed = _failed(result)
-    if not failed:
-        return True
-    if str(failed[0].get("reason")) not in (NOT_CREATED, "NOT_CREATED"):
-        log.info("feishu_feed_card_failed", reason=failed[0].get("reason"), action="upsert")
-        return False
-    return await create(
-        transport,
-        biz_id=biz_id,
-        user_id=user_id,
-        title=title,
-        preview=preview,
-        status=status,
-        link=link,
-        notify=notify,
-    )
+        log.info("feishu_feed_card_failed", code=exc.code, action="update")
+        return "error"
+    if failed := _failed(result):
+        reason = str(failed[0].get("reason"))
+        if reason not in (NOT_CREATED, "NOT_CREATED"):
+            log.info("feishu_feed_card_failed", reason=reason, action="update")
+        return reason
+    return None
 
 
 async def update_preview(

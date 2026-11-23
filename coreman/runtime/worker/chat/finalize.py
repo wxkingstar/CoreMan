@@ -620,13 +620,14 @@ class FinalizeStage(ChatStageBase):
         delay = timedelta(seconds=self.LONG_TASK_NOTICE_DELAY_SECONDS)
         payload: dict[str, Any] = {"markdown": msg("long_task_done", ctx.locale, seconds=elapsed)}
         if pre.intake.bot.platform == "feishu" and pre.intake.speaker.platform_user_id:
+            group = pre.intake.chat_type == "group"
             payload["_long_done"] = {
                 "user": pre.intake.speaker.platform_user_id,
                 "task_id": ctx.task.id,
                 "seconds": elapsed,
-                "group": pre.intake.chat_type == "group",
-                # 卡片预览写上问的是什么：同一个群里几轮的卡片才分得清。
-                "question": _question(pre.intake.text),
+                "group": group,
+                # 群里卡片的预览写上问的是什么，几轮才分得清；私聊不建卡片，不用带。
+                "question": _question(pre.intake.text) if group else "",
             }
         async with ctx.session_factory() as session:
             await outbox.add(

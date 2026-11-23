@@ -47,7 +47,10 @@ async def _clear(
         bot_id = uuid.UUID(bot)
     except ValueError:
         return
-    if not verify(key, str(bot_id), task, user, sig) or await session.get(Bot, bot_id) is None:
+    if (
+        not verify(key, str(bot_id), chat, task, user, sig)
+        or await session.get(Bot, bot_id) is None
+    ):
         return
     await outbox.add(
         session,

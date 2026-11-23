@@ -1935,7 +1935,7 @@ async def test_long_private_reply_gets_a_pin_but_no_feed_card(db_session, db_eng
 
 
 async def test_long_group_reply_reuses_one_feed_card_per_chat(db_session, db_engine):
-    """群聊跑满 1 分钟：这个群的那张卡片改成「进行中」（不提醒、可点开删掉）；做完删掉，不置顶。"""
+    """群聊跑满 1 分钟：这个群的那张卡片改成「进行中」（不提醒、点开不删）；做完稍后删，不置顶。"""
     bot, row, generation = await seed(db_session)
     await _long_running(db_session, row, "group")
     factory, api = make_session_factory(db_engine), FakeAPI()
@@ -1949,17 +1949,50 @@ async def test_long_group_reply_reuses_one_feed_card_per_chat(db_session, db_eng
     assert card["biz_id"] == feishu_open.chat_biz("oc_g1") and entry["user_id"] == "u1"
     assert card["status_label"] == {"text": "进行中", "type": "primary"}
     assert "103" not in entry["update_fields"] and "102" in entry["update_fields"]
-    link = card["link"]["link"]
-    assert link.startswith("http://localhost/api/feishu/open?chat=oc_g1&b=")
-    assert f"&d={row.task_id}&u=u1&s=" in link
+    assert card["link"]["link"] == "http://localhost/api/feishu/open?chat=oc_g1"
     await transport.round()
     assert len([1 for m, p, _ in api.calls if m == "PUT" and "app_feed_card" in p]) == 1
     await streams.complete(db_session, row.task_id, final_text="做完了")
     await db_session.commit()
     await transport.round()
+    # 收尾不当场删：留给「已完成」先到；这一轮没有改成「已完成」，到点就删。
+    assert not [b for m, p, b in api.calls if m == "DELETE"]
+    async with factory() as session:
+        end = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == f"feed_end:{row.task_id}")
+        )
+        assert end.not_before > datetime.now(UTC)
+        end.not_before = datetime.now(UTC)
+        await session.commit()
+    await transport.round()
     deleted = [b for m, p, b in api.calls if m == "DELETE"]
     assert deleted == [{"feed_cards": [{"biz_id": feishu_open.chat_biz("oc_g1"), "user_id": "u1"}]}]
     assert not [p for _, p, _ in api.calls if p == "/open-apis/im/v2/feed_cards/bot_time_sentive"]
+
+
+async def test_finished_card_is_not_deleted_once_it_became_the_done_card(db_session, db_engine):
+    """「已完成」改写先于收尾删卡到达：卡片留着，由到期清理删。"""
+    bot, row, generation = await seed(db_session)
+    await _long_running(db_session, row, "group")
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    await streams.complete(db_session, row.task_id, final_text="做完了")
+    await db_session.commit()
+    await transport.round()
+    await _long_done_item(factory, bot, group=True, task_id=row.task_id)
+    await transport.round()
+    async with factory() as session:
+        end = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == f"feed_end:{row.task_id}")
+        )
+        end.not_before = datetime.now(UTC)
+        await session.commit()
+    transport._feed_owner.clear()  # 网关重启过也一样：看的是这一轮有没有改成「已完成」
+    await transport.round()
+    assert not [b for m, p, b in api.calls if m == "DELETE"]
 
 
 class NotCreatedYet(FakeAPI):
@@ -2145,7 +2178,6 @@ async def test_group_long_task_done_turns_the_chat_card_into_a_notifying_done_ca
             "_feed_delete": {
                 "biz": feishu_open.chat_biz("oc_g1"),
                 "user": "u1",
-                "chat": "oc_g1",
                 "task": row.task_id,
             }
         }
@@ -2172,34 +2204,58 @@ async def test_done_card_without_question_shows_the_group_name(db_session, db_en
     assert "&pos=" not in card["link"]["link"]
 
 
-async def test_expired_card_is_kept_when_a_later_turn_reused_it(db_session, db_engine):
-    """到期清理时，这个群里同一提问人之后又问过：卡片已经是那一轮的，不删。"""
-    bot, row, generation = await seed(db_session)
-    await _long_running(db_session, row, "group")
+async def test_expired_card_is_kept_when_a_later_turn_took_it_over(db_session, db_engine):
+    """到期清理时，这张卡片已经归之后的一轮：不删；还归这一轮就删。"""
+    bot, _row, generation = await seed(db_session)
     factory, api = make_session_factory(db_engine), FakeAPI()
-    async with factory() as session:
-        await outbox.add(
-            session,
-            bot_id=bot.id,
-            platform="feishu",
-            kind="send",
-            dedupe_key="feed_ttl:1",
-            target={"user_id": "u1"},
-            payload={
-                "_feed_delete": {
-                    "biz": feishu_open.chat_biz("oc_g1"),
-                    "user": "u1",
-                    "chat": "oc_g1",
-                    "task": row.task_id - 1,
-                }
-            },
-        )
-        await session.commit()
+    biz = feishu_open.chat_biz("oc_g1")
+    for task in (1, 2):
+        async with factory() as session:
+            await outbox.add(
+                session,
+                bot_id=bot.id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"feed_ttl:{task}",
+                target={"user_id": "u1"},
+                payload={"_feed_delete": {"biz": biz, "user": "u1", "task": task}},
+            )
+            await session.commit()
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    transport._feed_owner[(biz, "u1")] = 2
+    await transport.round()
+    deleted = [b for m, p, b in api.calls if m == "DELETE"]
+    assert deleted == [{"feed_cards": [{"biz_id": biz, "user_id": "u1"}]}]  # 只有第 2 轮的
+    assert (biz, "u1") not in transport._feed_owner
+
+
+class DuplicateOnCreate(FakeAPI):
+    """改写时卡片还不存在，新建时另一轮刚建好（reason 4）：再改写一次。"""
+
+    async def call(self, method, path, **kwargs):
+        if "app_feed_card" in path and method in ("PUT", "POST"):
+            self.calls.append((method, path, kwargs.get("json") or {}))
+            puts = [1 for m, p, _ in self.calls if m == "PUT" and "app_feed_card" in p]
+            if method == "PUT" and len(puts) == 1:
+                return {"data": {"failed_cards": [{"reason": 2}]}}
+            if method == "POST":
+                return {"data": {"failed_cards": [{"reason": 4}]}}
+            return {"data": {}}
+        return await super().call(method, path, **kwargs)
+
+
+async def test_done_card_survives_a_concurrent_create(db_session, db_engine):
+    bot, _row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), DuplicateOnCreate()
+    await _long_done_item(factory, bot, group=True)
     transport = FeishuTransport(
         factory, api, bot_id=bot.id, instance_id="old", generation=generation
     )
     await transport.round()
-    assert not [b for m, p, b in api.calls if m == "DELETE"]
+    assert [m for m, p, _ in api.calls if "app_feed_card" in p] == ["PUT", "POST", "PUT"]
+    assert not [p for _, p, _ in api.calls if p == "/open-apis/im/v1/messages"]
 
 
 class FeedCardRefused(FakeAPI):

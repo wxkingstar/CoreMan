@@ -78,3 +78,10 @@ async def test_signed_link_also_clears_the_card(
     (item,) = (await db_session.execute(select(OutboxItem))).scalars().all()
     assert item.bot_id == bot.id and item.dedupe_key == "feed_click:7:u1"
     assert item.payload == {"_feed_delete": {"biz": chat_biz("oc_1"), "user": "u1"}}
+
+
+async def test_malformed_clear_params_only_redirect(client: httpx.AsyncClient) -> None:
+    base = {"chat": "oc_1", "b": "00000000-0000-0000-0000-000000000001", "u": "u1"}
+    for extra in ({"d": "²", "s": "0" * 32}, {"d": "7", "s": "é"}, {"d": "7", "s": "x" * 32}):
+        response = await client.get(PATH, params={**base, **extra}, follow_redirects=False)
+        assert response.status_code == 302, extra

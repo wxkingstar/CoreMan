@@ -22,6 +22,8 @@ _CHAT = re.compile(r"oc_[A-Za-z0-9]{1,64}")
 _APP = re.compile(r"cli_[A-Za-z0-9]{1,64}")
 _USER = re.compile(r"[A-Za-z0-9_]{1,64}")
 _POSITION = re.compile(r"[0-9]{1,12}")
+_TASK = re.compile(r"[0-9]{1,18}")
+_SIGNATURE = re.compile(r"[0-9a-f]{32}")
 
 
 def chat_biz(chat_id: str) -> str:
@@ -33,15 +35,19 @@ def _key(master_key: bytes) -> bytes:
     return hmac.new(master_key, b"coreman:feishu-open", hashlib.sha256).digest()
 
 
-def sign(master_key: bytes, bot_id: str, task_id: int, user_id: str) -> str:
-    message = f"{bot_id}:{task_id}:{user_id}".encode()
+def sign(master_key: bytes, bot_id: str, chat_id: str, task_id: int, user_id: str) -> str:
+    message = f"{bot_id}:{chat_id}:{task_id}:{user_id}".encode()
     return hmac.new(_key(master_key), message, hashlib.sha256).hexdigest()[:32]
 
 
-def verify(master_key: bytes, bot_id: str, task_id: str, user_id: str, signature: str) -> bool:
-    if not task_id.isdigit() or not _USER.fullmatch(user_id):
+def verify(
+    master_key: bytes, bot_id: str, chat_id: str, task_id: str, user_id: str, signature: str
+) -> bool:
+    if not (
+        _TASK.fullmatch(task_id) and _USER.fullmatch(user_id) and _SIGNATURE.fullmatch(signature)
+    ):
         return False
-    expected = sign(master_key, bot_id, int(task_id), user_id)
+    expected = sign(master_key, bot_id, chat_id, int(task_id), user_id)
     return hmac.compare_digest(expected, signature)
 
 
@@ -63,7 +69,10 @@ def link(
     if chat_id and clear is not None:
         master_key, bot_id, task_id, user_id = clear
         query.update(
-            b=bot_id, d=str(task_id), u=user_id, s=sign(master_key, bot_id, task_id, user_id)
+            b=bot_id,
+            d=str(task_id),
+            u=user_id,
+            s=sign(master_key, bot_id, chat_id, task_id, user_id),
         )
     return f"{public_base_url.rstrip('/')}{PATH}?{urlencode(query)}"
 
