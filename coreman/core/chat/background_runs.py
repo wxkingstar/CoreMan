@@ -433,6 +433,25 @@ async def conclude(session: AsyncSession, run: BackgroundRun, state: str, key: s
     return ended
 
 
+REPLACED = "replaced"
+
+
+async def replace(session: AsyncSession, run: BackgroundRun) -> None:
+    """驱动说进程已经不在（not_live），本人的新消息要起新进程：这一段记为结束、腾出位置。
+
+    观察任务还连着的话照常收完正在读的那条流（驱动的墓碑会补发缓存的回合和结束帧），只是不再
+    重连：同一会话的新进程归下一段后台阶段的观察任务。调用方持有行锁。
+    """
+    run.close_reason = REPLACED
+    await end(session, run, "finished")
+    await queue_card(session, run, "replaced")
+
+
+def overdue(run: BackgroundRun, now: datetime) -> bool:
+    """到期之后驱动兜底的 close 也该做完了，仍是 running：平台按到期收尾。"""
+    return now >= run.deadline + timedelta(seconds=EXPIRE_GRACE_SECONDS)
+
+
 def hold_until(run: BackgroundRun) -> datetime:
     return run.deadline + timedelta(seconds=HOLD_MARGIN_SECONDS)
 
@@ -468,7 +487,7 @@ async def tick(session: AsyncSession, now: datetime) -> dict[str, int]:
                 continue
         elif now >= run.deadline:
             counts["background_expired"] += await request_close(session, run, "expired")
-        if now >= run.deadline + timedelta(seconds=EXPIRE_GRACE_SECONDS):
+        if overdue(run, now):
             counts["background_concluded"] += await conclude(session, run, "expired", key)
             continue
         node = await session.get(RuntimeNode, run.node_id) if run.node_id else None

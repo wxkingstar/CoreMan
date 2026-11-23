@@ -182,6 +182,11 @@ function capabilityState(node: RuntimeNode, provider: string) {
   if (cap.login === 'ready' && authFailed(node, provider)) return t('runtimeNodes.login.failed')
   return t(`runtimeNodes.login.${cap.login}`)
 }
+/** 装了 Claude、心跳却没声明后台阶段：后台任务仍由 CLI 等 10 分钟后停掉，提示升级驱动。 */
+function needsBackgroundUpgrade(node: RuntimeNode, provider: string) {
+  const cap = node.capabilities[provider]
+  return provider === 'claude' && !!cap?.installed && cap.claude_background_sessions_v1 !== true
+}
 /** 本地凭据还在（auth status 报已登录），但推理检查被拒：账号已被停用、令牌已吊销等。 */
 function authFailed(node: RuntimeNode, provider: string) {
   const backend = node.backends.find(b => b.model_provider === provider)
@@ -420,7 +425,14 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     class="muted"
                   >
                     {{ row.capabilities[provider]?.account }}
-                  </div>
+                  </div><el-tag
+                    v-if="needsBackgroundUpgrade(row, provider)"
+                    size="small"
+                    type="warning"
+                    data-test="background-upgrade"
+                  >
+                    {{ t('runtimeNodes.backgroundUpgrade') }}
+                  </el-tag>
                 </template>
               </el-table-column>
               <!-- OpenCode Go 的额度只在 OpenCode 控制台看得到，CLI 不报，不占一列。 -->

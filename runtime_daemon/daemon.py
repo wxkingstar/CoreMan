@@ -816,6 +816,8 @@ class Daemon:
         self.lease_lost = False
         self.abandoned: set[str] = set()
         self.cancel_requested: set[str] = set()
+        # 槽位空出时被新一轮顶替、还没返回的长轮询（见 poll_once）。
+        self.late_polls: set[asyncio.Future] = set()
         self.slots_freed = asyncio.Event()
         self.server_protocol = 1
         self.state_online: bool | None = None
@@ -1786,12 +1788,26 @@ class Daemon:
             for watcher in watchers:
                 watcher.cancel()
         if not request.done() and slots == 0:
-            # Nothing can be claimed without free slots, so dropping the wait loses nothing.
-            request.cancel()
-            await asyncio.gather(request, return_exceptions=True)
+            # 槽位空出来了：马上按新的槽位数再领一轮。这一轮不能丢——平台在 0 个槽位时也会领
+            # 不占槽位的调用（/live/*、live_join），领了就已记为在跑，所以让它在后台跑完照常处理。
+            late = asyncio.ensure_future(self.finish_late_poll(request, abandoned))
+            self.late_polls.add(late)
+            late.add_done_callback(self.late_polls.discard)
             return None
         # With free slots the round is always finished, so claimed commands are never lost.
         result = await request
+        return await self.accept_poll(result, abandoned)
+
+    async def finish_late_poll(self, request: asyncio.Future, abandoned: set[str]) -> None:
+        """等被新一轮顶替的长轮询返回，执行它已经领到的调用；失败由下一轮轮询照常处理。"""
+        try:
+            result = await request
+            await self.accept_poll(result, abandoned)
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            LOG.warning("Superseded control poll failed: %s", type(exc).__name__)
+
+    async def accept_poll(self, result: dict, abandoned: set[str]) -> dict:
+        """处理一轮领取的结果：续上控制租约，取消平台已收尾的调用，启动领到的调用。"""
         self.server_protocol = int(result.get("protocol") or 1)
         last_success = self.control_deadline - CONTROL_LEASE_SECONDS
         self.control_deadline = time.monotonic() + CONTROL_LEASE_SECONDS
@@ -1983,6 +1999,8 @@ class Daemon:
                     watcher.cancel()
                 await asyncio.gather(beats, lease_watch, return_exceptions=True)
                 self.write_state(False, force=True)
+                # 被顶替的长轮询可能已经领到调用：等它返回，按关停交还（见 accept_poll）。
+                await asyncio.gather(*self.late_polls, return_exceptions=True)
                 await self.stop_work()
                 if self.dev_preview is not None:
                     self.dev_preview.stop()

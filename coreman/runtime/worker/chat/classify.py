@@ -125,7 +125,8 @@ class ClassifyStage(ChatStageBase):
                 text + msg("background_started_suffix", locale, n=n),
             )
         if out.live_joined:
-            # 后台任务恰好在这一轮里完成：它的结果并进了这条回复，观察任务不会再单独发。
+            # 驱动在这条流里报了后台任务在这一轮里完成：CLI 多半把完成通知并进了这一轮（也可能
+            # 另起一轮，由观察任务单独发），所以只说「可能」。
             from coreman.core.chat import background_runs
 
             merged = background_runs.finished_since(out.live_join_tasks, out.background_tasks)

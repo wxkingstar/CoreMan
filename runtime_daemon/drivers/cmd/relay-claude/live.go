@@ -43,6 +43,12 @@ var (
 	// liveEndWait bounds how long a new turn waits for an ending live
 	// process before starting its own.
 	liveEndWait = 45 * time.Second
+	// liveBacklogBytes caps attach frames held while no subscriber is
+	// attached; over it the oldest content frames go first.
+	liveBacklogBytes = 2 << 20
+	// liveTombstoneTTL keeps an ended session attachable (backlog plus
+	// background_end) for a watcher that was not connected at the end.
+	liveTombstoneTTL = 10 * time.Minute
 )
 
 var liveSessions = struct {
@@ -59,10 +65,38 @@ func lookupLive(sessionID string) *liveSession {
 	return liveSessions.m[sessionID]
 }
 
+// liveCount counts processes still in their background phase; tombstones
+// (ended, kept only for a late attach) are not counted.
 func liveCount() int {
 	liveSessions.Lock()
-	defer liveSessions.Unlock()
-	return len(liveSessions.m)
+	all := make([]*liveSession, 0, len(liveSessions.m))
+	for _, s := range liveSessions.m {
+		all = append(all, s)
+	}
+	liveSessions.Unlock()
+	n := 0
+	for _, s := range all {
+		if !s.isEnded() {
+			n++
+		}
+	}
+	return n
+}
+
+// dropLive removes s from the registry (a tombstone a new turn replaces).
+func dropLive(s *liveSession) {
+	liveSessions.Lock()
+	if liveSessions.m[s.id] == s {
+		delete(liveSessions.m, s.id)
+	}
+	liveSessions.Unlock()
+	s.mu.Lock()
+	unread := len(s.backlog)
+	s.backlog, s.backlogBytes = nil, 0
+	s.mu.Unlock()
+	if unread > 0 {
+		log.Printf("[live] session %s: dropping %d unread attach frame(s) of the ended background phase", s.id, unread)
+	}
 }
 
 // liveStart carries a new process's background-phase settings from the
@@ -89,8 +123,22 @@ type liveSession struct {
 	attachT     *sseTranslator
 	attachW     *frameWriter
 	turnRunning bool
-	endState    string // stopped | expired, set by whoever ended the phase
-	ended       bool
+	// attachContent: attach got content frames for the running turn.
+	attachContent bool
+	endState      string // stopped | expired, set by whoever ended the phase
+	// ended: the process is gone; the entry is a tombstone until it expires.
+	ended bool
+	// backlog holds attach frames while no subscriber is attached.
+	backlog      []attachFrame
+	backlogBytes int
+	// endFrame is the background_end frame, replayed to a late attach.
+	endFrame []byte
+}
+
+type attachFrame struct {
+	b []byte
+	// keep: task snapshots and turn boundaries survive the backlog cap.
+	keep bool
 }
 
 // liveChat is the chat request a live process is answering.
@@ -101,6 +149,8 @@ type liveChat struct {
 	w            *frameWriter
 	includeUsage bool
 	finished     bool // translator already wrote [DONE] (AskUserQuestion)
+	// gotContent: the translator sent this chat anything since it joined.
+	gotContent bool
 }
 
 func (c *liveChat) send(b []byte) {
@@ -230,7 +280,7 @@ func startLive(sessionID string, p *claudeProc, lines <-chan string, model strin
 		model: model, private: opts.private, done: make(chan struct{}),
 	}
 	liveSessions.Lock()
-	if old := liveSessions.m[sessionID]; old != nil {
+	if old := liveSessions.m[sessionID]; old != nil && !old.isEnded() {
 		// The session lock makes this impossible; never lose a process.
 		log.Printf("[live] session %s already had a live process; replacing the entry", sessionID)
 	}
@@ -285,25 +335,59 @@ func (s *liveSession) broadcast(b []byte) {
 	if chat != nil && !chat.finished {
 		chat.send(b)
 	}
-	s.sendAttach(b)
+	s.sendAttach(b, true)
 }
 
-// sendAttach never blocks the pump: a subscriber that falls 1024 frames
-// behind is dropped (it may attach again).
-func (s *liveSession) sendAttach(b []byte) {
+// sendAttach hands a frame to the attach stream, or to the backlog while
+// none is attached. keep marks frames the backlog cap never drops.
+func (s *liveSession) sendAttach(b []byte, keep bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sub := s.attach
-	if sub == nil {
-		return
+	s.sendAttachLocked(b, keep)
+}
+
+// sendAttachLocked never blocks the pump: a subscriber whose buffer is full
+// is ended (it may attach again) and the frame goes to the backlog.
+func (s *liveSession) sendAttachLocked(b []byte, keep bool) {
+	if sub := s.attach; sub != nil {
+		select {
+		case sub.frames <- b:
+			return
+		default:
+			log.Printf("[live] session %s: attach stream fell behind; ending it, frames go to the backlog", s.id)
+			close(sub.frames)
+			s.attach = nil
+		}
 	}
-	select {
-	case sub.frames <- b:
-	default:
-		log.Printf("[live] session %s: attach stream fell behind; dropping it", s.id)
-		close(sub.frames)
-		s.attach = nil
+	s.backlog = append(s.backlog, attachFrame{b: b, keep: keep})
+	s.backlogBytes += len(b)
+	dropped := 0
+	for i := 0; s.backlogBytes > liveBacklogBytes && i < len(s.backlog); {
+		if s.backlog[i].keep {
+			i++
+			continue
+		}
+		s.backlogBytes -= len(s.backlog[i].b)
+		s.backlog = append(s.backlog[:i], s.backlog[i+1:]...)
+		dropped++
 	}
+	if dropped > 0 {
+		log.Printf("[live] session %s: attach backlog over %d bytes; dropped %d oldest content frame(s)", s.id, liveBacklogBytes, dropped)
+	}
+}
+
+// sendAttachContent is the attach translator's sink.
+func (s *liveSession) sendAttachContent(b []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attachContent = true
+	s.sendAttachLocked(b, false)
+}
+
+func (s *liveSession) isEnded() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ended
 }
 
 func (s *liveSession) route(line string) {
@@ -315,6 +399,23 @@ func (s *liveSession) route(line string) {
 	}
 	s.mu.Unlock()
 
+	if chat != nil && typ == "result" && !chat.gotContent && !chat.finished {
+		// The turn that was running when the chat joined ended without
+		// taking the message in; the message gets its own turn next, so the
+		// chat stays open. This result closes that turn on attach.
+		s.p.takeResult()
+		t := newSSETranslator(openai.GenerateChatID(), time.Now().Unix(), s.model, s.id, identityMeter{}, "")
+		t.private = s.private
+		w := &frameWriter{send: s.sendAttachContent, dropDone: true}
+		t.feed(w, w, line, true)
+		t.flushAggLog()
+		s.mu.Lock()
+		s.turnRunning = false
+		s.attachContent = false
+		s.mu.Unlock()
+		s.sendAttach(runtimeFrame("turn_end", map[string]bool{"merged": false}), true)
+		return
+	}
 	if chat != nil {
 		if typ == "result" {
 			if s.p.takeResult() && !chat.finished {
@@ -340,9 +441,10 @@ func (s *liveSession) route(line string) {
 		close(chat.frames)
 		s.chat = nil
 		s.attachT, s.attachW = nil, nil
+		s.attachContent = false
 		s.turnRunning = false
 		s.mu.Unlock()
-		s.sendAttach(runtimeFrame("turn_end", map[string]bool{"merged": true}))
+		s.sendAttach(runtimeFrame("turn_end", map[string]bool{"merged": true}), true)
 		return
 	}
 
@@ -350,7 +452,7 @@ func (s *liveSession) route(line string) {
 	if s.attachT == nil {
 		s.attachT = newSSETranslator(openai.GenerateChatID(), time.Now().Unix(), s.model, s.id, identityMeter{}, "")
 		s.attachT.private = s.private
-		s.attachW = &frameWriter{send: s.sendAttach, dropDone: true}
+		s.attachW = &frameWriter{send: s.sendAttachContent, dropDone: true}
 	}
 	t, w := s.attachT, s.attachW
 	s.mu.Unlock()
@@ -370,8 +472,9 @@ func (s *liveSession) route(line string) {
 		s.attachT, s.attachW = nil, nil
 	}
 	s.turnRunning = false
+	s.attachContent = false
 	s.mu.Unlock()
-	s.sendAttach(runtimeFrame("turn_end", map[string]bool{"merged": false}))
+	s.sendAttach(runtimeFrame("turn_end", map[string]bool{"merged": false}), true)
 }
 
 // finish runs once the process output ended (the process was reaped).
@@ -407,19 +510,29 @@ func (s *liveSession) finish() {
 	}
 
 	tasks, _ := s.p.tasks.snapshot()
-	s.sendAttach(runtimeFrame("background_end", map[string]any{"state": state, "tasks": tasksOrEmpty(tasks)}))
+	end := runtimeFrame("background_end", map[string]any{"state": state, "tasks": tasksOrEmpty(tasks)})
 	s.mu.Lock()
-	if s.attach != nil {
-		close(s.attach.frames)
+	s.endFrame = end
+	if sub := s.attach; sub != nil {
+		select {
+		case sub.frames <- end:
+			s.endFrame = nil // delivered
+		default:
+		}
+		close(sub.frames)
 		s.attach = nil
 	}
 	s.mu.Unlock()
 
-	liveSessions.Lock()
-	if liveSessions.m[s.id] == s {
-		delete(liveSessions.m, s.id)
-	}
-	liveSessions.Unlock()
+	// The entry stays as a tombstone: a watcher that attaches late still
+	// gets the backlog and background_end instead of a 404.
+	time.AfterFunc(liveTombstoneTTL, func() {
+		liveSessions.Lock()
+		if liveSessions.m[s.id] == s {
+			delete(liveSessions.m, s.id)
+		}
+		liveSessions.Unlock()
+	})
 	close(s.done)
 }
 
@@ -486,21 +599,35 @@ func (s *liveSession) close(reason string) {
 	s.killAfter(liveKillGrace)
 }
 
-// setAttach makes sub the session's attach stream, ending the previous one,
-// and queues the current task snapshot. False when the phase already ended.
-func (s *liveSession) setAttach(sub *attachSub) bool {
+// newAttach makes a new attach stream the session's one, ending the
+// previous one. It queues the backlog, then the current task snapshot; on a
+// tombstone it queues the backlog and background_end and closes the stream.
+func (s *liveSession) newAttach() *attachSub {
 	tasks, _ := s.p.tasks.snapshot()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ended {
-		return false
-	}
 	if s.attach != nil {
 		close(s.attach.frames)
+		s.attach = nil
 	}
-	s.attach = sub
+	sub := &attachSub{frames: make(chan []byte, len(s.backlog)+1024)}
+	for _, f := range s.backlog {
+		sub.frames <- f.b
+	}
+	if len(s.backlog) > 0 {
+		log.Printf("[live] session %s: replaying %d backlog frame(s) to attach", s.id, len(s.backlog))
+	}
+	s.backlog, s.backlogBytes = nil, 0
+	if s.ended {
+		if s.endFrame != nil {
+			sub.frames <- s.endFrame
+		}
+		close(sub.frames)
+		return sub
+	}
 	sub.frames <- runtimeFrame("background_tasks", tasksOrEmpty(tasks))
-	return true
+	s.attach = sub
+	return sub
 }
 
 func (s *liveSession) detach(sub *attachSub) {
@@ -550,12 +677,12 @@ func startSSE(w http.ResponseWriter) (http.Flusher, bool) {
 // It returns false (nothing written) when the phase is ending and no longer
 // takes messages.
 func joinLive(w http.ResponseWriter, r *http.Request, s *liveSession, req *openai.ChatCompletionRequest) bool {
+	if s.ending() {
+		return false
+	}
 	if req.LiveOwner != s.owner {
 		writeLiveError(w, http.StatusConflict, "live_owner_mismatch", "the session's background phase belongs to another user")
 		return true
-	}
-	if s.ending() {
-		return false
 	}
 	if !req.Stream {
 		writeLiveError(w, http.StatusConflict, "live_requires_stream", "a session in its background phase only takes streaming requests")
@@ -579,24 +706,37 @@ func joinLive(w http.ResponseWriter, r *http.Request, s *liveSession, req *opena
 	chat := &liveChat{frames: make(chan []byte, 256), gone: make(chan struct{}), includeUsage: includeUsage}
 	chat.t = newSSETranslator(chatID, time.Now().Unix(), s.model, s.id, identityMeter{}, "")
 	chat.t.private = s.private
-	chat.w = &frameWriter{send: chat.send}
+	chat.w = &frameWriter{send: func(b []byte) { chat.gotContent = true; chat.send(b) }}
+
+	s.mu.Lock()
+	if s.ended || s.endState != "" || !s.p.stdinOpen() {
+		s.mu.Unlock()
+		return false
+	}
+	if s.chat != nil {
+		s.mu.Unlock()
+		writeLiveError(w, http.StatusConflict, "live_busy", "the background session is answering another message; retry")
+		return true
+	}
+	if s.attachContent {
+		// A continued turn was streaming to attach: close that part there,
+		// the rest of the turn answers this chat.
+		s.sendAttachLocked(runtimeFrame("turn_end", map[string]bool{"merged": false, "partial": true}), true)
+	}
+	s.attachT, s.attachW = nil, nil
+	s.attachContent = false
+	s.chat = chat
+	s.mu.Unlock()
 
 	flusher, ok := startSSE(w)
 	if !ok {
+		close(chat.gone)
+		s.stopTurn("stopped")
 		return true
 	}
 	tasks, _ := s.p.tasks.snapshot()
 	w.Write(runtimeFrame("live_joined", map[string]any{"tasks": tasksOrEmpty(tasks)}))
 	flusher.Flush()
-
-	s.mu.Lock()
-	if s.ended || s.chat != nil {
-		s.mu.Unlock()
-		emitStreamError(w, flusher, chatID, time.Now().Unix(), s.model, "live_session_busy: the background session ended or is answering another message")
-		return true
-	}
-	s.chat = chat
-	s.mu.Unlock()
 	log.Printf("[live] session %s: chat %s joined (owner=%q)", s.id, chatID, s.owner)
 	if err := s.p.writeLine([]byte(userMessageLine(prompt))); err != nil {
 		log.Printf("[live] session %s: writing the message failed: %v", s.id, err)
@@ -670,11 +810,7 @@ func liveAttachHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	sub := &attachSub{frames: make(chan []byte, 1024)}
-	if !s.setAttach(sub) {
-		writeLiveError(w, http.StatusNotFound, "not_live", "the session is not in its background phase")
-		return
-	}
+	sub := s.newAttach()
 	defer s.detach(sub)
 	flusher, ok := startSSE(w)
 	if !ok {
@@ -710,8 +846,12 @@ func liveStopTaskHandler(w http.ResponseWriter, r *http.Request) {
 		writeLiveError(w, http.StatusBadRequest, "invalid_request", "task_id is required")
 		return
 	}
+	if s.ending() {
+		writeOK(w) // the phase is over or ending: nothing left to stop
+		return
+	}
 	if err := s.p.stopTask(req.TaskID); err != nil {
-		writeLiveError(w, http.StatusNotFound, "not_live", "the session is not in its background phase")
+		writeOK(w)
 		return
 	}
 	log.Printf("[live] session %s: stop_task %s", s.id, req.TaskID)
@@ -727,6 +867,10 @@ func liveCloseHandler(w http.ResponseWriter, r *http.Request) {
 	case "user", "expired", "reset":
 	default:
 		writeLiveError(w, http.StatusBadRequest, "invalid_request", "reason must be user, expired or reset")
+		return
+	}
+	if s.isEnded() {
+		writeOK(w) // tombstone: already closed
 		return
 	}
 	log.Printf("[live] session %s: close (%s)", s.id, req.Reason)
@@ -750,6 +894,9 @@ func liveListHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]entry, 0, len(all))
 	for _, s := range all {
+		if s.isEnded() {
+			continue // tombstones hold no process and no slot
+		}
 		tasks, _ := s.p.tasks.snapshot()
 		out = append(out, entry{SessionID: s.id, Owner: s.owner, Deadline: s.deadline, Busy: s.busy(), Tasks: tasksOrEmpty(tasks)})
 	}

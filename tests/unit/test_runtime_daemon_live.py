@@ -422,3 +422,20 @@ def test_status_counts_live_sessions_as_active_work(daemon):
     finally:
         claude.stop.set()
         codex.stop.set()
+
+
+def test_ended_tombstones_are_not_live():
+    from runtime_daemon import live
+
+    payload = {
+        "sessions": [
+            session("a"),
+            {**session("b"), "ended": True},
+            {**session("c"), "ended": False},
+            {"session_id": "../x"},
+            "junk",
+        ]
+    }
+    assert [s["session_id"] for s in live.parse_sessions(payload)] == ["a", "c"]
+    with pytest.raises(ValueError):
+        live.parse_sessions({"sessions": None})

@@ -11,6 +11,8 @@ export interface Capability {
   health: string; detail: string; models: string[]
   /** 节点支持多席位切换；旧版 Daemon 缺省。 */
   seat_switch_v1?: boolean; seats?: SeatState[]
+  /** Claude 驱动能让带后台任务的进程长驻、由平台看着做完；旧版 Daemon 缺省。 */
+  claude_background_sessions_v1?: boolean
 }
 /** 节点上的 CLI 发起的登录：Claude 要把浏览器页面上的认证码贴回来，Codex 在浏览器里输入 user_code。 */
 export interface SeatLogin {

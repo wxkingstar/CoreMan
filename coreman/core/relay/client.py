@@ -58,8 +58,9 @@ class RelayBusyError(RelayError):
 
 
 class LiveConflictError(RelayError):
-    """驱动拒收这条对话（409）：会话在后台阶段但属于别人（`live_owner_mismatch`），或要求接进
-    后台阶段却已不在（`not_live`）。没有任何副作用，调用方可以调整后重发。"""
+    """驱动拒收这条对话（409）：会话在后台阶段但属于别人（`live_owner_mismatch`）、要求接进
+    后台阶段却已不在（`not_live`），或另一条消息正接在这个进程上（`live_busy`）。没有任何副作用，
+    调用方可以调整后重发。"""
 
     def __init__(self, code: str) -> None:
         super().__init__(f"live_conflict: {code}")
@@ -446,7 +447,7 @@ def _error_code(body: str) -> str | None:
         return None
     error = parsed.get("error") if isinstance(parsed, dict) else None
     code = error.get("code") if isinstance(error, dict) else None
-    return code if code in ("live_owner_mismatch", "not_live") else None
+    return code if code in ("live_owner_mismatch", "not_live", "live_busy") else None
 
 
 async def _next_line(lines: AsyncIterator[str], deadline: float) -> str | None:

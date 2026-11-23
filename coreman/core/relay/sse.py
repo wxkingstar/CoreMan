@@ -170,9 +170,14 @@ class LiveJoinedEvent:
 
 @dataclass(frozen=True)
 class TurnEndEvent:
-    """后台观察流里一个回合结束（`x_runtime.turn_end`）；`merged` 表示这一回合并进了新消息。"""
+    """后台观察流里一个回合结束（`x_runtime.turn_end`）。
+
+    `merged`：这一回合并进了本人的新消息，由那条消息的回复负责；`partial`：本人接进来时这一回合
+    已经写出的半段，后续内容走新消息的回复。
+    """
 
     merged: bool
+    partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -238,7 +243,7 @@ def _runtime_events(runtime: dict[str, Any]) -> list[Any]:
         out.append(LiveJoinedEvent(background_tasks(joined.get("tasks"))))
     turn_end = runtime.get("turn_end")
     if isinstance(turn_end, dict):
-        out.append(TurnEndEvent(turn_end.get("merged") is True))
+        out.append(TurnEndEvent(turn_end.get("merged") is True, turn_end.get("partial") is True))
     end = runtime.get("background_end")
     if isinstance(end, dict):
         state = end.get("state")

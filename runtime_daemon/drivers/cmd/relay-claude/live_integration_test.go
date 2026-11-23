@@ -212,7 +212,7 @@ read:
 	if !strings.Contains(end, `"state":"finished"`) || !strings.Contains(end, `"status":"stopped"`) || !strings.Contains(end, `"status":"completed"`) {
 		t.Fatalf("background_end = %s", end)
 	}
-	if lookupLive(sid) != nil {
+	if s := lookupLive(sid); s != nil && !s.isEnded() {
 		t.Fatal("session still live after background_end")
 	}
 }

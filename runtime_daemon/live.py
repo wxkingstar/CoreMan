@@ -52,7 +52,11 @@ def validate(path: str, data: object) -> dict:
 
 
 def parse_sessions(payload: object) -> list[dict]:
-    """驱动 /live/list 的会话；形状不对的条目丢掉，会话标识不合规的也丢掉。"""
+    """驱动 /live/list 的会话；形状不对的条目丢掉，会话标识不合规的也丢掉。
+
+    驱动会把刚结束的会话留一阵（供 attach 补发），带 ``ended: true``：它们已不在后台阶段，
+    不占槽位、不上报、不拖住旧驱动，这里一并丢掉。
+    """
     sessions = payload.get("sessions") if isinstance(payload, dict) else None
     if not isinstance(sessions, list):
         raise ValueError("live list malformed")
@@ -62,6 +66,7 @@ def parse_sessions(payload: object) -> list[dict]:
         if isinstance(item, dict)
         and isinstance(item.get("session_id"), str)
         and SESSION_ID.fullmatch(item["session_id"])
+        and item.get("ended") is not True
     ]
 
 

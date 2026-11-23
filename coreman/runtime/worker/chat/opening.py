@@ -308,11 +308,16 @@ class OpenStage(ChatStageBase):
                 )
                 raise AssistantDispatchError from None
         live = await self._live_mode(
-            session, ctx, intake, relay, backend, info, sandbox=transcript is not None
+            session,
+            ctx,
+            intake,
+            relay,
+            backend,
+            info,
+            sandbox=transcript is not None,
+            allow_join=allow_join,
         )
-        joined = live is not None and live.joined and allow_join
-        if live is not None and live.joined and not joined:
-            live = None
+        joined = live is not None and live.joined
         if joined:
             assert live is not None and live.run is not None
             current_task.payload = {**current_task.payload, "live_join": live.run.id}
@@ -740,6 +745,27 @@ class OpenStage(ChatStageBase):
         self._after_supervisor(pre)
         return pre
 
+    def _joinable(self, ctx: TaskContext, intake: Intake) -> bool:
+        """这一轮能不能进（或写进）后台阶段：飞书上普通员工、本人当面发起、续同一会话的轮次。
+
+        主动插话、调度、告警、协作、API、个人助理这些回合要么没人可通知，要么回复交给平台解析，
+        按原来的一轮一进程跑；会话正在后台阶段时它们排队等（见 `_hold_for_background`）。
+        """
+        from coreman.core.chat import background_runs
+
+        payload = ctx.task.payload
+        return not (
+            ctx.task.kind not in background_runs.OWNER_KINDS
+            or intake.bot.platform != "feishu"
+            or is_assistant(intake.bot)
+            or not intake.speaker.platform_user_id
+            or self._structured_reply(ctx)
+            or payload.get("origin") in ("observe", "dispatch", alert_sources.ORIGIN)
+            or payload.get("collaboration_id")
+            or payload.get("human_collaboration_id")
+            or payload.get("api_task_id")
+        )
+
     async def _live_mode(
         self,
         session: AsyncSession,
@@ -750,32 +776,21 @@ class OpenStage(ChatStageBase):
         info: sessions.SessionInfo,
         *,
         sandbox: bool,
+        allow_join: bool = True,
     ) -> LiveMode | None:
-        """这一轮能不能进后台阶段、要不要写进正在后台阶段的进程。
+        """这一轮的后台阶段参数：写进正在后台阶段的进程，或者带上 owner 与到期时间开新进程。
 
-        只给飞书上普通员工、提问人当面发起的对话：主动插话、调度、告警、协作、API、个人助理
-        这些回合要么没人可通知，要么回复交给平台解析，都按原来的一轮一进程跑。
+        会话正在后台阶段、本人能接时一律写进去（不看节点此刻的能力位，进程已经在那里）；
+        `allow_join=False`（驱动刚说进程不在了）时按新进程开。
         """
         from coreman.core.chat import background_runs
 
-        payload = ctx.task.payload
-        if (
-            sandbox
-            or ctx.task.kind not in background_runs.OWNER_KINDS
-            or intake.bot.platform != "feishu"
-            or is_assistant(intake.bot)
-            or not intake.speaker.platform_user_id
-            or self._structured_reply(ctx)
-            or payload.get("origin") in ("observe", "dispatch", alert_sources.ORIGIN)
-            or payload.get("collaboration_id")
-            or payload.get("human_collaboration_id")
-            or payload.get("api_task_id")
-            or not await background_runs.supported(session, relay, backend)
-        ):
+        if sandbox or not self._joinable(ctx, intake):
             return None
         run = await background_runs.running_for(session, intake.bot.id, intake.session_key)
         if (
-            run is not None
+            allow_join
+            and run is not None
             and run.close_requested_at is None
             and run.owner_platform_user_id == intake.speaker.platform_user_id
             and run.relay_session_id == info.relay_session_id
@@ -786,6 +801,8 @@ class OpenStage(ChatStageBase):
                 run,
                 background_runs.open_secrets(ctx.cipher, run),
             )
+        if not await background_runs.supported(session, relay, backend):
+            return None
         # 主回合加后台阶段一共不超过员工的任务超时：从这一轮开始算。
         return LiveMode(
             intake.speaker.platform_user_id,

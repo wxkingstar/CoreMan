@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -49,8 +50,6 @@ DRAIN_REASON = "worker_drain"
 REPLY_CHARS = 20000
 # attach 断开后重连的等待（秒），逐次翻倍到上限。
 RECONNECT_SECONDS = (2.0, 5.0, 10.0, 20.0, 30.0)
-# attach 返回 404、节点心跳却还列着这个会话时，最多再确认这么多次才判丢失。
-NOT_LIVE_CHECKS = 3
 
 
 @dataclass
@@ -115,6 +114,9 @@ class BackgroundWatchHandler:
             ctx.log.exception("background_watch_crashed", run_id=run_id)
             await self._finish(ctx, "failed", type(exc).__name__)
             return
+        if outcome not in background_runs.TERMINAL:
+            # 交接或被取消：已经发出去的回合与用量先记下，下一个观察任务从它之后接着记。
+            await watch.flush_log()
         if outcome == DRAIN_REASON:
             async with ctx.session_factory() as session:
                 current = await session.get(BackgroundRun, run_id, populate_existing=True)
@@ -156,9 +158,12 @@ class _Watch:
         self.last_card = 0.0
 
     async def follow(self) -> str:
-        """跟到结束；返回结局（终态名，或 `worker_drain` 表示交接给下一个观察任务）。"""
+        """跟到结束；返回结局（终态名，或 `worker_drain` 表示交接给下一个观察任务）。
+
+        驱动在进程结束后把会话留作墓碑一段时间，attach 会补发没送出去的回合和结束帧；所以 404
+        就是真的没了：按请求过的 close 定终态，否则记为丢失。
+        """
         attempt = 0
-        not_live = 0
         while True:
             if self.ctx.cancel_event.is_set():
                 return self.ctx.cancel_reason or "cancelled"
@@ -170,11 +175,9 @@ class _Watch:
             except _Ended:
                 return self.run.state
             except LiveNotFoundError:
-                not_live += 1
-                state = await self._not_live(not_live)
-                if state is not None:
-                    await self._end(state, self.run.tasks or [])
-                    return state
+                state = background_runs.CLOSE_STATES.get(self.run.close_reason or "", "lost")
+                await self._end(state, self.run.tasks or [])
+                return state
             except RelayError as exc:
                 self.ctx.log.warning("background_attach_failed", error=str(exc)[:200])
                 if await self._node_gone():
@@ -233,7 +236,9 @@ class _Watch:
         elif isinstance(event, BackgroundTasksEvent | BackgroundEvent | LiveJoinedEvent):
             turn.finished += await self._snapshot(list(event.tasks))
         elif isinstance(event, TurnEndEvent):
-            if not event.merged:
+            # 没并入新消息的回合照常发；本人接进来时已经写出的半段（partial）也照发，那是后台
+            # 汇报的开头。标了并入的回合按说没有内容，万一有也发出去，不丢。
+            if not event.merged or turn.text.strip():
                 await self._deliver(turn)
             return _Turn()
         elif isinstance(event, BackgroundEndEvent):
@@ -250,7 +255,10 @@ class _Watch:
             run = await session.get(
                 BackgroundRun, self.run.id, with_for_update=True, populate_existing=True
             )
-            if run is None or run.state != "running":
+            # 被新进程接替的一段（replaced）：正在读的这条流照常收完。
+            if run is None or (
+                run.state != "running" and run.close_reason != background_runs.REPLACED
+            ):
                 await session.commit()
                 raise _Ended
             old = list(run.tasks or [])
@@ -275,7 +283,8 @@ class _Watch:
     async def _deliver(self, turn: _Turn) -> None:
         """一个后台回合：新消息回复在原消息下并 @ 提问人，开头写明哪一项完成了。"""
         body = (self.ctx.redact(turn.text) or "").strip()
-        if not body and not turn.finished:
+        if not body:
+            # 只有用量没有正文（被本人消息接管的那一回合收尾）：不发空消息，完成情况看卡片。
             return
         which = "、".join(background_runs.number(i) for i, _ in turn.finished)
         head = (
@@ -293,18 +302,24 @@ class _Watch:
             if run is None:
                 await session.commit()
                 return
-            run.turns += 1
-            await outbox.add(
+            # 幂等键按回合内容：重连后驱动补发的同一回合不会再发一次。
+            digest = hashlib.sha256(body.encode()).hexdigest()[:24]
+            item = await outbox.add(
                 session,
                 bot_id=run.bot_id,
                 platform=run.platform,
                 kind="send",
-                dedupe_key=f"bg-turn:{run.id}:{run.turns}",
+                dedupe_key=f"bg-turn:{run.id}:{digest}",
                 target=background_runs.reply_target(run),
                 payload={"markdown": text, "_mention_user_id": run.owner_platform_user_id},
             )
+            if item is not None:
+                run.turns += 1
             await session.commit()
             self.run = run
+        if item is None:
+            self.ctx.log.info("background_turn_replayed", run_id=self.run.id)
+            return
         self.delivered.append(text)
         self.ctx.log.info("background_turn_delivered", run_id=self.run.id, turn=self.run.turns)
 
@@ -372,16 +387,12 @@ class _Watch:
         await chat_logs.insert_turn(session, entry)
         self.delivered, self.usage = [], _Usage()
 
-    async def _not_live(self, checks: int) -> str | None:
-        """attach 返回 404：会话已不在后台阶段。返回要定的终态；None 表示再确认一次。"""
-        if self.run.close_reason:
-            return background_runs.CLOSE_STATES[self.run.close_reason]
+    async def flush_log(self) -> None:
         async with self.ctx.session_factory() as session:
-            node = await session.get(RuntimeNode, self.run.node_id) if self.run.node_id else None
-        listed = node is not None and str(self.run.relay_session_id) in (node.live_sessions or [])
-        if listed and checks < NOT_LIVE_CHECKS:
-            return None
-        return "lost"
+            run = await session.get(BackgroundRun, self.run.id)
+            if run is not None:
+                await self._log(session, run)
+            await session.commit()
 
     async def _node_gone(self) -> bool:
         """节点离线超过宽限：判丢失。"""

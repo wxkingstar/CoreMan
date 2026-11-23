@@ -81,6 +81,8 @@ def turn(t, absorb=0.0):
         out({"type": "system", "subtype": "task_started", "task_id": "c1", "parent_task_id": "t1", "description": "child step", "task_type": "local_bash", "is_backgrounded": False})
         out({"type": "system", "subtype": "task_progress", "task_id": "t2", "description": "running tests"})
     text("reply:" + t)
+    if t.startswith("done") and os.environ.get("FAKE_SLOW"):
+        time.sleep(float(os.environ["FAKE_SLOW"]))
     if "permission" in t:
         out({"type": "control_request", "request_id": "perm-1", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "touch x"}}})
         out({"type": "control_request", "request_id": "other-1", "request": {"subtype": "hook_callback"}})
@@ -191,6 +193,7 @@ func newLiveEnv(t *testing.T) *liveEnv {
 			case <-s.done:
 			case <-time.After(5 * time.Second):
 			}
+			dropLive(s)
 		}
 		srv.Close()
 		resumeMeter = oldMeter
@@ -514,7 +517,7 @@ func TestLiveSessionLifecycle(t *testing.T) {
 	if strings.Contains(end, "control_response") {
 		t.Fatalf("control_response leaked:\n%s", end)
 	}
-	waitFor(t, "registry cleanup", func() bool { return lookupLive("sess-live") == nil })
+	waitFor(t, "tombstone", func() bool { s := lookupLive("sess-live"); return s != nil && s.isEnded() })
 
 	// After the phase the next turn starts a new process as before.
 	next := e.stream(context.Background(), "/v1/chat/completions", chatBody("sess-live", "u1", "again", deadline, nil))
@@ -567,8 +570,172 @@ func TestLiveMergedTurnRoutesToChat(t *testing.T) {
 		t.Fatalf("chat did not get the merged turn:\n%s", body)
 	}
 	got := attach.until(`"turn_end"`, 2*time.Second)
+	if !strings.Contains(got, `"turn_end":{"merged":false,"partial":true}`) || strings.Contains(got, `"usage"`) {
+		t.Fatalf("attach did not close its part of the turn as partial:\n%s", got)
+	}
+	got = attach.until(`"turn_end"`, 2*time.Second)
 	if !strings.Contains(got, `"merged":true`) || strings.Contains(got, "absorbed") {
 		t.Fatalf("attach for a merged turn:\n%s", got)
+	}
+}
+
+// If the CLI runs the message as its own turn after the running one, the
+// running turn's result closes it on attach and the chat waits for its turn.
+func TestLiveJoinedChatWaitsForItsOwnTurn(t *testing.T) {
+	e := newLiveEnv(t)
+	t.Setenv("FAKE_SLOW", "1")
+	e.startLiveSession("sess-own", deadlineIn(time.Hour))
+	attach := e.stream(context.Background(), "/live/attach", []byte(`{"session_id":"sess-own"}`))
+	attach.until(`"background_tasks"`, 2*time.Second)
+	e.touch("complete_t1")
+	attach.until("done t1 BG-OK", 5*time.Second)
+
+	chat := e.stream(context.Background(), "/v1/chat/completions", chatBody("sess-own", "u1", "next please", deadlineIn(time.Hour), nil))
+	body := chat.rest(8 * time.Second)
+	if !strings.Contains(body, "reply:Human: next please") || strings.Count(body, `"finish_reason":"stop"`) != 1 {
+		t.Fatalf("chat did not get its own turn:\n%s", body)
+	}
+	got := attach.until(`"merged":true`, 3*time.Second)
+	partial := strings.Index(got, `"partial":true`)
+	ended := strings.Index(got, `"turn_end":{"merged":false}`)
+	if partial < 0 || ended < partial || !strings.Contains(got[partial:ended], `"usage"`) || strings.Contains(got, "next please") {
+		t.Fatalf("attach frames around the joined turn:\n%s", got)
+	}
+}
+
+func liveBacklogHas(sid, want string) func() bool {
+	return func() bool {
+		s := lookupLive(sid)
+		if s == nil {
+			return false
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, f := range s.backlog {
+			if strings.Contains(string(f.b), want) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// Without an attach subscriber the frames wait in the backlog and are
+// replayed on attach.
+func TestLiveBacklogReplayedOnAttach(t *testing.T) {
+	e := newLiveEnv(t)
+	e.startLiveSession("sess-backlog", deadlineIn(time.Hour))
+	e.touch("complete_t1")
+	waitFor(t, "turn in the backlog", liveBacklogHas("sess-backlog", `"turn_end"`))
+	attach := e.stream(context.Background(), "/live/attach", []byte(`{"session_id":"sess-backlog"}`))
+	got := attach.until(`"turn_end"`, 2*time.Second)
+	if !strings.Contains(got, "done t1 BG-OK") || !strings.Contains(got, `"usage"`) {
+		t.Fatalf("backlog replay:\n%s", got)
+	}
+	attach.until(`"background_tasks"`, 2*time.Second)
+}
+
+func TestLiveBacklogCapKeepsBoundaries(t *testing.T) {
+	s := &liveSession{id: "cap"}
+	old := liveBacklogBytes
+	liveBacklogBytes = 100
+	defer func() { liveBacklogBytes = old }()
+	s.sendAttach([]byte("tasks-1"), true)
+	for i := 0; i < 20; i++ {
+		s.sendAttach([]byte(fmt.Sprintf("content-%02d", i)), false)
+	}
+	s.sendAttach([]byte("turn_end"), true)
+	var got []string
+	for _, f := range s.backlog {
+		got = append(got, string(f.b))
+	}
+	joined := strings.Join(got, ",")
+	if s.backlogBytes > 100 || !strings.HasPrefix(joined, "tasks-1,") || !strings.HasSuffix(joined, "content-19,turn_end") || strings.Contains(joined, "content-00") {
+		t.Fatalf("backlog = %s (%d bytes)", joined, s.backlogBytes)
+	}
+}
+
+// An ended session stays a tombstone: a late attach gets the backlog and
+// background_end, controls are no-ops, live_join is not_live, and a normal
+// turn starts a new process.
+func TestLiveTombstone(t *testing.T) {
+	e := newLiveEnv(t)
+	e.startLiveSession("sess-tomb", deadlineIn(time.Hour))
+	e.touch("complete_t1")
+	waitFor(t, "first completion", liveBacklogHas("sess-tomb", "done t1"))
+	e.touch("complete_t2")
+	waitFor(t, "process end", func() bool { s := lookupLive("sess-tomb"); return s != nil && s.isEnded() })
+
+	if n := liveCount(); n != 0 {
+		t.Fatalf("liveCount = %d with only a tombstone", n)
+	}
+	resp, _ := http.Get(e.srv.URL + "/live/list")
+	var list struct {
+		Sessions []any `json:"sessions"`
+	}
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Sessions) != 0 {
+		t.Fatalf("/live/list lists a tombstone: %+v", list)
+	}
+	for _, path := range []string{"/live/stop_task", "/live/close"} {
+		resp := e.post(context.Background(), path, []byte(`{"session_id":"sess-tomb","task_id":"t1","reason":"user"}`))
+		var ok map[string]bool
+		json.NewDecoder(resp.Body).Decode(&ok)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !ok["ok"] {
+			t.Fatalf("%s on a tombstone: %d %v", path, resp.StatusCode, ok)
+		}
+	}
+
+	attach := e.stream(context.Background(), "/live/attach", []byte(`{"session_id":"sess-tomb"}`))
+	end := attach.rest(3 * time.Second)
+	for _, want := range []string{"done t1 BG-OK", "done t2 BG-OK", `"background_end":{"state":"finished"`, "data: [DONE]"} {
+		if !strings.Contains(end, want) {
+			t.Fatalf("tombstone attach missing %s:\n%s", want, end)
+		}
+	}
+	if strings.Index(end, "done t2") > strings.Index(end, "background_end") {
+		t.Fatalf("background_end before the backlog:\n%s", end)
+	}
+
+	// Another user's live_join on it: not_live, not live_owner_mismatch.
+	resp = e.post(context.Background(), "/v1/chat/completions", chatBody("sess-tomb", "u2", "hi", deadlineIn(time.Hour), map[string]any{"live_join": true}))
+	var errBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&errBody)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || errBody.Error.Code != "not_live" {
+		t.Fatalf("live_join on a tombstone: %d %q", resp.StatusCode, errBody.Error.Code)
+	}
+
+	chat := e.stream(context.Background(), "/v1/chat/completions", chatBody("sess-tomb", "u2", "fresh", deadlineIn(time.Hour), nil))
+	if body := chat.rest(5 * time.Second); !strings.Contains(body, "reply:Human: fresh") || e.launches() != 2 {
+		t.Fatalf("new turn after the tombstone (launches=%d):\n%s", e.launches(), body)
+	}
+	if lookupLive("sess-tomb") != nil {
+		t.Fatal("tombstone not replaced by the new turn")
+	}
+}
+
+// An ending session answers not_live before checking the owner.
+func TestLiveEndingAnswersNotLiveBeforeOwner(t *testing.T) {
+	e := newLiveEnv(t)
+	e.startLiveSession("sess-ending", deadlineIn(time.Hour))
+	lookupLive("sess-ending").setEndState("stopped")
+	resp := e.post(context.Background(), "/v1/chat/completions", chatBody("sess-ending", "u2", "hi", deadlineIn(time.Hour), map[string]any{"live_join": true}))
+	var errBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&errBody)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || errBody.Error.Code != "not_live" {
+		t.Fatalf("ending session: %d %q, want 409 not_live", resp.StatusCode, errBody.Error.Code)
 	}
 }
 
@@ -622,7 +789,7 @@ func TestLiveCloseByUser(t *testing.T) {
 	if end := attach.rest(5 * time.Second); !strings.Contains(end, `"background_end":{"state":"stopped"`) {
 		t.Fatalf("attach end:\n%s", end)
 	}
-	waitFor(t, "registry cleanup", func() bool { return lookupLive("sess-close") == nil })
+	waitFor(t, "tombstone", func() bool { s := lookupLive("sess-close"); return s != nil && s.isEnded() })
 }
 
 func TestLiveProcessCrashFails(t *testing.T) {
@@ -634,7 +801,7 @@ func TestLiveProcessCrashFails(t *testing.T) {
 	if end := attach.rest(5 * time.Second); !strings.Contains(end, `"background_end":{"state":"failed"`) {
 		t.Fatalf("attach end:\n%s", end)
 	}
-	waitFor(t, "registry cleanup", func() bool { return lookupLive("sess-crash") == nil })
+	waitFor(t, "tombstone", func() bool { s := lookupLive("sess-crash"); return s != nil && s.isEnded() })
 }
 
 // One attach stream per session: a new one ends the old one. Live streams

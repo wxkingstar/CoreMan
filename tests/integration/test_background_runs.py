@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -371,15 +373,66 @@ async def test_joined_turn_falls_back_to_a_normal_turn_when_the_session_just_end
     bot, relay_row = await feishu_bot(db_session)
     first = LiveRelay(chats=[main_turn_with_background()])
     await run_chat(db_engine, await feishu_task(db_session, bot, "开工"), first)
-    relay = LiveRelay(chats=[(409, "not_live"), plain_turn("重新开始")])
+    old = (await db_session.execute(select(BackgroundRun))).scalar_one()
+    relay = LiveRelay(chats=[(409, "not_live"), main_turn_with_background()])
     t = await feishu_task(db_session, bot, "接着做")
     await run_chat(db_engine, t, relay)
     joined, normal = relay.bodies("/v1/chat/completions")
     assert joined["live_join"] is True and "BOT_TOKEN_ERP" not in joined.get("env_vars", {})
     assert "live_join" not in normal and normal["env_vars"]["BOT_TOKEN_ERP"]
+    # 新进程照样带 owner 与到期时间，可以自己再进后台阶段。
+    assert normal["live_owner"] == OWNER and normal["live_deadline"] > time.time()
     stream = await streams.get(db_session, t.id)
-    assert stream is not None and "重新开始" in stream.final_text
+    assert stream is not None and stream.final_text.endswith(msg("background_started_suffix", n=2))
     assert (await tasks.get(db_session, t.id)).status == "succeeded"
+    await db_session.refresh(old)
+    assert old.state == "finished" and old.close_reason == background_runs.REPLACED
+    runs = list((await db_session.execute(select(BackgroundRun))).scalars())
+    assert [r.state for r in runs if r.id != old.id] == ["running"]
+
+
+async def test_owner_turns_that_cannot_join_wait_instead_of_going_out_without_owner(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """本人发起、但回复交给平台解析的一轮不能写进后台进程：排队等，不发不带 owner 的请求。"""
+
+    class Structured(ChatTaskHandler):
+        def _structured_reply(self, ctx):  # type: ignore[no-untyped-def]
+            return True
+
+    bot, relay_row = await feishu_bot(db_session)
+    run = await make_run(db_session, bot, relay_row)
+    t = await feishu_task(db_session, bot, "本人但不能接")
+    relay = LiveRelay(chats=[plain_turn()])
+    await Structured().run(build_ctx(db_engine, t, relay_client_factory=relay.client))
+    assert relay.requests == []
+    held = await tasks.get(db_session, t.id)
+    assert held is not None and held.status == "queued"
+    assert held.payload["background_hold"] == str(run.id)
+
+
+async def test_hold_near_the_deadline_backs_off_and_an_overdue_run_is_concluded(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, relay_row = await feishu_bot(db_session)
+    # 到期 400 秒：放行时刻（到期 + 300 秒）已过，但还没到平台收尾的时候。
+    run = await make_run(
+        db_session, bot, relay_row, deadline=datetime.now(UTC) - timedelta(seconds=400)
+    )
+    t = await feishu_task(db_session, bot, "我也有事", sender="ou_other", chat_type="group")
+    await run_chat(db_engine, t, LiveRelay(chats=[plain_turn()]))
+    held = await tasks.get(db_session, t.id)
+    assert held is not None and held.status == "queued"
+    assert held.run_after >= datetime.now(UTC) + timedelta(seconds=10)
+    # 到期 700 秒还挂着：就地按到期收尾，这一轮照常处理。
+    run.deadline = datetime.now(UTC) - timedelta(seconds=700)
+    held.run_after = datetime.now(UTC)
+    await db_session.commit()
+    relay = LiveRelay(chats=[plain_turn("轮到我了")])
+    await run_chat(db_engine, await claim_task(db_session, t.id), relay)
+    await db_session.refresh(run)
+    assert run.state == "expired"
+    assert len(relay.bodies("/v1/chat/completions")) == 1
 
 
 async def test_another_sender_waits_for_the_background_phase(
@@ -785,3 +838,103 @@ async def test_joined_reply_says_which_background_results_it_includes(
     stream = await streams.get(db_session, t.id)
     assert stream is not None
     assert stream.final_text.endswith(msg("live_merged_note", which="①") + msg("done_suffix"))
+
+
+async def test_watch_delivers_partial_and_merged_text_once_across_replays(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """本人接进来时已经写出的半段照发；重连后驱动补发的同一回合不重复发。"""
+    bot, relay_row = await feishu_bot(db_session)
+    run = await make_run(db_session, bot, relay_row)
+    first = [
+        _text("开头半段"),
+        runtime({"turn_end": {"merged": False, "partial": True}}),
+        _text("并入但有内容"),
+        runtime({"turn_end": {"merged": True}}),
+    ]  # 没有 [DONE]：断了，重连后补发
+    replay = [
+        _text("开头半段"),
+        runtime({"turn_end": {"merged": False, "partial": True}}),
+        runtime({"background_end": {"state": "finished", "tasks": []}}),
+        DONE,
+    ]
+    relay = LiveRelay(attaches=[first, replay])
+    t = await system_task(db_session, bot, background_runs.WATCH_KIND, {"run_id": run.id})
+    await BackgroundWatchHandler(reconnect=(0.01,)).run(
+        build_ctx(db_engine, t, relay_client_factory=relay.client)
+    )
+    replies = [
+        i.payload["markdown"] for i in await outbox_items(db_session) if "markdown" in i.payload
+    ]
+    assert len(replies) == 2
+    assert "开头半段" in replies[0] and "并入但有内容" in replies[1]
+    await db_session.refresh(run)
+    assert run.state == "finished" and run.turns == 2
+
+
+async def test_watch_records_usage_before_handing_over_on_drain(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.runtime.worker.background_watch import DRAIN_REASON
+
+    bot, relay_row = await feishu_bot(db_session)
+    run = await make_run(db_session, bot, relay_row)
+    relay = LiveRelay(
+        attaches=[[_text("A 完成"), _chunk(None, usage=USAGE), runtime({"turn_end": {}})]]
+    )
+    t = await system_task(db_session, bot, background_runs.WATCH_KIND, {"run_id": run.id})
+    ctx = build_ctx(db_engine, t, relay_client_factory=relay.client)
+    running = asyncio.create_task(BackgroundWatchHandler(reconnect=(30.0,)).run(ctx))
+    await asyncio.sleep(1.0)
+    ctx.request_cancel(DRAIN_REASON)
+    await asyncio.wait_for(running, 10)
+    log = (await db_session.execute(select(ChatLog))).scalar_one()
+    assert log.task_id == t.id and log.output_tokens == USAGE["completion_tokens"]
+    nxt = (
+        await db_session.execute(
+            select(Task).where(Task.kind == background_runs.WATCH_KIND, Task.id != t.id)
+        )
+    ).scalar_one()
+    assert nxt.payload == {"run_id": run.id, "generation": 1}
+
+
+async def test_live_busy_is_retried_as_a_joined_turn(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _ = await feishu_bot(db_session)
+    await run_chat(
+        db_engine,
+        await feishu_task(db_session, bot, "开工"),
+        LiveRelay(chats=[main_turn_with_background()]),
+    )
+    relay = LiveRelay(
+        chats=[
+            (409, "live_busy"),
+            [runtime({"live_joined": {"tasks": [bg_task("a")]}}), *plain_turn("好了")],
+        ]
+    )
+    t = await feishu_task(db_session, bot, "进展？")
+    await run_chat(db_engine, t, relay)
+    first, second = relay.bodies("/v1/chat/completions")
+    assert first["live_join"] is True and second["live_join"] is True
+    assert (await tasks.get(db_session, t.id)).status == "succeeded"
+
+
+async def test_usage_only_turn_end_posts_nothing(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, relay_row = await feishu_bot(db_session)
+    run = await make_run(db_session, bot, relay_row)
+    attach = [
+        runtime({"background_tasks": [bg_task("a", "completed"), bg_task("b")]}),
+        _chunk(None, usage=USAGE),
+        runtime({"turn_end": {"merged": False}}),
+        runtime({"background_end": {"state": "finished", "tasks": []}}),
+        DONE,
+    ]
+    relay = LiveRelay(attaches=[attach])
+    t = await system_task(db_session, bot, background_runs.WATCH_KIND, {"run_id": run.id})
+    await BackgroundWatchHandler().run(build_ctx(db_engine, t, relay_client_factory=relay.client))
+    assert [i for i in await outbox_items(db_session) if "markdown" in i.payload] == []
+    log = (await db_session.execute(select(ChatLog))).scalar_one()
+    assert log.output_tokens == USAGE["completion_tokens"]

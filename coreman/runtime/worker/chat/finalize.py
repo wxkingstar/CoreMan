@@ -676,7 +676,7 @@ class FinalizeStage(ChatStageBase):
         """主回合结束时还有后台任务：记一段后台阶段，建观察任务接上节点。
 
         和任务终态同一事务：要么两样都有，要么都没有。同一会话还挂着一段 running（上一段的
-        收尾没走完）：同一个进程就合并快照，不是同一个进程就按丢失结掉旧的再记新的。
+        收尾没走完）：同一个会话的记为被新进程接替，不是同一个会话的按丢失结掉，再记新的。
         """
         from coreman.core.chat import background_runs
 
@@ -685,9 +685,9 @@ class FinalizeStage(ChatStageBase):
             session, intake.bot.id, intake.session_key, lock=True
         )
         if old is not None and old.relay_session_id == pre.info.relay_session_id:
-            old.tasks = background_runs.merge(old.tasks or [], out.background_tasks)
-            return old
-        if old is not None:
+            # 这一轮没有写进旧进程（它已不在）：旧的一段交给它的观察任务收完。
+            await background_runs.replace(session, old)
+        elif old is not None:
             await background_runs.end(session, old, "lost")
         deadline = out.background_deadline or pre.request.live_deadline or 0
         run = BackgroundRun(

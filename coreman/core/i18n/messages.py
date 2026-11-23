@@ -175,7 +175,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "done_suffix": "\n\n✅ 回复已生成",
         "background_started_suffix": "\n\n⏳ 已在后台开始 {n} 项，完成后会逐条回复在这条消息下",
         "live_joined_line": "🔁 接着后台进行中的会话处理，后台还有 {n} 项在跑",
-        "live_merged_note": "\n\n（这条回复也包含后台任务 {which} 的结果）",
+        "live_merged_note": "\n\n（后台任务 {which} 在这一轮里完成，结果可能已并入这条回复）",
         "background_done_prefix": "**后台任务 {which} 完成**",
         "background_turn_prefix": "**后台任务有新进展**",
         "background_stopped_notice": (
@@ -567,7 +567,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "🔁 進行中のバックグラウンド会話の続きで処理します（残り {n} 件実行中）"
         ),
         "background_done_prefix": "**バックグラウンドタスク {which} が完了しました**",
-        "live_merged_note": "\n\n（この返信にはバックグラウンドタスク {which} の結果も含まれます）",
+        "live_merged_note": (
+            "\n\n（バックグラウンドタスク {which} がこの間に完了しました。"
+            "結果はこの返信に含まれている場合があります）"
+        ),
         "background_turn_prefix": "**バックグラウンドタスクに進展がありました**",
         "background_stopped_notice": (
             "⏹ バックグラウンドタスクを停止しました（実行時間 {elapsed}）。未完了：\n{lines}\n\n"

@@ -131,6 +131,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if !req.LiveJoin {
 			waitLiveEnded(s)
+			dropLive(s)
 		}
 	}
 	if req.LiveJoin {

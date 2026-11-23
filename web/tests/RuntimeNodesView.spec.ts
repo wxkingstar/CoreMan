@@ -374,3 +374,15 @@ it('shows seats to platform admins and AI committee, not to leads or members who
     wrapper.unmount()
   }
 })
+// 装了 Claude、心跳没声明后台阶段的节点标出待升级；Codex 不标。
+it('marks Claude runtimes that cannot keep background tasks as needing an upgrade', async () => {
+  const node = (id: string, background: boolean) => ({ id, name: id, team_id: null, team_name: null, visibility: 'all', can_manage: true, online: true, is_active: true, draining: false,
+    capabilities: { claude: { installed: true, version: 'v1', login: 'ready', claude_background_sessions_v1: background }, codex: { installed: true, version: 'v2', login: 'ready' } },
+    backends: [] })
+  vi.mocked(runtimeNodes.list).mockResolvedValueOnce([node('old', false), node('new', true)] as never)
+  const wrapper = mountPage('member'); await flushPromises()
+  const tags = wrapper.findAll('[data-test="background-upgrade"]')
+  expect(tags).toHaveLength(1)
+  expect(tags[0].text()).toContain('待升级：后台任务')
+  wrapper.unmount()
+})
