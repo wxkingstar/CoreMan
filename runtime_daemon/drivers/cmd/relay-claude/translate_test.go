@@ -23,6 +23,29 @@ func TestFinishReportsMainAssistantModel(t *testing.T) {
 	}
 }
 
+// TestSubagentTextIsNotReplyFallback: when a background subagent finishes, its
+// final message (parent_tool_use_id set) arrives before the main agent streams
+// anything; only the main agent's text may become the reply.
+func TestSubagentTextIsNotReplyFallback(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tr := newSSETranslator("chatcmpl-sub", 1700000000, "m", "", identityMeter{}, "")
+	for _, line := range []string{
+		`{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"text","text":"SUBAGENT-OUTPUT"}]}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"main reply"}}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"main reply"}]}}`,
+		`{"type":"result","subtype":"success"}`,
+	} {
+		tr.feed(rec, rec, line, false)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "SUBAGENT-OUTPUT") {
+		t.Fatalf("subagent text leaked into the reply: %s", body)
+	}
+	if strings.Count(body, "main reply") != 1 {
+		t.Fatalf("main reply should appear exactly once: %s", body)
+	}
+}
+
 // TestErrorResultSurfacesErrorText: a result with is_error=true and no prior
 // streamed delta must emit the error explanation (claude puts it in Result)
 // as a content delta before the finish chunk — not end an empty turn.
