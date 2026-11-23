@@ -350,8 +350,11 @@ func (t *sseTranslator) feed(w http.ResponseWriter, flusher http.Flusher, line s
 		}
 	}
 
-	// Fallback: pull text from a non-streamed assistant event.
-	if !t.streamDeltaSent {
+	// Fallback: pull text from a non-streamed assistant event. A subagent's own
+	// messages (parent_tool_use_id set) are not the reply: when a background
+	// subagent finishes, its final message arrives before the main agent has
+	// streamed anything and would otherwise be glued to the front of the reply.
+	if !t.streamDeltaSent && event.ParentToolUseID == "" {
 		text := extractTextFromEvent(&event)
 		if text != "" {
 			log.Printf("[STREAM FALLBACK DELTA] %s", openai.PrivateContentPreview(text, 200, t.private))

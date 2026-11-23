@@ -26,7 +26,7 @@ import (
 	"clawrelay-api/pkg/sessions"
 )
 
-var version = "2.3.0"
+var version = "2.3.1"
 
 // buildCommit is stamped at build time via:
 //
