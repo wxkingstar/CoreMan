@@ -31,7 +31,7 @@ it.each([false, true])('preserves saved timezone on metadata edits, changes it o
   vi.clearAllMocks()
   vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  const savedZone = browserZone === 'UTC' ? 'Asia/Tokyo' : 'UTC'
+  const savedZone = browserZone === 'UTC' ? 'America/New_York' : 'UTC'
   const savedTime = '2030-01-01T01:30:00.000Z'
   const editedTime = '2030-01-02T01:30:00.000Z'
   const wrapper = mount(CronEditorDialog, { props: { botOptions: [{ id: 'b1', name: '员工', platform: 'feishu' }] as never }, global: { plugins: [ElementPlus, i18n] } })

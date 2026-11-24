@@ -79,8 +79,8 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
           label="UTC+8"
           value="Asia/Shanghai"
         /><el-option
-          label="UTC+9"
-          value="Asia/Tokyo"
+          :label="t('statistics.newYork')"
+          value="America/New_York"
         /><el-option
           label="UTC"
           value="UTC"

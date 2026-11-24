@@ -49,7 +49,8 @@ def aggregate_out(row: Any) -> dict[str, Any]:
 async def statistics(
     start: date | None = None,
     end: date | None = None,
-    timezone: Literal["UTC", "Asia/Shanghai", "Asia/Tokyo"] = "Asia/Shanghai",
+    # Asia/Tokyo 已从页面和 CLI 去掉，仍接受是为了旧书签、旧脚本里的链接不报 422。
+    timezone: Literal["UTC", "Asia/Shanghai", "America/New_York", "Asia/Tokyo"] = "Asia/Shanghai",
     actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:

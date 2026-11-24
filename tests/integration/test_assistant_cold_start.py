@@ -272,14 +272,14 @@ async def test_hours_and_timezone_finish_the_cold_start(db_session: AsyncSession
         bot,
         row,
         "hours",
-        {"hours": ["10:00-20:00"], "timezone": ["Asia/Tokyo"]},
+        {"hours": ["10:00-20:00"], "timezone": ["America/New_York"]},
         now,
     )
     await db_session.commit()
-    assert said == "工作时段 10:00–20:00，时区 Asia/Tokyo。"
+    assert said == "工作时段 10:00–20:00，时区 America/New_York。"
     # 选了某个时段：只在那个时段里看。
     assert row.always_on is False
-    assert (row.work_start, row.work_end, row.timezone) == ("10:00", "20:00", "Asia/Tokyo")
+    assert (row.work_start, row.work_end, row.timezone) == ("10:00", "20:00", "America/New_York")
     # 最后一题答完：冷启动完成。
     assert row.cold_start_done_at == now and row.cold_start_outcome == "completed"
     assert row.cold_start_step is None and row.cold_start_next_at is None
@@ -287,7 +287,7 @@ async def test_hours_and_timezone_finish_the_cold_start(db_session: AsyncSession
     sent = await last_sent(db_session, bot)
     assert sent is not None and sent.target == {"chat_id": "oc_private"}
     text = sent.payload["markdown"]
-    assert "10:00–20:00" in text and "Asia/Tokyo" in text and "周一、周二" in text
+    assert "10:00–20:00" in text and "America/New_York" in text and "周一、周二" in text
     assert "上班" in text and "下班" in text
 
 
@@ -315,12 +315,12 @@ async def test_always_on_is_the_first_choice_and_is_said_back(db_session: AsyncS
         bot,
         row,
         "hours",
-        {"hours": [cold_start.ALWAYS], "timezone": ["Asia/Tokyo"]},
+        {"hours": [cold_start.ALWAYS], "timezone": ["America/New_York"]},
         now,
     )
     await db_session.commit()
-    assert said == "全天候，时区 Asia/Tokyo。"
-    assert row.always_on is True and row.timezone == "Asia/Tokyo"
+    assert said == "全天候，时区 America/New_York。"
+    assert row.always_on is True and row.timezone == "America/New_York"
     # 工作时段保留：之后改回按工作时段时直接用。
     assert (row.work_start, row.work_end) == ("09:30", "19:00")
     sent = await last_sent(db_session, bot)

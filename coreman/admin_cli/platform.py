@@ -903,7 +903,9 @@ def register_stats(sub: Any) -> None:
     p.add_argument("--start", metavar="日期", help="起始日，默认截止日前 29 天")
     p.add_argument("--end", metavar="日期", help="截止日，默认今天")
     p.add_argument(
-        "--timezone", choices=("UTC", "Asia/Shanghai", "Asia/Tokyo"), help="按哪个时区分日"
+        "--timezone",
+        choices=("UTC", "Asia/Shanghai", "America/New_York"),
+        help="按哪个时区分日",
     )
 
 

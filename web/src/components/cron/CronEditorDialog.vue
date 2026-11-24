@@ -137,7 +137,7 @@ const frequent = computed(() => {
 const timezones = (() => {
   try { return (Intl as unknown as { supportedValuesOf(key: string): string[] }).supportedValuesOf('timeZone') } catch { return [] }
 })()
-const timezoneOptions = computed(() => [...new Set(['Asia/Shanghai', 'Asia/Tokyo', 'UTC', form.timezone, ...timezones])].filter(Boolean))
+const timezoneOptions = computed(() => [...new Set(['Asia/Shanghai', 'America/New_York', 'UTC', form.timezone, ...timezones])].filter(Boolean))
 defineExpose({ open })
 </script>
 
