@@ -136,7 +136,7 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('shows a new client secret once and clears it when the dialog closes', async () => {
-    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })
+    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], bot_ids: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     await wrapper.get('[data-test="create-client"]').trigger('click'); await flushPromises()
@@ -150,7 +150,7 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('explains invalid client identifiers and allows correction before saving', async () => {
-    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'test-client', name: '测试', scopes: ['push'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'test-secret' })
+    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'test-client', name: '测试', scopes: ['push'], bot_ids: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'test-secret' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     await wrapper.get('[data-test="create-client"]').trigger('click'); await flushPromises()
@@ -161,7 +161,7 @@ describe('Infrastructure management', () => {
     expect(document.body.textContent).toContain(i18n.global.t('infra.clientKeyHint'))
     vm.form.app_key = 'test-client'
     await vm.save(); await flushPromises()
-    expect(credentials.create).toHaveBeenCalledWith({ app_key: 'test-client', name: '测试', scopes: ['push'], enabled: true })
+    expect(credentials.create).toHaveBeenCalledWith({ app_key: 'test-client', name: '测试', scopes: ['push'], bot_ids: [], enabled: true })
     wrapper.unmount()
   })
   it('clears validation on reopening and rejects whitespace-only names', async () => {
@@ -208,15 +208,32 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('uses translated scope labels in the client list', async () => {
-    vi.mocked(credentials.clients).mockResolvedValue({ items: [{ app_key: 'client', name: 'Client', scopes: ['org', 'push'], enabled: true, version: 1, last_used_at: null, has_secret: true }], total: 1, page: 1, per_page: 50 })
+    vi.mocked(credentials.clients).mockResolvedValue({ items: [{ app_key: 'client', name: 'Client', scopes: ['org', 'push'], bot_ids: [], enabled: true, version: 1, last_used_at: null, has_secret: true }], total: 1, page: 1, per_page: 50 })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     expect(wrapper.find('.scope-tags').text()).toContain(i18n.global.t('infra.scopeNames.org'))
     expect(wrapper.find('.scope-tags').text()).toContain(i18n.global.t('infra.scopeNames.push'))
     wrapper.unmount()
   })
+  it('asks which AI employees a tasks client may drive and saves them', async () => {
+    const { bots } = await import('@/api/admin')
+    vi.mocked(bots.list).mockResolvedValueOnce({ items: [{ id: 'b1', name: '录入助手', bot_key: 'intake', platform: 'feishu' }, { id: 'b2', name: '企微', bot_key: 'wx', platform: 'wecom' }], total: 2 } as never)
+    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'intake', name: '录入', scopes: ['tasks'], bot_ids: ['b1'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 's' })
+    const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('[data-test="create-client"]').trigger('click'); await flushPromises()
+    const vm = wrapper.vm as unknown as { form: { app_key: string; name: string; scopes: string[]; bot_ids: string[] }; botOptions: { id: string }[]; save: () => Promise<void> }
+    expect(vm.botOptions.map(o => o.id)).toEqual(['b1'])
+    expect(document.querySelector('[data-test="client-task-bots"]')).toBeNull()
+    vm.form.app_key = 'intake'; vm.form.name = '录入'; vm.form.scopes = ['tasks']; await flushPromises()
+    expect(document.querySelector('[data-test="client-task-bots"]')).not.toBeNull()
+    vm.form.bot_ids = ['b1']
+    await vm.save(); await flushPromises()
+    expect(credentials.create).toHaveBeenCalledWith(expect.objectContaining({ scopes: ['tasks'], bot_ids: ['b1'] }))
+    wrapper.unmount()
+  })
   it('offers no retired cron scope and drops it when editing an old client', async () => {
-    const old = { app_key: 'old', name: 'Old', scopes: ['cron', 'org'], enabled: true, version: 3, last_used_at: null, has_secret: true }
+    const old = { app_key: 'old', name: 'Old', scopes: ['cron', 'org'], bot_ids: [] as string[], enabled: true, version: 3, last_used_at: null, has_secret: true }
     vi.mocked(credentials.clients).mockResolvedValue({ items: [old], total: 1, page: 1, per_page: 50 })
     vi.mocked(credentials.update).mockResolvedValue({ ...old, scopes: ['org'], version: 4 })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })

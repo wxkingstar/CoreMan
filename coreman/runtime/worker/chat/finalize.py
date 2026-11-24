@@ -422,6 +422,11 @@ class FinalizeStage(ChatStageBase):
         logged_text = verdict.final_text
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
         verdict = await self._attach_files(ctx, pre, verdict)
+        if ctx.task.payload.get("api_client") and verdict.final_text:
+            # 业务系统发起的独立会话：回复发在私聊里，尾注说明它不在私聊的对话上下文中。
+            verdict = replace(
+                verdict, final_text=verdict.final_text + msg("api_push_footer", ctx.locale)
+            )
         # 待答状态与卡片排在抢到终态之后：被 reaper 收过尾的那一轮已经告诉用户「异常中断」，
         # 再开一轮提问就是让用户对着一张没人接的卡片作答。
         card = (

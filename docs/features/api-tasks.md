@@ -65,3 +65,39 @@ coreman bots api-access demo-bot
 coreman bots api-access-set demo-bot on
 coreman bots api-alias-remove demo-bot 值班群 --yes
 ```
+
+## 业务系统代员工发起
+
+业务系统（比如内部的资料录入系统）服务很多员工，不用每个人去建个人令牌：平台管理员在「凭证」→「API 调用方」里给它建一个调用方，勾选接口组「代员工下任务」（`tasks`），再选「可驱动的 AI 员工」。调用方密钥不过期，停用或轮换后立即失效。
+
+业务系统用调用方签名（同 [基础设施接口](../infrastructure-api.md)）调用，请求里写明是哪位员工：
+
+```bash
+POST /api/infra/tasks/run
+{"user": "alice", "bot_key": "demo-bot", "prompt": "识别截图里的账号信息，写回录入系统", "request_id": "form-8812"}
+```
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/infra/tasks/run` | 发起。`user` 是员工邮箱前缀，按业务令牌 sub 的同一口径认人：只认唯一一位在职员工，认不出就 403，不退回登录名。`request_id` 同一调用方内幂等，内容不同返回 409。新建返回 202。 |
+| `GET /api/infra/tasks/run/{id}?user=alice` | 查询。只能查本调用方为这位员工发起的任务。 |
+| `POST /api/infra/tasks/run/{id}/cancel` | 取消，正文 `{"user": "alice"}`。 |
+
+返回的 `data` 同上表，`conversation` 换成 `user`；不会出现 `superseded`。
+
+和个人令牌不同的地方：
+
+- **独立会话**：每个任务一个会话（`api:<任务 id>`），不带员工和 AI 员工私聊里的上下文，私聊里发消息也不会替代它。
+- **结果发在员工私聊里**：先发一句「**某某** 在「系统名」里发起」加任务内容，回复末尾标注「此消息由 API 任务推送，不在当前对话上下文中」（返回给业务系统的 `reply` 不带这句）。
+- 校验：调用方启用且有 `tasks`、AI 员工在调用方的可驱动列表里、AI 员工开着「允许 API 驱动」、员工在白名单里、绑定了飞书并私聊过这个 AI 员工。开轮前再查一遍，不过就在私聊里说明原因。
+- 同一调用方同一员工最多 20 个任务未结束（429）。
+
+管理命令：
+
+```bash
+coreman clients create intake --name 资料录入 --scope tasks --bot demo-bot
+coreman clients set intake --bot demo-bot --bot other-bot   # 替换可驱动的 AI 员工
+coreman clients set intake --no-bot
+```
+
+需要数据库迁移 `0125`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，图片、写回确认、额度排队、引用回复载入原任务在后续步骤里做。

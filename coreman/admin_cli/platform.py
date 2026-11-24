@@ -703,11 +703,18 @@ def register_clients(sub: Any) -> None:
     p.add_argument("--scope", action="append", metavar="接口组", help="开放的接口组，可重复")
     p.add_argument("--secret-file", metavar="文件", help="指定密钥（至少 32 位）；默认随机生成")
     p.add_argument("--disabled", action="store_true", help="新建为停用")
+    p.add_argument(
+        "--bot", action="append", metavar="AI员工", help="tasks 接口组能驱动的 AI 员工，可重复"
+    )
     p = leaf(ops, "set", "修改接口调用方（只改给出的字段）", clients_set)
     p.add_argument("app_key")
     p.add_argument("--name")
     p.add_argument("--scope", action="append", metavar="接口组", help="替换全部接口组，可重复")
     p.add_argument("--no-scope", action="store_true", help="清空接口组")
+    p.add_argument(
+        "--bot", action="append", metavar="AI员工", help="替换 tasks 能驱动的 AI 员工，可重复"
+    )
+    p.add_argument("--no-bot", action="store_true", help="清空 tasks 能驱动的 AI 员工")
     p.add_argument("--enabled", type=on_off, metavar="on|off")
     p = leaf(ops, "rotate-secret", "重新生成调用方密钥（旧密钥立即失效）", clients_rotate)
     p.add_argument("app_key")
@@ -736,6 +743,7 @@ async def clients_list(c: AdminClient, args: argparse.Namespace) -> int:
                 ("名称", "name"),
                 ("状态", output.enabled),
                 ("接口组", "scopes"),
+                ("可驱动 AI 员工", lambda r: len(r.get("bot_ids") or [])),
                 ("最近调用", "last_used_at"),
             ],
         )
@@ -751,6 +759,7 @@ async def clients_create(c: AdminClient, args: argparse.Namespace) -> int:
         "app_key": args.app_key,
         "name": args.name,
         "scopes": args.scope or [],
+        "bot_ids": [(await c.bot(ref))["id"] for ref in args.bot or []],
         "enabled": not args.disabled,
     }
     if args.secret_file is not None:
@@ -768,10 +777,14 @@ async def clients_set(c: AdminClient, args: argparse.Namespace) -> int:
     updates = changed(args, {"name": "name", "scope": "scopes", "enabled": "enabled"})
     if args.no_scope:
         updates["scopes"] = []
+    if args.bot:
+        updates["bot_ids"] = [(await c.bot(ref))["id"] for ref in args.bot]
+    if args.no_bot:
+        updates["bot_ids"] = []
     if not updates:
         raise CliError("没有要修改的字段，见 --help")
     row = await find_client(c, args.app_key)
-    body = {key: row[key] for key in ("name", "scopes", "enabled")} | updates
+    body = {key: row[key] for key in ("name", "scopes", "bot_ids", "enabled")} | updates
     data = await c.request("PUT", f"{CLIENTS}/{args.app_key}", body=body, version=row["version"])
     if args.json:
         output.dump(data)

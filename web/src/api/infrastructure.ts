@@ -30,7 +30,7 @@ export interface SystemCatalog {
 /** 保存时没能拉取（例如操作者没有可用的业务系统身份），error 是给管理员看的原因。 */
 export interface CatalogSkipped { status: 'skipped'; error: string }
 export interface ApiClient {
-  app_key: string; name: string; scopes: string[]; enabled: boolean; version: number; last_used_at: string | null; has_secret: boolean
+  app_key: string; name: string; scopes: string[]; bot_ids: string[]; enabled: boolean; version: number; last_used_at: string | null; has_secret: boolean
 }
 // external：部署配置的外部签发方密钥（BOT_JWT_*），没有创建时间，也不参与轮换。
 export interface JwtKey { kid: string; is_active: boolean; created_at: string | null; retired_at: string | null; external?: boolean }
@@ -90,8 +90,8 @@ export const systemAccess = {
 }
 export const credentials = {
   clients: (page = 1) => call<Page<ApiClient>>(http.get('/api/admin/api-clients', { params: { page } })),
-  create: (body: { app_key: string; name: string; scopes: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),
-  update: (row: ApiClient) => call<ApiClient>(http.put(`/api/admin/api-clients/${row.app_key}`, { name: row.name, scopes: row.scopes, enabled: row.enabled }, { headers: { 'If-Match': String(row.version) } })),
+  create: (body: { app_key: string; name: string; scopes: string[]; bot_ids: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),
+  update: (row: ApiClient) => call<ApiClient>(http.put(`/api/admin/api-clients/${row.app_key}`, { name: row.name, scopes: row.scopes, bot_ids: row.bot_ids, enabled: row.enabled }, { headers: { 'If-Match': String(row.version) } })),
   rotate: (row: ApiClient) => call<ApiClient & { secret: string }>(http.post(`/api/admin/api-clients/${row.app_key}/rotate-secret`, {}, { headers: { 'If-Match': String(row.version) } })),
   keys: () => call<JwtKey[]>(http.get('/api/admin/jwt-keys')),
   rotateKey: () => call<{ kid: string }>(http.post('/api/admin/jwt-keys/rotate')),

@@ -164,6 +164,8 @@ class GrantsIn(BaseModel):
 class ClientIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     scopes: list[str] = Field(default_factory=list, max_length=20)
+    # `tasks` 接口组能驱动的 AI 员工；省略时保留原设置（旧前端不带这个字段）。
+    bot_ids: list[uuid.UUID] | None = Field(default=None, max_length=200)
     enabled: bool = True
 
     @field_validator("name", mode="before")
@@ -217,6 +219,7 @@ def client_out(row: ApiClient) -> dict[str, Any]:
         "name": row.name,
         # 旧数据里可能还存着已下线的接口组，读取时不展示也不报错。
         "scopes": [scope for scope in row.scopes if scope in INFRA_SCOPES],
+        "bot_ids": [str(bot_id) for bot_id in row.bot_ids or []],
         "enabled": row.enabled,
         "version": row.version,
         "last_used_at": row.last_used_at,
@@ -734,9 +737,11 @@ async def create_client(
 ) -> dict[str, Any]:
     if await session.get(ApiClient, body.app_key):
         raise ApiError(409, 409, "调用方标识已存在")
+    await check_bots(session, body.bot_ids)
     secret = body.secret or secrets.token_urlsafe(48)
     row = ApiClient(
-        **body.model_dump(exclude={"secret"}),
+        **body.model_dump(exclude={"secret", "bot_ids"}),
+        bot_ids=body.bot_ids or [],
         secret_enc=request.app.state.cipher.encrypt(secret, "api_clients.secret_enc"),
     )
     session.add(row)
@@ -758,9 +763,13 @@ async def update_client(
     if row is None:
         raise not_found("调用方不存在")
     require_if_match(request, row.version)
-    for name, value in body.model_dump().items():
+    await check_bots(session, body.bot_ids)
+    before = [str(b) for b in row.bot_ids or []]
+    for name, value in body.model_dump(exclude_none=True).items():
         setattr(row, name, value)
-    await audit(session, request, user, "api_client.update", "api_client", key)
+    after = [str(b) for b in row.bot_ids or []]
+    diff = {"bot_ids": {"before": before, "after": after}} if before != after else None
+    await audit(session, request, user, "api_client.update", "api_client", key, diff)
     await persist(session, commit=True)
     return {"code": 0, "data": client_out(row)}
 

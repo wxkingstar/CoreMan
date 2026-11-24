@@ -17,7 +17,17 @@ from coreman.api.errors import ApiError
 from coreman.core.auth.signatures import sign_request
 from coreman.core.db.models import ApiClient
 
-INFRA_SCOPES = {"relay", "org", "notify", "push", "systems", "memories", "escalations"}
+INFRA_SCOPES = {
+    "relay",
+    "org",
+    "notify",
+    "push",
+    "systems",
+    "memories",
+    "escalations",
+    # 代员工给 AI 员工下任务：只能驱动调用方 `bot_ids` 里的 AI 员工。
+    "tasks",
+}
 # 已下线的接口组：库里旧 api_client 可能仍存着，读取时忽略、保存时丢弃，不报错。
 RETIRED_INFRA_SCOPES = {"cron"}
 

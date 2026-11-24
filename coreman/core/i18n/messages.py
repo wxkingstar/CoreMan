@@ -233,6 +233,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         # 定时任务推送（cron_handler / scheduler.cron）：头尾让用户分清定时推送与对话回复。
         "cron_push_header": "**{name}**\n> 机器人：{bot} | 耗时：{seconds} 秒\n\n",
         "cron_push_footer": "\n\n---\n⏰ 此消息由定时任务自动推送，不在当前对话上下文中。",
+        # 业务系统代员工发起的 API 任务：独立会话，结果发在私聊里，尾注同定时任务。
+        "api_push_footer": "\n\n---\n🔗 此消息由 API 任务推送，不在当前对话上下文中。",
         "cron_failed": "**定时任务执行失败**\n> 任务：{name}\n> 机器人：{bot}\n> 原因：{reason}",
         "cron_worker_lost": "执行进程中断，请查看运行记录",
         "cron_result_truncated": "\n\n…（结果过长，已截断，仅保留前 {limit} 个字符）",
@@ -648,6 +650,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "cron_push_header": "**{name}**\n> ボット：{bot} | 所要：{seconds} 秒\n\n",
         "cron_push_footer": (
             "\n\n---\n⏰ このメッセージは定期タスクによる自動送信で、"
+            "現在の会話の文脈には含まれません。"
+        ),
+        "api_push_footer": (
+            "\n\n---\n🔗 このメッセージは API タスクによる送信で、"
             "現在の会話の文脈には含まれません。"
         ),
         "cron_failed": (

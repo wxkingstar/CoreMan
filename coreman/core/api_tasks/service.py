@@ -21,6 +21,7 @@ from coreman.core.bus import outbox, tasks
 from coreman.core.chat.chat_logs import LIMITS
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
+    ApiClient,
     ApiTask,
     Bot,
     BotAllowedUser,
@@ -68,12 +69,22 @@ def trigger_text(user: User, token_name: str, prompt: str) -> str:
     return f"**{who}** 通过 API 发起（令牌：{token_name}）\n{quoted}"
 
 
-async def _bot_for(session: AsyncSession, token: PersonalAccessToken, user: User, key: str) -> Bot:
+def client_trigger_text(user: User, client_name: str, prompt: str) -> str:
+    """业务系统代员工发起时私聊里的第一句：在哪个系统里发起、要做什么。"""
+    body = prompt if len(prompt) <= PREVIEW else prompt[:PREVIEW] + f"…（共 {len(prompt)} 字）"
+    quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in body.splitlines())
+    who = user.display_name or user.login_name
+    return f"**{who}** 在「{client_name}」里发起\n{quoted}"
+
+
+async def _bot_for(
+    session: AsyncSession, bot_ids: list[uuid.UUID], user: User, key: str, denied: str
+) -> Bot:
     bot = await session.scalar(select(Bot).where(Bot.bot_key == key))
     if bot is None:
         raise TokenError(404, "AI 员工不存在")
-    if bot.id not in token.bot_ids:
-        raise TokenError(403, "这枚令牌没有授权驱动该 AI 员工")
+    if bot.id not in bot_ids:
+        raise TokenError(403, denied)
     if not bot.enabled:
         raise TokenError(409, "AI 员工已停用")
     if bot.platform != "feishu":
@@ -142,7 +153,7 @@ async def create(
     """发起一轮；返回 (任务, 是否新建)。调用方负责提交。"""
     if not prompt.strip() or len(prompt) > PROMPT_MAX:
         raise TokenError(422, f"prompt 须非空且不超过 {PROMPT_MAX} 个字符")
-    bot = await _bot_for(session, token, user, bot_key)
+    bot = await _bot_for(session, token.bot_ids, user, bot_key, "这枚令牌没有授权驱动该 AI 员工")
     target = conversation.get("target") or "p2p"
     alias = (str(conversation.get("alias") or "").strip() or None) if target == "chat" else None
     if request_id is not None:
@@ -176,7 +187,6 @@ async def create(
     )
     if (open_count or 0) >= MAX_OPEN_PER_TOKEN:
         raise TokenError(429, f"这枚令牌已有 {MAX_OPEN_PER_TOKEN} 个任务未结束，请稍后再发起")
-    chat_type = "single" if target == "p2p" else "group"
     row = ApiTask(
         id=uuid.uuid4(),
         token_id=token.id,
@@ -210,6 +220,33 @@ async def create(
         replay = await _replay(session, token, request_id, (bot.id, prompt, target, alias))
         assert replay is not None
         return replay, False
+    return await _start_turn(
+        session,
+        row,
+        bot=bot,
+        user=user,
+        pid=pid,
+        trigger=trigger_text(user, token.name, prompt),
+        session_key=chat_id,
+        # 同一会话里有人的轮次在跑就排在后面，不打断人。
+        extra={"serialize_session": True},
+    ), True
+
+
+async def _start_turn(
+    session: AsyncSession,
+    row: ApiTask,
+    *,
+    bot: Bot,
+    user: User,
+    pid: str,
+    trigger: str,
+    session_key: str,
+    extra: dict[str, Any],
+) -> ApiTask:
+    """任务行已写入：写合成入站事件、在承接会话里发触发消息、入队 chat 任务。"""
+    target, chat_id, prompt = row.target, row.chat_id, row.prompt
+    chat_type = "single" if target == "p2p" else "group"
     message = InboundMessage(
         platform="feishu",
         bot_id=bot.id,
@@ -255,14 +292,14 @@ async def create(
         kind="send",
         dedupe_key=f"api-task:{row.id}:trigger",
         target=target_info,
-        payload={"markdown": trigger_text(user, token.name, prompt)},
+        payload={"markdown": trigger},
     )
     task = await tasks.enqueue(
         session,
         tasks.NewTask(
             bot_id=bot.id,
             kind="chat",
-            session_key=chat_id,
+            session_key=session_key,
             user_id=user.id,
             inbound_event_id=event_id,
             dedupe_key=f"api-task:{row.id}",
@@ -271,8 +308,7 @@ async def create(
                 "origin": ORIGIN,
                 "bot_key": bot.bot_key,
                 "platform_user_id": pid,
-                # 同一会话里有人的轮次在跑就排在后面，不打断人。
-                "serialize_session": True,
+                **extra,
             },
         ),
     )
@@ -281,7 +317,126 @@ async def create(
     assert stored is not None
     stored.task_id = task.id
     await session.flush()
-    return stored, True
+    return stored
+
+
+# ---- 业务系统代员工发起（API 调用方 + `tasks` 接口组） ----------------------------------------
+
+CLIENT_SCOPE = "tasks"
+MAX_OPEN_PER_CLIENT_USER = 20
+# 独立会话的会话键：每个任务一个，不读不写员工私聊的会话，私聊里的消息也替代不了它。
+CLIENT_SESSION_PREFIX = "api:"
+
+
+def client_session_key(api_task_id: uuid.UUID) -> str:
+    return f"{CLIENT_SESSION_PREFIX}{api_task_id}"
+
+
+async def resolve_member(session: AsyncSession, subject: str) -> User:
+    """邮箱前缀 → 员工，和业务令牌的 sub 同一口径：认不出唯一的一个人就拒绝，不退回登录名。"""
+    from coreman.core.auth.system_access import (
+        SubjectUnavailable,
+        token_subject,
+        user_for_subject,
+    )
+
+    user = await user_for_subject(session, subject)
+    if user is not None:
+        try:
+            # 反查只看在职的人；和停用账号撞前缀同样认不出（签业务令牌时也会拒签）。
+            if await token_subject(session, user) == subject.strip().lower():
+                return user
+        except SubjectUnavailable:
+            pass
+    raise TokenError(403, f"无法按邮箱前缀「{subject[:64]}」认出唯一一位在职员工")
+
+
+async def _client_replay(
+    session: AsyncSession,
+    client: ApiClient,
+    request_id: str,
+    fingerprint: tuple[Any, ...],
+) -> ApiTask | None:
+    row: ApiTask | None = await session.scalar(
+        select(ApiTask).where(
+            ApiTask.client_key == client.app_key, ApiTask.request_id == request_id
+        )
+    )
+    if row is None:
+        return None
+    if (row.user_id, row.bot_id, row.prompt) != fingerprint:
+        raise TokenError(409, "request_id 已用于内容不同的任务")
+    return row
+
+
+async def create_for_client(
+    session: AsyncSession,
+    *,
+    client: ApiClient,
+    subject: str,
+    bot_key: str,
+    prompt: str,
+    request_id: str | None,
+) -> tuple[ApiTask, bool]:
+    """业务系统代员工发起一轮：独立会话，结果发在员工和 AI 员工的私聊里。调用方负责提交。"""
+    if not prompt.strip() or len(prompt) > PROMPT_MAX:
+        raise TokenError(422, f"prompt 须非空且不超过 {PROMPT_MAX} 个字符")
+    user = await resolve_member(session, subject)
+    bot = await _bot_for(session, client.bot_ids, user, bot_key, "调用方没有授权驱动该 AI 员工")
+    fingerprint = (user.id, bot.id, prompt)
+    if request_id is not None:
+        replay = await _client_replay(session, client, request_id, fingerprint)
+        if replay is not None:
+            return replay, False
+    pid = await feishu_user_id(session, user.id)
+    if pid is None:
+        raise TokenError(409, "这位员工的账号没有绑定飞书身份，无法在飞书私聊里推送结果")
+    reached = await session.get(UserReached, (bot.id, user.id))
+    if reached is None or not reached.platform_chat_id:
+        raise TokenError(409, f"这位员工还没有在飞书私聊过「{bot.name}」，请先私聊它一次再发起")
+    # 锁住调用方行再数未结束的任务：同一调用方的并发发起在这里排队，名额不会被挤破。
+    await session.execute(
+        select(ApiClient.app_key).where(ApiClient.app_key == client.app_key).with_for_update()
+    )
+    if request_id is not None:
+        replay = await _client_replay(session, client, request_id, fingerprint)
+        if replay is not None:
+            return replay, False
+    open_count = await session.scalar(
+        select(func.count())
+        .select_from(ApiTask)
+        .join(Task, Task.id == ApiTask.task_id)
+        .where(
+            ApiTask.client_key == client.app_key,
+            ApiTask.user_id == user.id,
+            Task.status.in_(tasks.OPEN),
+            Task.cancel_requested_at.is_(None),
+        )
+    )
+    if (open_count or 0) >= MAX_OPEN_PER_CLIENT_USER:
+        raise TokenError(429, f"这位员工已有 {MAX_OPEN_PER_CLIENT_USER} 个任务未结束，请稍后再发起")
+    row = ApiTask(
+        id=uuid.uuid4(),
+        client_key=client.app_key,
+        user_id=user.id,
+        bot_id=bot.id,
+        request_id=request_id,
+        prompt=prompt,
+        target="p2p",
+        chat_id=reached.platform_chat_id,
+    )
+    session.add(row)
+    await session.flush()
+    return await _start_turn(
+        session,
+        row,
+        bot=bot,
+        user=user,
+        pid=pid,
+        trigger=client_trigger_text(user, client.name, prompt),
+        session_key=client_session_key(row.id),
+        extra={"api_client": client.app_key},
+    ), True
 
 
 LOG_FAILED = ("error", "timeout", "failed")
@@ -292,11 +447,19 @@ REPLY_LIMIT = LIMITS["response_content"]
 DONE_SUFFIXES = tuple(
     {table["done_suffix"] for table in MESSAGES.values() if "done_suffix" in table}
 )
+# 业务系统发起的任务在私聊里带的尾注（「不在当前对话上下文中」）：同样只给人看。
+PUSH_FOOTERS = tuple(
+    {table["api_push_footer"] for table in MESSAGES.values() if "api_push_footer" in table}
+)
 
 
 def clean_reply(text: str | None) -> str | None:
     if text is None:
         return None
+    for footer in PUSH_FOOTERS:
+        if text.endswith(footer):
+            text = text[: -len(footer)]
+            break
     for suffix in DONE_SUFFIXES:
         if text.endswith(suffix):
             return text[: -len(suffix)]
@@ -359,12 +522,17 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
     conversation: dict[str, Any] = {"target": row.target}
     if row.alias:
         conversation["alias"] = row.alias
+    who: dict[str, Any] = {"conversation": conversation}
+    if row.client_key is not None:
+        # 业务系统代员工发起的：回报是哪位员工，承接固定是他的私聊（独立会话）。
+        user = await session.get(User, row.user_id)
+        who = {"user": (user.email or "").split("@", 1)[0].lower() if user else None}
     return {
         "id": str(row.id),
         "request_id": row.request_id,
         "bot_key": bot.bot_key if bot else None,
         "status": status,
-        "conversation": conversation,
+        **who,
         "reply": reply,
         # 对话记录最多存 50000 字：超长的回复在这里被截断，完整内容在飞书会话里。
         "reply_truncated": reply is not None and len(reply) >= REPLY_LIMIT,

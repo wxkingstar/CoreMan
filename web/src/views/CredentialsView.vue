@@ -6,16 +6,19 @@ import { nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { credentials, type ApiClient, type JwtKey } from '@/api/infrastructure'
+import { bots as botsApi } from '@/api/admin'
 import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
 const rows = ref<ApiClient[]>([]), keys = ref<JwtKey[]>([])
 const tab = ref('clients')
 const page = ref(1), total = ref(0), busy = ref(false), visible = ref(false), secret = ref('')
 const editing = ref<ApiClient | null>(null)
-const form = reactive({ app_key: '', name: '', scopes: [] as string[], enabled: true })
+const form = reactive({ app_key: '', name: '', scopes: [] as string[], bot_ids: [] as string[], enabled: true })
+// `tasks` 接口组能驱动的 AI 员工：只有飞书 AI 员工能代员工下任务。
+const botOptions = ref<{ id: string; label: string }[]>([])
 const formRef = ref<FormInstance>()
 const formSession = ref(0)
-const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'escalations']
+const scopes = ['relay', 'org', 'notify', 'push', 'systems', 'memories', 'escalations', 'tasks']
 function fail(e: unknown) { if (e !== 'cancel' && e !== 'close') ElMessage.error(errorMessage(e)) }
 const listLoading = ref(false), listError = ref('')
 const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
@@ -31,7 +34,13 @@ async function edit(row: ApiClient | null) {
   formSession.value += 1
   editing.value = row
   // 已下线的接口组（如旧的 cron）不再提供勾选，编辑时丢弃，保存才不会被后端当作未知接口组拒绝。
-  Object.assign(form, row ? { ...row, scopes: row.scopes.filter((s) => scopes.includes(s)) } : { app_key: '', name: '', scopes: [], enabled: true })
+  Object.assign(form, row ? { ...row, scopes: row.scopes.filter((s) => scopes.includes(s)), bot_ids: [...(row.bot_ids ?? [])] } : { app_key: '', name: '', scopes: [], bot_ids: [], enabled: true })
+  if (!botOptions.value.length) {
+    try {
+      const data = await botsApi.list({ scope: 'all', per_page: 200 })
+      botOptions.value = data.items.filter((b) => b.platform === 'feishu').map((b) => ({ id: b.id, label: `${b.name} (${b.bot_key})` }))
+    } catch (e) { fail(e) }
+  }
   visible.value = true
   await nextTick()
   formRef.value?.clearValidate()
@@ -43,7 +52,7 @@ async function save() {
     form.name = form.name.trim()
     if (!await formRef.value?.validate().catch(() => false)) return
     if (editing.value) await credentials.update({ ...editing.value, ...form })
-    else secret.value = (await credentials.create({ app_key: form.app_key, name: form.name, scopes: form.scopes, enabled: form.enabled })).secret
+    else secret.value = (await credentials.create({ app_key: form.app_key, name: form.name, scopes: form.scopes, bot_ids: form.bot_ids, enabled: form.enabled })).secret
     visible.value = false; ElMessage.success(t('common.saved')); await load()
   } catch (e) { fail(e) } finally { busy.value = false }
 }
@@ -260,6 +269,27 @@ onMounted(load)
             />
           </el-select>
         </el-form-item>
+        <template v-if="form.scopes.includes('tasks')">
+          <el-form-item :label="t('infra.taskBots')">
+            <el-select
+              v-model="form.bot_ids"
+              multiple
+              filterable
+              style="width:100%"
+              data-test="client-task-bots"
+            >
+              <el-option
+                v-for="o in botOptions"
+                :key="o.id"
+                :value="o.id"
+                :label="o.label"
+              />
+            </el-select>
+          </el-form-item>
+          <p class="field-hint">
+            {{ t('infra.taskBotsHint') }}
+          </p>
+        </template>
         <el-form-item :label="t('infra.enabled')">
           <el-switch v-model="form.enabled" />
         </el-form-item>
