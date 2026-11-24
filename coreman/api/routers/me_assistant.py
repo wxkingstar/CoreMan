@@ -185,6 +185,13 @@ class RangeIn(BaseModel):
     message_range: Literal["all", "group", "p2p"]
 
 
+class PauseIn(BaseModel):
+    """`true` 暂停使用，`false` 恢复。与「停用」（deprovision，不可撤销）不是一回事。"""
+
+    model_config = ConfigDict(extra="forbid")
+    paused: StrictBool
+
+
 class ShiftIn(BaseModel):
     """`on` 上班、`off` 下班、`auto` 回到按工作时段。"""
 
@@ -596,18 +603,42 @@ async def change_message_range(
     return {"code": 0, "data": {"authorization_url": url, "message_range": body.message_range}}
 
 
+async def _locked_settings(session: AsyncSession, bot_id: uuid.UUID) -> AssistantSettings:
+    """设置行（没有就按默认值建），取行锁。"""
+    await assistant_settings.get(session, bot_id)
+    await session.flush()
+    row = await session.get(AssistantSettings, bot_id, with_for_update=True, populate_existing=True)
+    assert row is not None
+    return row
+
+
+@router.post("/pause")
+async def pause(
+    body: PauseIn, own: Mine = Depends(writable), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """暂停使用或恢复。暂停期间不在班、不看消息、不跑任何轮次（私聊发来的消息只回一句
+    「已暂停」）；已经在跑的那一轮不打断。恢复后照常，暂停期间的消息与下班时一样补看。
+    """
+    row = await _locked_settings(session, own.bot.id)
+    if body.paused and row.paused_at is None:
+        row.paused_at = utcnow()
+    elif not body.paused:
+        row.paused_at = None
+    await session.commit()
+    return {"code": 0, "data": {"paused": row.paused_at is not None}}
+
+
 @router.post("/shift")
 async def shift(
     body: ShiftIn, own: Mine = Depends(writable), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
     """即时上班、下班，或回到按工作时段；与私聊里说「上班」「下班」同一个效果。返回设置。"""
     now = utcnow()
-    await assistant_settings.get(session, own.bot.id)
-    await session.flush()
-    row = await session.get(
-        AssistantSettings, own.bot.id, with_for_update=True, populate_existing=True
-    )
-    assert row is not None
+    row = await _locked_settings(session, own.bot.id)
+    if row.paused_at is not None:
+        raise ApiError(
+            409, 409, "助理已暂停使用，先打开「状态」里的开关", [{"type": "assistant_paused"}]
+        )
     owner_view.switch_shift(row, body.state, now)
     await sealed.open_row(session, row, viewer=own.actor.id)
     # 响应里带着解密后的设置（重点群、忽略的会话）：与读设置一样记一次。

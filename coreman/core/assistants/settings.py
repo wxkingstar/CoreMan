@@ -97,7 +97,9 @@ def mark_worked(settings: AssistantSettings, now: datetime) -> bool:
 
 def on_shift(settings: AssistantSettings, now: datetime) -> bool:
     """现在在不在班：「上班」「下班」的临时切换没过期时以它为准；否则全天候就在班，不是全天候
-    按工作时段。"""
+    按工作时段。所有者暂停使用（`paused_at`）期间一律不在班。"""
+    if settings.paused_at is not None:
+        return False
     now = aware_utc(now)
     until = settings.shift_override_until
     if settings.shift_override is not None and (until is None or until > now):

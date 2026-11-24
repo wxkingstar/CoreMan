@@ -123,6 +123,7 @@ async def list_assistants(session: AsyncSession = Depends(get_session)) -> dict[
             AssistantSettings.workdays,
             AssistantSettings.shift_override,
             AssistantSettings.shift_override_until,
+            AssistantSettings.paused_at,
             AssistantSettings.cold_start_started_at,
             AssistantSettings.cold_start_step,
             AssistantSettings.cold_start_outcome,
