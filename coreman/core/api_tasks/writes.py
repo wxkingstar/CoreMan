@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.assistants import sealed
 from coreman.core.db.models import (
     ApiTask,
     Bot,
@@ -142,6 +143,8 @@ async def view(session: AsyncSession, row: ApiTask) -> list[dict[str, Any]]:
             .order_by(InteractionState.created_at)
         )
     )
+    # 个人助理的批次状态是密文：显式还原后再读（普通 AI 员工原样不动）。
+    await sealed.open_rows(session, states)
     proposed = list(
         await session.scalars(
             select(SystemCall)
