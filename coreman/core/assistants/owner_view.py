@@ -110,9 +110,13 @@ async def overview(session: AsyncSession, bot: Bot, now: datetime) -> dict[str, 
             if relay is not None
             else None
         ),
-        # 可用状态下为什么现在跑不了轮次（运行时离线、不满足隔离……）；能跑是 None。
+        # 所有者在页面上暂停使用了：不在班、不跑任何轮次，打开开关即恢复。
+        "paused": prefs.paused_at is not None,
+        # 可用、没被所有者暂停时，为什么现在跑不了轮次（运行时离线、不满足隔离……）；能跑是 None。
         "paused_reason": (
-            await runtime.turn_blocker(session, bot) if bot.assistant_state == "active" else None
+            await runtime.turn_blocker(session, bot)
+            if bot.assistant_state == "active" and prefs.paused_at is None
+            else None
         ),
         # 与管理台列表同一口径：启用、开通好且此刻在班；开通中、停用中的助理不算在班。
         "on_shift": bool(

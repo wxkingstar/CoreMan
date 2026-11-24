@@ -19,7 +19,7 @@ from sqlalchemy import ColumnClause, and_, func, literal_column, or_, select, te
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bots.relay_policy import relay_available
-from coreman.core.db.models import Bot, RelayServer, RuntimeNode
+from coreman.core.db.models import AssistantSettings, Bot, RelayServer, RuntimeNode
 from coreman.core.runtime_nodes.transport import online
 
 SANDBOX_CAPABILITY = "assistant_sandbox_v1"
@@ -37,10 +37,15 @@ PAUSE_MESSAGES = {
         "绑定的运行时没有与普通员工隔开（要用专为个人助理安装的运行时），请联系管理员"
     ),
 }
-# 记录本身还不能（或已不能）跑轮次：开通没走完、正在停用。这两句不说「暂停」。
+# 记录本身还不能（或已不能）跑轮次：开通没走完、正在停用；或所有者自己暂停了。这几句不套
+# 「暂停了：……」的说法。
 LIFECYCLE_MESSAGES = {
     "provisioning": "你的个人助理还没开通完：请先点私聊里的授权卡片完成飞书授权，完成后会告诉你。",
     "deprovisioning": "你的个人助理正在停用（或已停用），不再处理消息；停用完成后可以重新开通。",
+    "owner_paused": (
+        "你的个人助理已暂停使用，不看消息、不处理事情；"
+        "在「我的助理」页把「状态」里的开关打开即可恢复。"
+    ),
 }
 
 
@@ -110,7 +115,8 @@ async def node_isolated(session: AsyncSession, node: RuntimeNode) -> bool:
 async def turn_blocker(session: AsyncSession, bot: Bot) -> str | None:
     """助理现在为什么不能跑一轮；能跑返回 None。
 
-    记录不是 active（开通没走完、正在或已经停用）先挡下，不查库。节点的其它条件都满足时再查一次
+    记录不是 active（开通没走完、正在或已经停用）先挡下，不查库；所有者在页面上暂停了（设置行的
+    `paused_at`，一条主键查询）其次。节点的其它条件都满足时再查一次
     隔离（`node_isolated`，每轮一条查询）。
     """
     if bot.assistant_state != "active":
@@ -119,6 +125,9 @@ async def turn_blocker(session: AsyncSession, bot: Bot) -> str | None:
             if bot.assistant_state in ("deprovisioning", "deprovisioned")
             else ("provisioning")
         )
+    prefs = await session.get(AssistantSettings, bot.id)
+    if prefs is not None and prefs.paused_at is not None:
+        return "owner_paused"
     relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
     if relay is None:
         return "runtime_missing"

@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.assistants import cold_start
+from coreman.core.assistants import cold_start, runtime
 from coreman.core.assistants import settings as assistant_settings
 from coreman.core.bus import outbox, tasks
 from coreman.core.db.models import AssistantSettings, Bot
@@ -74,6 +74,26 @@ async def _switch(
         now = utcnow()
         prefs = await assistant_settings.get(session, bot.id)
         await session.refresh(prefs, with_for_update=True)
+        if prefs.paused_at is not None:
+            # 所有者在页面上暂停使用了：上下班都没有意义，告诉他怎么恢复。
+            await outbox.add(
+                session,
+                bot_id=bot.id,
+                platform="feishu",
+                kind="send",
+                dedupe_key=f"assistant-shift:{ctx.task.id}",
+                target={"chat_id": chat_id},
+                payload={"markdown": runtime.pause_message("owner_paused")},
+            )
+            await tasks.finish(
+                session,
+                ctx.task.id,
+                status="succeeded",
+                result={"assistant": "shift_paused"},
+                only_active=True,
+                bot_id=bot.id,
+            )
+            return
         on = word in ON
         if on or assistant_settings.on_shift(prefs, now):
             # 今天上过班：下班编译凭它触发，不等 5 秒一次的循环来记；前一天还欠着整理时不覆盖。

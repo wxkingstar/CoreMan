@@ -1,4 +1,4 @@
-"""「我的助理」页上的即时动作：上班、下班、恢复按时段；重新生成口吻页（每天至多 3 次）。"""
+"""「我的助理」页上的即时动作：暂停使用与恢复；上班、下班、恢复按时段；重新生成口吻页。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from tests.integration.assistant_helpers import SECRET
 from tests.integration.job_helpers import owner_with_key, tasks_of
 
 pytestmark = pytest.mark.usefixtures("assistant_master")
-SHIFT, VOICE = f"{URL}/shift", f"{URL}/voice/regenerate"
+SHIFT, VOICE, PAUSE = f"{URL}/shift", f"{URL}/voice/regenerate", f"{URL}/pause"
 SAMPLES = [f"收到，我下午看一下 {n}" for n in range(6)]
 READER: Any = object()
 
@@ -109,6 +109,33 @@ async def test_the_owner_clocks_in_out_and_back_to_the_schedule(
     assert (await settings.get(db_session, bot.id)).shift_override is None
 
 
+async def test_the_owner_pauses_and_resumes_the_assistant(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bot, _owner_row = await _owner(client, db_session)
+    seen = (await client.get(URL)).json()["data"]
+    assert seen["paused"] is False and seen["on_shift"] is True
+    paused = await client.post(PAUSE, json={"paused": True})
+    assert paused.status_code == 200 and paused.json()["data"] == {"paused": True}
+    await fresh(db_session, bot)
+    first = (await settings.get(db_session, bot.id)).paused_at
+    assert first is not None
+    # 再点一次暂停不改暂停时刻。
+    assert (await client.post(PAUSE, json={"paused": True})).status_code == 200
+    await fresh(db_session, bot)
+    assert (await settings.get(db_session, bot.id)).paused_at == first
+    seen = (await client.get(URL)).json()["data"]
+    # 暂停期间不在班；暂停本身不当作「跑不了」的原因显示。
+    assert seen["paused"] is True and seen["on_shift"] is False and seen["paused_reason"] is None
+    refused = await client.post(SHIFT, json={"state": "on"})
+    assert refused.status_code == 409 and code(refused) == "assistant_paused"
+    resumed = await client.post(PAUSE, json={"paused": False})
+    assert resumed.status_code == 200 and resumed.json()["data"] == {"paused": False}
+    seen = (await client.get(URL)).json()["data"]
+    assert seen["paused"] is False and seen["on_shift"] is True
+    assert (await client.post(PAUSE, json={"paused": "yes"})).status_code == 422
+
+
 async def test_around_the_clock_clocking_in_only_cancels_clocking_out(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:
@@ -150,7 +177,11 @@ async def test_shift_needs_csrf_an_interactive_login_and_an_active_assistant(
     client.headers["X-CSRF-Token"] = csrf
     bot.assistant_state = "deprovisioning"
     await db_session.commit()
-    for response in (await client.post(SHIFT, json={"state": "on"}), await client.post(VOICE)):
+    for response in (
+        await client.post(SHIFT, json={"state": "on"}),
+        await client.post(VOICE),
+        await client.post(PAUSE, json={"paused": True}),
+    ):
         assert response.status_code == 409 and code(response) == "assistant_not_active"
     as_bot_token(client, monkeypatch, owner)
     assert (await client.post(SHIFT, json={"state": "on"})).status_code == 403

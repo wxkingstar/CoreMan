@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.assistants import runtime
+from coreman.core.assistants import settings as assistant_settings
 from coreman.core.bots.switch_relay import SwitchError, validate_switch
 from coreman.core.db.models import (
     RelayServer,
@@ -117,6 +118,14 @@ async def test_turn_blocker_and_assignment(db_session: AsyncSession) -> None:
     private = await pool_relay(db_session, "private")
     private.assistant_pool, private.visibility, private.owner_id = False, "private", owner_user.id
     bot.relay_server_id = private.id
+    assert await runtime.turn_blocker(db_session, bot) is None
+    # 所有者在页面上暂停使用：不在班、挡下一切轮次，回的那句告诉他怎么恢复。
+    prefs = await assistant_settings.get(db_session, bot.id)
+    prefs.paused_at = now()
+    assert await runtime.turn_blocker(db_session, bot) == "owner_paused"
+    assert not assistant_settings.on_shift(prefs, now())
+    assert "我的助理" in runtime.pause_message("owner_paused")
+    prefs.paused_at = None
     assert await runtime.turn_blocker(db_session, bot) is None
     node = await db_session.get(RuntimeNode, private.runtime_node_id)
     assert node is not None
@@ -572,4 +581,6 @@ async def test_ordinary_employees_cannot_join_a_node_that_hosts_an_assistant(
 async def test_an_assistant_turn_check_costs_one_isolation_query(db_session: AsyncSession) -> None:
     bot, _owner, _private, _node = await private_assistant(db_session)
     statements = await record_statements(db_session, lambda: runtime.turn_blocker(db_session, bot))
-    assert len(statements) == 1 and "FROM bots" in statements[0], statements
+    # 设置行（看所有者暂停没有）与隔离各一条。
+    assert len(statements) == 2, statements
+    assert "FROM assistant_settings" in statements[0] and "FROM bots" in statements[1], statements

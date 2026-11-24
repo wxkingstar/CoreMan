@@ -403,6 +403,8 @@ class AssistantSettings(Base):
     daily_turn_budget: Mapped[int | None] = mapped_column(Integer)
     shift_override: Mapped[str | None] = mapped_column(Text)
     shift_override_until: Mapped[datetime | None] = _ts()
+    # 所有者在「我的助理」页暂停使用的时刻；空是在用。暂停期间不在班、不跑任何轮次。
+    paused_at: Mapped[datetime | None] = _ts()
     cold_start_done_at: Mapped[datetime | None] = _ts()
     cold_start_started_at: Mapped[datetime | None] = _ts()
     cold_start_step: Mapped[str | None] = mapped_column(Text)

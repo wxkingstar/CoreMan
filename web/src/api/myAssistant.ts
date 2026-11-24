@@ -20,6 +20,8 @@ export interface AssistantOverview {
   state: 'provisioning' | 'active' | 'deprovisioning' | 'deprovisioned' | null
   runtime: { name: string; online: boolean } | null
   /** 可用状态下现在跑不了轮次的原因代码；能跑是 null。 */
+  /** 所有者在页面上暂停使用了。 */
+  paused: boolean
   paused_reason: string | null
   on_shift: boolean
   /** 全天候（默认）；false 是只在工作时段里在班。 */
@@ -310,6 +312,7 @@ export const myAssistant = {
   chatChoices: (query = '') => call<{ items: ChatChoice[] }>(http.get(`${root}/settings/chats`, { params: query ? { query } : {}, ...SLOW })),
   saveSettings: (body: AssistantPrefsPatch) => call<AssistantPrefs>(http.patch(`${root}/settings`, body, SLOW)),
   /** 即时上班、下班，或回到按工作时段；与私聊里说「上班」「下班」同一个效果。 */
+  pause: (paused: boolean) => call<{ paused: boolean }>(http.post(`${root}/pause`, { paused })),
   shift: (state: 'on' | 'off' | 'auto') => call<AssistantPrefs>(http.post(`${root}/shift`, { state })),
   /** 重新生成口吻页：冷启动做完之后才能用，每天至多 3 次。 */
   regenerateVoice: () => call<{ queued: boolean; left_today: number }>(http.post(`${root}/voice/regenerate`, undefined, SLOW)),

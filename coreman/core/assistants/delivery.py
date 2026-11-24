@@ -129,7 +129,7 @@ async def budget_left(session: AsyncSession, bot: Bot, today: date) -> int:
 
 
 def set_up(bot: Bot, prefs: AssistantSettings | None) -> bool:
-    """启用中、开通好、记下了身份、冷启动做完：与上不上班无关的那几项。
+    """启用中、开通好、没被所有者暂停、记下了身份、冷启动做完：与上不上班无关的那几项。
 
     运行时暂停不在这里判断：暂停只是不入队，调用方另看 `runtime.turn_blocker`。
     """
@@ -139,6 +139,7 @@ def set_up(bot: Bot, prefs: AssistantSettings | None) -> bool:
         and bot.assistant_state == "active"
         and bot.owner_id is not None
         and prefs is not None
+        and prefs.paused_at is None
         and assistant_settings.identified(prefs)
         and prefs.cold_start_done_at is not None
     )

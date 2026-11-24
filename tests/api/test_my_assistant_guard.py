@@ -77,6 +77,7 @@ CASES: dict[tuple[str, str], dict[str, Any]] = {
     ("GET", "/access-log"): {},
     ("POST", "/import"): {"files": {"archive": ("notes.zip", ARCHIVE, "application/zip")}},
     ("GET", "/export"): {},
+    ("POST", "/pause"): {"json": {"paused": True}},
     ("POST", "/shift"): {"json": {"state": "on"}},
     ("POST", "/voice/regenerate"): {},
     ("POST", "/message-range"): {"json": {"message_range": "group"}},

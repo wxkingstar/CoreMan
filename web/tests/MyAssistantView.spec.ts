@@ -5,7 +5,7 @@ import { nextTick } from 'vue'
 
 vi.mock('@/api/myAssistant', async (original) => ({
   ...(await original<typeof import('@/api/myAssistant')>()),
-  myAssistant: { overview: vi.fn(), shift: vi.fn(), reset: vi.fn(), purge: vi.fn() },
+  myAssistant: { overview: vi.fn(), shift: vi.fn(), pause: vi.fn(), reset: vi.fn(), purge: vi.fn() },
 }))
 // 各分区有自己的用例，这里换成只带标记的替身：壳只管概览、空状态与标签页。
 const boardLoad = vi.hoisted(() => vi.fn())
@@ -31,7 +31,7 @@ const absent: AssistantAbsent = {
   how_to: { app_name: '个人助理', steps: ['open_private_chat', 'accept_offer', 'authorize'] }, lifecycle: null,
 }
 const overview: AssistantOverview = {
-  exists: true, bot_id: 'b1', name: '个人助理', state: 'active', runtime: { name: 'pool-1', online: true }, paused_reason: null,
+  exists: true, bot_id: 'b1', name: '个人助理', state: 'active', runtime: { name: 'pool-1', online: true }, paused: false, paused_reason: null,
   on_shift: true, always_on: false, shift_override: null, shift_override_until: null, cold_start: { state: 'in_progress', step: 'focus', outcome: null }, turns: { today: 3, budget: 50 },
   watch: { state: 'polling', last_ok_at: '2026-11-13T02:00:00Z', last_error: null },
   lifecycle: null, content_locked: false, approval_system: { name: null, url: null },
@@ -187,6 +187,24 @@ describe('My assistant page', () => {
     expect(wrapper.get('[data-test="shift-auto"]').text()).toBe(t('assistant.overview.shiftAlwaysOn'))
     await wrapper.get('[data-test="shift-auto"]').trigger('click'); await flushPromises()
     expect(myAssistant.shift).toHaveBeenLastCalledWith('auto')
+    wrapper.unmount()
+  })
+
+  it('pauses and resumes the assistant from the state switch', async () => {
+    vi.mocked(myAssistant.pause).mockReset().mockResolvedValue({ paused: true })
+    vi.spyOn(ElMessage, 'success').mockReturnValue({ close: () => {} })
+    const wrapper = render(); await flushPromises()
+    expect(wrapper.get('[data-test="assistant-state"]').text()).toBe(t('assistant.overview.states.active'))
+    vi.mocked(myAssistant.overview).mockResolvedValue({ ...overview, paused: true, on_shift: false })
+    await wrapper.get('[data-test="assistant-pause"]').trigger('click'); await flushPromises()
+    expect(myAssistant.pause).toHaveBeenCalledWith(true)
+    expect(wrapper.get('[data-test="assistant-state"]').text()).toBe(t('assistant.overview.ownerPaused'))
+    // 暂停期间不能上下班。
+    expect(wrapper.find('[data-test="shift-off"]').exists()).toBe(false)
+    vi.mocked(myAssistant.overview).mockResolvedValue(overview)
+    await wrapper.get('[data-test="assistant-pause"]').trigger('click'); await flushPromises()
+    expect(myAssistant.pause).toHaveBeenLastCalledWith(false)
+    expect(wrapper.find('[data-test="shift-off"]').exists()).toBe(true)
     wrapper.unmount()
   })
 

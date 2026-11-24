@@ -66,6 +66,18 @@ async function shift(state: 'on' | 'off' | 'auto') {
   } catch (e) { ElMessage.error(errorMessage(e)) }
   finally { switching.value = false }
 }
+/** 暂停使用或恢复：暂停期间不看消息、不处理事情，切完重新取概览。 */
+const pausing = ref(false)
+async function togglePause(paused: string | number | boolean) {
+  if (pausing.value) return
+  pausing.value = true
+  try {
+    await myAssistant.pause(paused === true)
+    ElMessage.success(t(paused === true ? 'assistant.overview.pausedDone' : 'assistant.overview.resumedDone'))
+    await load()
+  } catch (e) { ElMessage.error(errorMessage(e)) }
+  finally { pausing.value = false }
+}
 /** 从现在开始：弹框讲清楚清掉什么、留下什么，确认后在弹框里清；清完重新取概览、刷新各分区。 */
 const resetDialog = ref<InstanceType<typeof AssistantResetDialog> | null>(null), resetKey = ref(0)
 async function started(done: AssistantReset) {
@@ -149,9 +161,26 @@ defineExpose({ tab, load, refresh })
         <div class="ma-stat">
           <dt>{{ t('assistant.overview.state') }}</dt>
           <dd>
-            <el-tag :type="mine.state === 'active' ? 'success' : 'warning'">
-              {{ t('assistant.overview.states.' + (mine.state ?? 'unknown')) }}
+            <el-tag
+              :type="mine.state === 'active' && !mine.paused ? 'success' : 'warning'"
+              data-test="assistant-state"
+            >
+              {{ mine.state === 'active' && mine.paused ? t('assistant.overview.ownerPaused') : t('assistant.overview.states.' + (mine.state ?? 'unknown')) }}
             </el-tag>
+            <!-- 暂停使用的开关：只在助理可用时能切；开通中、停用中没有可暂停的东西。 -->
+            <el-switch
+              v-if="mine.state === 'active'"
+              :model-value="!mine.paused"
+              :loading="pausing"
+              size="small"
+              :title="mine.paused ? t('assistant.overview.resume') : t('assistant.overview.pause')"
+              data-test="assistant-pause"
+              @update:model-value="(on: string | number | boolean) => togglePause(!on)"
+            />
+            <span
+              v-if="mine.paused"
+              class="ma-sub"
+            >{{ t('assistant.overview.pausedHint') }}</span>
             <span
               v-if="mine.paused_reason"
               class="ma-sub ma-danger"
@@ -181,8 +210,8 @@ defineExpose({ tab, load, refresh })
             >
               {{ mine.on_shift ? (mine.always_on && !mine.shift_override ? t('assistant.overview.alwaysOn') : t('assistant.overview.onShift')) : t('assistant.overview.offShift') }}
             </el-tag>
-            <!-- 只在助理可用时能切：开通中、停用中没有可切换的东西。 -->
-            <template v-if="mine.state === 'active'">
+            <!-- 只在助理可用且没暂停时能切：开通中、停用中、暂停使用时没有可切换的东西。 -->
+            <template v-if="mine.state === 'active' && !mine.paused">
               <!-- 全天候时本来就在班：「上班」与「恢复全天候」是同一个效果，只留后者。 -->
               <el-button
                 v-if="!mine.always_on"
