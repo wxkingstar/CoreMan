@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayZone } from '@/utils/displayZone'
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
@@ -12,7 +13,7 @@ const auth = useAuthStore()
 const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
 const data = ref<Statistics | null>(null), prices = ref<ModelPrice[]>([])
 const busy = ref(false), editing = ref(false), saving = ref(false)
-const range = ref<string[]>([]), timezone = ref('Asia/Shanghai')
+const range = ref<string[]>([]), timezone = ref<string>(displayZone.value)
 const metric = ref<'messages' | 'users' | 'bots'>('messages')
 const ranking = ref('users')
 const today = () => new Date().toISOString().slice(0, 10)

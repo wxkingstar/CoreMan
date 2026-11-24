@@ -46,6 +46,7 @@ import { Menu as MenuIcon, Close, Grid, User, Collection, Timer, AlarmClock, Cha
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { getLocale, setLocale, type Locale } from '@/i18n'
+import { DISPLAY_ZONES, displayZone, setDisplayZone } from '@/utils/displayZone'
 import { useAuthStore } from '@/stores/auth'
 const { t } = useI18n()
 const auth = useAuthStore(), router = useRouter(), route = useRoute()
@@ -176,6 +177,20 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
             /><el-option
               label="English"
               value="en"
+            />
+          </el-select>
+          <el-select
+            :model-value="displayZone"
+            :aria-label="t('layout.timezone')"
+            data-test="display-zone"
+            style="width: 120px"
+            @change="setDisplayZone"
+          >
+            <el-option
+              v-for="zone in DISPLAY_ZONES"
+              :key="zone"
+              :label="t(`layout.zones.${zone}`)"
+              :value="zone"
             />
           </el-select>
           <el-button

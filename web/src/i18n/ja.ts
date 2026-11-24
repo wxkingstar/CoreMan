@@ -645,7 +645,7 @@ export default {
       wecom_not_configured: 'WeCom ログインアプリが設定されていません',
     },
   },
-  layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語' },
+  layout: { logout: 'ログアウト', darkMode: 'ダークモード', language: '言語', timezone: '表示タイムゾーン', zones: { 'Asia/Shanghai': '北京時間', 'America/New_York': '米国東部', UTC: 'UTC' } },
   menu: {
     selfReminders: "自分の定期タスク",
     myAssistant: "マイアシスタント",

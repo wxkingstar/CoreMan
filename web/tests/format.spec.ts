@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { formatBytes, formatDateTime, resetCountdown, secondsBetween, secondsParts } from '@/utils/format'
+import { setDisplayZone } from '@/utils/displayZone'
 
 describe('formatDateTime', () => {
   it('renders in Asia/Shanghai regardless of host timezone', () => {
@@ -14,6 +15,17 @@ describe('formatDateTime', () => {
     expect(formatDateTime(null)).toBe('—')
     expect(formatDateTime(undefined)).toBe('—')
     expect(formatDateTime('')).toBe('—')
+  })
+  it('follows the selected display zone, including US Eastern daylight saving', () => {
+    try {
+      setDisplayZone('America/New_York')
+      expect(formatDateTime('2026-10-31T16:00:00Z')).toBe('2026-10-31 12:00:00') // EDT, UTC-4
+      expect(formatDateTime('2026-11-02T17:00:00Z')).toBe('2026-11-02 12:00:00') // EST, UTC-5
+      setDisplayZone('UTC')
+      expect(formatDateTime('2026-11-02T17:00:00Z')).toBe('2026-11-02 17:00:00')
+    } finally {
+      setDisplayZone('Asia/Shanghai')
+    }
   })
 })
 

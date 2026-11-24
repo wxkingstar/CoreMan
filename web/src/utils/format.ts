@@ -1,24 +1,33 @@
 import type { Pct } from '@/api/types'
+import { displayZone } from '@/utils/displayZone'
 
-// hourCycle 显式给 h23：zh-CN 的默认时制是 12 小时，只写 hour12: false 在部分 ICU 上
-// 会落到 h24，午夜渲染成 24:00:00 而不是 00:00:00。
-const fmt = new Intl.DateTimeFormat('zh-CN', {
-  timeZone: 'Asia/Shanghai',
-  hourCycle: 'h23',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-})
+const formatters = new Map<string, Intl.DateTimeFormat>()
+function formatter(timeZone: string): Intl.DateTimeFormat {
+  let fmt = formatters.get(timeZone)
+  if (!fmt) {
+    // hourCycle 显式给 h23：zh-CN 的默认时制是 12 小时，只写 hour12: false 在部分 ICU 上
+    // 会落到 h24，午夜渲染成 24:00:00 而不是 00:00:00。
+    fmt = new Intl.DateTimeFormat('zh-CN', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+    formatters.set(timeZone, fmt)
+  }
+  return fmt
+}
 
-/** 东八区 `YYYY-MM-DD HH:mm:ss`；空值或非法时间返回 '—'。 */
+/** 按顶栏所选显示时区（默认东八区）输出 `YYYY-MM-DD HH:mm:ss`；空值或非法时间返回 '—'。 */
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return '—'
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return '—'
-  const p = Object.fromEntries(fmt.formatToParts(d).map((x) => [x.type, x.value]))
+  const p = Object.fromEntries(formatter(displayZone.value).formatToParts(d).map((x) => [x.type, x.value]))
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`
 }
 
