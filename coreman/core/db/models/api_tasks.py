@@ -89,6 +89,9 @@ class ApiTask(Base):
     )
     # 业务系统随任务附带的图片（api_task_uploads.id，按顺序）；图片过期删掉后引用留着。
     image_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(Uuid()), server_default=text("'{}'"))
+    # 运行时额度用完、排队等恢复：第一次进入等待的时间（满 7 天放弃）与预计重跑时间。
+    quota_waiting_since: Mapped[datetime | None] = _ts()
+    resume_at: Mapped[datetime | None] = _ts()
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 

@@ -84,7 +84,7 @@ POST /api/infra/tasks/run
 | `GET /api/infra/tasks/run/{id}?user=alice` | 查询。只能查本调用方为这位员工发起的任务。 |
 | `POST /api/infra/tasks/run/{id}/cancel` | 取消，正文 `{"user": "alice"}`。 |
 
-返回的 `data` 同上表，`conversation` 换成 `user` 和 `writes`；不会出现 `superseded`。
+返回的 `data` 同上表，`conversation` 换成 `user`、`resume_at` 和 `writes`；不会出现 `superseded`，多一个 `waiting_quota`（运行时额度用完，排队等恢复，`resume_at` 是预计重跑时间）。
 
 `writes` 是这次任务（含确认后的续接轮）提出的业务系统写操作，只有业务系统、操作和状态，不含请求内容：
 
@@ -105,6 +105,8 @@ POST /api/infra/tasks/run
 - 校验：调用方启用且有 `tasks`、AI 员工在调用方的可驱动列表里、AI 员工开着「允许 API 驱动」、员工在白名单里、绑定了飞书并私聊过这个 AI 员工。开轮前再查一遍，不过就在私聊里说明原因。
 - **图片**：前 8 张直接放进这一轮给模型看；更多的换成 24 小时有效的下载链接（`/api/infra/tasks/uploads/{id}/raw?token=…`，令牌由平台签发），让 AI 员工下载到工作目录 `api-inputs/` 下分批打开。私聊里的第一句注明附了几张图。没被任务用上的图片 24 小时后删掉，被用上的保留 30 天。
 - **写操作要员工确认**：AI 员工经平台代理调用业务系统写接口时照常暂存，本轮结束后确认卡发到员工和 AI 员工的私聊，只有员工本人在这个私聊里点才算；确认后平台以员工身份执行，结果接着在这个任务的独立会话里续接一轮，回复同样发在私聊里。个人令牌发起的任务仍然不能写。
+- **额度用完不换运行时，排队重跑**：开轮前已知 AI 员工的运行时额度用完（5 小时或 7 天窗口用量到 100%），这一轮放回队列，到重置时间再跑，员工那边不发任何消息；跑到一半才撞上额度，这一轮照常结束，回复末尾说明已排队和预计时间，同一个独立会话里另排一轮，到点用原来的内容和图片重跑（拿不到重置时间就 30 分钟后再试）。不推「切换运行时」的卡片：换运行时是整个 AI 员工换机，会影响别人。从第一次等额度起超过 7 天还没跑成，任务失败，`error_code` 为 `quota_wait_expired`，私聊里说明原因。
+- **去重**：同一调用方、同一员工、同一 AI 员工，prompt 和图片（`upload_id` 列表，同内容的图片就是同一个 `upload_id`）都一样，并且前一个任务还没结束（排队、等额度、执行中），直接返回那个任务（200），不新建。前一个已经结束的会照常新建。
 - 同一调用方同一员工最多 20 个任务未结束（429）。
 
 管理命令：
@@ -115,4 +117,4 @@ coreman clients set intake --bot demo-bot --bot other-bot   # 替换可驱动的
 coreman clients set intake --no-bot
 ```
 
-需要数据库迁移 `0125`、`0126`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，额度排队、引用回复载入原任务在后续步骤里做。
+需要数据库迁移 `0125`、`0126`、`0127`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，引用回复载入原任务在后续步骤里做。
