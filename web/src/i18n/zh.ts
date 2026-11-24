@@ -644,7 +644,7 @@ export default {
       wecom_not_configured: '未配置企业微信登录应用',
     },
   },
-  layout: { logout: '退出登录', darkMode: '深色模式', language: '语言' },
+  layout: { logout: '退出登录', darkMode: '深色模式', language: '语言', timezone: '显示时区', zones: { 'Asia/Shanghai': '北京时间', 'America/New_York': '美东时间', UTC: 'UTC' } },
   menu: {
     selfReminders: "我的定时任务",
     myAssistant: "我的助理",
