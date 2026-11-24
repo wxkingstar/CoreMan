@@ -43,13 +43,13 @@ var version = "1.1.7"
 //	go build -ldflags "-X main.buildCommit=$(git rev-parse --short HEAD)"
 var buildCommit = "unknown"
 
-var defaultModel = "codex/gpt-5.5"
+var defaultModel = "codex/gpt-6.2-sol"
 
 // availableModels lists what /v1/models advertises. Codex itself accepts any
 // model the underlying OpenAI account has access to; this list is for
 // discovery only.
 var availableModels = []openai.ModelInfo{
-	{ID: "codex/gpt-5.5", Object: "model", Created: 1700000000, OwnedBy: "openai"},
+	{ID: "codex/gpt-6.2-sol", Object: "model", Created: 1700000000, OwnedBy: "openai"},
 	{ID: "codex/gpt-5.4", Object: "model", Created: 1700000000, OwnedBy: "openai"},
 	{ID: "codex/gpt-5.3-codex", Object: "model", Created: 1700000000, OwnedBy: "openai"},
 }
@@ -232,7 +232,7 @@ func main() {
 	socketPath := flag.String("socket", "", "private Unix socket (Daemon transport)")
 	port := flag.String("port", "50010", "port to listen on")
 	proxy := flag.String("proxy", "", "HTTP/HTTPS proxy URL")
-	model := flag.String("model", "", "default model name (e.g. gpt-5.5, gpt-5.4, gpt-5.3-codex)")
+	model := flag.String("model", "", "default model name (e.g. gpt-6.2-sol, gpt-5.4, gpt-5.3-codex)")
 	sessionsDir := flag.String("sessions-dir", "sessions", "directory for session log files + attachments + thread bindings")
 	logFilePath := flag.String("log-file", "relay-codex.log", "log file path (use - for stdout only)")
 	showVersion := flag.Bool("version", false, "show version and exit")

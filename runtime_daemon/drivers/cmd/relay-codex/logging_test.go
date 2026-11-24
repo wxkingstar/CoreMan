@@ -17,7 +17,7 @@ func TestCodexRequestLogsOmitMessagesByDefault(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	body := `{"model":"codex/gpt-5.5","stream":true,"messages":[` +
+	body := `{"model":"codex/gpt-6.2-sol","stream":true,"messages":[` +
 		`{"role":"system","content":"SYSTEM-PROMPT-MARKER"},` +
 		`{"role":"user","content":"CHAT-MESSAGE-MARKER"}]}`
 	rec := httptest.NewRecorder()
