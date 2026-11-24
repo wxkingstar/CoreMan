@@ -45,6 +45,7 @@ FRP_SHA256 = {
 FRP_URL = "https://github.com/fatedier/frp/releases/download/v{v}/frp_{v}_{p}.tar.gz"
 COMPOSE_FILE = "dev/compose.yaml"
 RECLAIM_SECONDS = 1800
+RESTART_POLICY = "on-failure:5"
 PRUNE_SECONDS = 24 * 3600
 NAME = re.compile(r"[^a-z0-9]+")
 
@@ -233,11 +234,51 @@ def run(
     return done.stdout
 
 
-def compose(settings: Settings, project: str, *args: str, tree: Path | None = None, **kw) -> str:
+def compose(
+    settings: Settings,
+    project: str,
+    *args: str,
+    tree: Path | None = None,
+    override: Path | None = None,
+    **kw,
+) -> str:
     cmd = [settings.docker, "compose", "-p", project]
     if tree is not None:
         cmd += ["--project-directory", str(tree), "-f", str(tree / COMPOSE_FILE)]
+        if override is not None:
+            cmd += ["-f", str(override)]
     return run(cmd + list(args), **kw)
+
+
+def restart_override(settings: Settings, pid: str, tree: Path, env: dict) -> Path | None:
+    """没写 restart 的服务补上 `on-failure:5`，写成一份叠加的 compose 文件。
+
+    开发服务器会自己崩：rebase、切分支改写工作区时，监听到变化去读的文件正好不在，进程
+    直接退出，入口从此返回 502，要等人再 `up`。补上后容器自己重启；累计崩 5 次就不再重启
+    （下次 `up` 重建容器后重新计），`up --wait` 遇到起不来的服务仍然很快报错。仓库自己写了
+    restart 的服务不动。
+    """
+    try:
+        config = json.loads(
+            compose(settings, pid, "config", "--format", "json", tree=tree, env=env)
+        )
+    except (PreviewError, ValueError):
+        return None  # 配置本身有问题：交给后面的 up 报出来
+    services = config.get("services") if isinstance(config, dict) else None
+    names = [
+        name
+        for name, spec in (services or {}).items()
+        if isinstance(spec, dict) and "restart" not in spec
+    ]
+    path = settings.data_dir / "compose" / f"{pid}.yaml"
+    if not names:
+        path.unlink(missing_ok=True)
+        return None
+    # JSON 是 YAML 的子集，compose 直接读。
+    write_private(
+        path, json.dumps({"services": {name: {"restart": RESTART_POLICY} for name in names}})
+    )
+    return path
 
 
 def write_proxy(settings: Settings, pid: str, port: int) -> None:
@@ -301,6 +342,7 @@ def stop_preview(settings: Settings, state: dict, key: str, *, remove: bool = Fa
     (settings.proxies_dir / f"{pid}.toml").unlink(missing_ok=True)
     if remove:
         (settings.data_dir / "env" / f"{pid}.env").unlink(missing_ok=True)
+        (settings.data_dir / "compose" / f"{pid}.yaml").unlink(missing_ok=True)
         del state["previews"][key]
     else:
         entry["running"] = False
@@ -351,6 +393,7 @@ def cmd_up(settings: Settings, path: str) -> int:
         DEV_PREVIEW_ID=pid,
     )
     print(f"启动 {pid}（端口 {port}）……", flush=True)
+    override = restart_override(settings, pid, tree, env)
     try:
         compose(
             settings,
@@ -364,6 +407,7 @@ def cmd_up(settings: Settings, path: str) -> int:
             "--wait-timeout",
             "600",
             tree=tree,
+            override=override,
             env=env,
             timeout=1800,
         )
@@ -412,7 +456,8 @@ def cmd_status(settings: Settings) -> int:
         f"{'运行中' if entry.get('running') else '已停止'}  "
         f"最近启动 {time.strftime('%Y-%m-%d %H:%M', time.localtime(entry['last_up']))}"
     )
-    print(compose(settings, entry["id"], "ps"))
+    # 带 -a：崩掉退出的服务也列出来，否则只看得到还活着的，看不出少了谁。
+    print(compose(settings, entry["id"], "ps", "-a"))
     return 0
 
 

@@ -2309,6 +2309,21 @@ async def test_private_done_relies_on_the_pin_and_falls_back_without_it(db_sessi
     assert "133 秒" in sent["content"]
 
 
+async def test_done_message_quotes_the_reply_card_of_its_own_round(db_session, db_engine):
+    """完成提醒要发成会话消息时引用这一轮的回复卡片：下一轮已经开始，也不会落到它的卡片下面。"""
+    bot, row, generation = await seed(db_session)
+    factory, api = make_session_factory(db_engine), FakeAPI()
+    await _reply_card(factory, bot, row.task_id, "om_r9")
+    await _long_done_item(factory, bot, group=False, task_id=row.task_id)
+    transport = FeishuTransport(
+        factory, api, bot_id=bot.id, instance_id="old", generation=generation
+    )
+    await transport.round()
+    [sent] = [b for m, p, b in api.calls if m == "POST" and p.endswith("/messages/om_r9/reply")]
+    assert sent["msg_type"] == "post" and "133 秒" in sent["content"]
+    assert not [p for _, p, _ in api.calls if p == "/open-apis/im/v1/messages"]
+
+
 class NoMediaCard(FakeAPI):
     async def call(self, method, path, **kwargs):
         if (kwargs.get("json") or {}).get("msg_type") == "interactive":
