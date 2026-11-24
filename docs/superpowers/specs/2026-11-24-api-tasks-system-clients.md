@@ -1,6 +1,6 @@
 # API 驱动 AI 员工（二期）：业务系统代员工调用
 
-状态：已确认（2026-11-24），第 1 步实现中。一期见 [2026-11-06-api-driven-tasks.md](2026-11-06-api-driven-tasks.md)。
+状态：已确认（2026-11-24），第 1 步 PR #382，第 2 步实现中。一期见 [2026-11-06-api-driven-tasks.md](2026-11-06-api-driven-tasks.md)。
 
 ## 1. 背景
 
@@ -141,7 +141,7 @@ POST /api/infra/tasks/run/{id}/cancel     {"user": "alice"}
 | `failed` | 失败，原因看 `error_code` |
 | `cancelled` | 被取消 |
 
-`writes`：这一轮提出的写操作，每项 `{system, operation, status}`，`status` 为 `pending_confirm` / `confirmed` / `rejected` / `expired` / `failed`。任务 `succeeded` 只表示 AI 员工做完了，写回要等员工确认，调用方据 `writes` 判断数据有没有落库，也可以直接看自己系统里的数据。
+`writes`：这一轮提出的写操作，每项 `{system, operation, status}`，`status` 为 `pending_confirm` / `rejected` / `expired` / `running` / `succeeded` / `failed` / `unknown` / `not_run`；批量写操作是一条，带 `batch: true`，确认后带各状态的项数 `items`。任务 `succeeded` 只表示 AI 员工做完了，写回要等员工确认，调用方据 `writes` 判断数据有没有落库，也可以直接看自己系统里的数据。
 
 `error_code` 新增：`quota_wait_expired`（等额度超过 7 天）、`user_unresolved`、`api_unavailable`（开轮前复核没通过，同一期）。
 

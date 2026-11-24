@@ -83,13 +83,26 @@ POST /api/infra/tasks/run
 | `GET /api/infra/tasks/run/{id}?user=alice` | 查询。只能查本调用方为这位员工发起的任务。 |
 | `POST /api/infra/tasks/run/{id}/cancel` | 取消，正文 `{"user": "alice"}`。 |
 
-返回的 `data` 同上表，`conversation` 换成 `user`；不会出现 `superseded`。
+返回的 `data` 同上表，`conversation` 换成 `user` 和 `writes`；不会出现 `superseded`。
+
+`writes` 是这次任务（含确认后的续接轮）提出的业务系统写操作，只有业务系统、操作和状态，不含请求内容：
+
+| `status` | 含义 |
+|---|---|
+| `pending_confirm` | 等员工在私聊里点确认卡 |
+| `rejected` | 员工点了取消，或这一轮没正常结束、没发卡 |
+| `expired` | 确认卡过期没点 |
+| `succeeded` / `failed` / `unknown` | 确认后平台执行的结果；`unknown` 表示可能已经生效，要到业务系统核对 |
+| `running` / `not_run` | 执行中 / 前面一项失败后没有执行 |
+
+批量写操作是一条，带 `"batch": true`，确认后带 `items`（各状态的项数）。任务 `succeeded` 只表示 AI 员工这一轮做完了，数据有没有写进业务系统看 `writes`，或者直接看业务系统里的数据。
 
 和个人令牌不同的地方：
 
 - **独立会话**：每个任务一个会话（`api:<任务 id>`），不带员工和 AI 员工私聊里的上下文，私聊里发消息也不会替代它。
 - **结果发在员工私聊里**：先发一句「**某某** 在「系统名」里发起」加任务内容，回复末尾标注「此消息由 API 任务推送，不在当前对话上下文中」（返回给业务系统的 `reply` 不带这句）。
 - 校验：调用方启用且有 `tasks`、AI 员工在调用方的可驱动列表里、AI 员工开着「允许 API 驱动」、员工在白名单里、绑定了飞书并私聊过这个 AI 员工。开轮前再查一遍，不过就在私聊里说明原因。
+- **写操作要员工确认**：AI 员工经平台代理调用业务系统写接口时照常暂存，本轮结束后确认卡发到员工和 AI 员工的私聊，只有员工本人在这个私聊里点才算；确认后平台以员工身份执行，结果接着在这个任务的独立会话里续接一轮，回复同样发在私聊里。个人令牌发起的任务仍然不能写。
 - 同一调用方同一员工最多 20 个任务未结束（429）。
 
 管理命令：
@@ -100,4 +113,4 @@ coreman clients set intake --bot demo-bot --bot other-bot   # 替换可驱动的
 coreman clients set intake --no-bot
 ```
 
-需要数据库迁移 `0125`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，图片、写回确认、额度排队、引用回复载入原任务在后续步骤里做。
+需要数据库迁移 `0125`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，图片、额度排队、引用回复载入原任务在后续步骤里做。
