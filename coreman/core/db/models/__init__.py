@@ -18,6 +18,7 @@ from coreman.core.db.models.alert import AlertState
 from coreman.core.db.models.api_tasks import (
     API_TASK_TARGETS,
     ApiTask,
+    ApiTaskUpload,
     BotConversationAlias,
     PersonalAccessToken,
 )
@@ -337,7 +338,13 @@ __all__ += [
     "GroupObserveState",
 ]
 
-__all__ += ["API_TASK_TARGETS", "ApiTask", "BotConversationAlias", "PersonalAccessToken"]
+__all__ += [
+    "API_TASK_TARGETS",
+    "ApiTask",
+    "ApiTaskUpload",
+    "BotConversationAlias",
+    "PersonalAccessToken",
+]
 
 __all__ += ["FeishuAuthWait", "FeishuGroupAction"]
 

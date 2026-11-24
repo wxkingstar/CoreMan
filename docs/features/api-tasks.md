@@ -79,7 +79,8 @@ POST /api/infra/tasks/run
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/infra/tasks/run` | 发起。`user` 是员工邮箱前缀，按业务令牌 sub 的同一口径认人：只认唯一一位在职员工，认不出就 403，不退回登录名。`request_id` 同一调用方内幂等，内容不同返回 409。新建返回 202。 |
+| `POST /api/infra/tasks/run` | 发起。可带 `images`：上传得到的 `upload_id` 列表，按顺序，张数不限；只能引用本调用方为这位员工传的、没过期的图片（否则 404）。`user` 是员工邮箱前缀，按业务令牌 sub 的同一口径认人：只认唯一一位在职员工，认不出就 403，不退回登录名。`request_id` 同一调用方内幂等，内容不同返回 409。新建返回 202。 |
+| `POST /api/infra/tasks/uploads` | 上传一张图片，multipart：`user`、`sha256`（文件内容的 SHA-256，十六进制）、文件 `file`。签名只覆盖 `user` 和 `sha256`，文件靠 `sha256` 绑定，对不上按签名无效（401）。JPEG / PNG / WebP（按文件头认），单张不超过 10MB。同一调用方同一员工传同样的内容返回原来的 `upload_id`。返回 `upload_id`、`sha256`、`bytes`、`content_type`、`expires_at`。 |
 | `GET /api/infra/tasks/run/{id}?user=alice` | 查询。只能查本调用方为这位员工发起的任务。 |
 | `POST /api/infra/tasks/run/{id}/cancel` | 取消，正文 `{"user": "alice"}`。 |
 
@@ -102,6 +103,7 @@ POST /api/infra/tasks/run
 - **独立会话**：每个任务一个会话（`api:<任务 id>`），不带员工和 AI 员工私聊里的上下文，私聊里发消息也不会替代它。
 - **结果发在员工私聊里**：先发一句「**某某** 在「系统名」里发起」加任务内容，回复末尾标注「此消息由 API 任务推送，不在当前对话上下文中」（返回给业务系统的 `reply` 不带这句）。
 - 校验：调用方启用且有 `tasks`、AI 员工在调用方的可驱动列表里、AI 员工开着「允许 API 驱动」、员工在白名单里、绑定了飞书并私聊过这个 AI 员工。开轮前再查一遍，不过就在私聊里说明原因。
+- **图片**：前 8 张直接放进这一轮给模型看；更多的换成 24 小时有效的下载链接（`/api/infra/tasks/uploads/{id}/raw?token=…`，令牌由平台签发），让 AI 员工下载到工作目录 `api-inputs/` 下分批打开。私聊里的第一句注明附了几张图。没被任务用上的图片 24 小时后删掉，被用上的保留 30 天。
 - **写操作要员工确认**：AI 员工经平台代理调用业务系统写接口时照常暂存，本轮结束后确认卡发到员工和 AI 员工的私聊，只有员工本人在这个私聊里点才算；确认后平台以员工身份执行，结果接着在这个任务的独立会话里续接一轮，回复同样发在私聊里。个人令牌发起的任务仍然不能写。
 - 同一调用方同一员工最多 20 个任务未结束（429）。
 
@@ -113,4 +115,4 @@ coreman clients set intake --bot demo-bot --bot other-bot   # 替换可驱动的
 coreman clients set intake --no-bot
 ```
 
-需要数据库迁移 `0125`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，图片、额度排队、引用回复载入原任务在后续步骤里做。
+需要数据库迁移 `0125`、`0126`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)，额度排队、引用回复载入原任务在后续步骤里做。

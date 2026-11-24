@@ -1,6 +1,6 @@
 # API 驱动 AI 员工（二期）：业务系统代员工调用
 
-状态：已确认（2026-11-24），第 1 步 PR #382，第 2 步实现中。一期见 [2026-11-06-api-driven-tasks.md](2026-11-06-api-driven-tasks.md)。
+状态：已确认（2026-11-24），第 1 步 PR #382，第 2 步 PR #383，第 3 步实现中。一期见 [2026-11-06-api-driven-tasks.md](2026-11-06-api-driven-tasks.md)。
 
 ## 1. 背景
 
@@ -158,15 +158,15 @@ POST /api/infra/tasks/run/{id}/cancel     {"user": "alice"}
 ### 6.2 图片交给模型
 
 - 前 8 张作为图片直接放进本轮内容（同飞书图片消息，转 data-URI）。
-- 超过 8 张时，全部图片都写进本次会话工作目录下的 `api-inputs/<任务 id>/`，按序号命名，本轮块列出文件清单并要求 AI 员工逐张或分批打开；前 8 张同时也内联。张数没有上限，只是更慢。
-- 写进工作目录要靠运行时节点支持（实现时核对现有文件下发能力，需要的话节点升级）。
+- 超过 8 张时，第 9 张起换成开轮时签发、24 小时有效的下载链接，要求 AI 员工下载到工作目录 `api-inputs/` 下逐张或分批打开。张数没有上限，只是更慢。
+- 实现时核对过：平台没有现成的「入站文件写进会话工作目录」链路（节点的 workspace-import 只用于换机），改用下载链接，运行时节点不用升级。
 
 ### 6.3 推送到私聊
 
 完成后推一条到员工私聊，结构：
 
 - 头：「**{员工}** 在 {调用方名称} 里发起」，加 prompt（超过 500 字折叠）；
-- 前 3 张图的缩略图，超过时写「共 N 张」；
+- 注明附了几张图（第一期不发缩略图：网关拉取图片只认公网地址，平台内的图片链接过不去）；
 - AI 员工的回复，按现有富卡片规则（Card 2.0，表格等）；
 - 尾注：「此消息由 API 任务推送，不在当前对话上下文中。引用这条消息回复，可以带上原任务的图片和结果接着处理。」
 
@@ -204,7 +204,7 @@ POST /api/infra/tasks/run/{id}/cancel     {"user": "alice"}
 
 - `api_clients.bot_ids`：uuid 数组，默认空。
 - 会话记录（现有会话表）加 `loaded_api_task_ids`：本会话已载入的 API 任务，会话换新时清空（第 7 节）。
-- `api_task_uploads`：`id`、`client_key`、`user_id`、`sha256`、`bytes`、`content_type`、`object_key`（平台对象存储）、`created_at`、`expires_at`；`(client_key, user_id, sha256)` 唯一。
+- `api_task_uploads`（迁移 0126）：`id`、`client_key`、`user_id`、`sha256`、`size`、`content_type`、`data`（图片内容直接存库，单张不超过 10MB；平台对象存储的链接最长 24 小时，留不住 30 天）、`created_at`、`expires_at`；`(client_key, user_id, sha256)` 唯一。
 - `api_tasks` 扩展：`client_key`（与一期的 `token_id` 二选一）、`image_ids`（uuid 数组）、`content_hash`（去重用）、`quota_waiting_since`、`resume_at`、`push_message_id`（6.3 的飞书消息 ID，供第 7 节反查）；`(client_key, request_id)` 唯一；`(client_key, user_id, bot_id, content_hash)` 上建未结束任务的部分唯一索引，保证并发去重。
 - 图片保留 30 天，到期清理对象存储，任务行保留。
 

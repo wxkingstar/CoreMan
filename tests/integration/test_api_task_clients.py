@@ -223,3 +223,50 @@ async def test_a_foreign_task_naming_the_api_task_is_not_run(db_engine, db_sessi
     fake = await _run(db_engine, task)
     assert fake.requests == []
     assert (await tasks.get(db_session, stray.id)).error_code == "api_inactive"
+
+
+async def _images(session, client, member, count):  # type: ignore[no-untyped-def]
+    from coreman.core.api_tasks import uploads
+
+    ids = []
+    for index in range(count):
+        data = b"\x89PNG\r\n\x1a\n" + index.to_bytes(4, "big") * 8
+        row = await uploads.save(session, client_key=client.app_key, user_id=member.id, data=data)
+        ids.append(row.id)
+    await session.commit()
+    return ids
+
+
+def _content(body):  # type: ignore[no-untyped-def]
+    content = body["messages"][1]["content"]
+    assert isinstance(content, list)
+    return content
+
+
+async def test_images_are_given_to_the_model(db_engine, db_session):
+    _, member, client = await _setup(db_session)
+    ids = await _images(db_session, client, member, 2)
+    row, _ = await _create(db_session, client, images=ids)
+    await _trigger_sent(db_session, row)
+    fake = await _run(db_engine, await _claim(db_session))
+    content = _content(fake.requests[0])
+    images = [p for p in content if p.get("type") == "image_url"]
+    assert len(images) == 2
+    assert images[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "识别截图里的账号信息" in str(content)
+
+
+async def test_images_past_the_inline_limit_become_download_links(db_engine, db_session):
+    from coreman.core.api_tasks import uploads
+
+    _, member, client = await _setup(db_session)
+    ids = await _images(db_session, client, member, uploads.INLINE + 2)
+    row, _ = await _create(db_session, client, images=ids)
+    await _trigger_sent(db_session, row)
+    fake = await _run(db_engine, await _claim(db_session))
+    content = _content(fake.requests[0])
+    assert len([p for p in content if p.get("type") == "image_url"]) == uploads.INLINE
+    text = "\n".join(str(p.get("text") or "") for p in content)
+    assert f"本次共 {uploads.INLINE + 2} 张图片" in text
+    assert text.count("/api/infra/tasks/uploads/") == 2
+    assert str(ids[-1]) in text and str(ids[0]) not in text

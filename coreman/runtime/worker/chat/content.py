@@ -77,7 +77,14 @@ class ContentStage(ChatStageBase):
 
         fetcher: MediaFetcher
         owns_fetcher = pre.intake.bot.platform == "feishu" or ctx.media_fetcher is None
-        if pre.intake.bot.platform == "feishu":
+        if ctx.task.payload.get("api_client") and ctx.task.payload.get("api_task_id"):
+            # 业务系统发起的任务：图片是它上传的，从上传记录里取，不找飞书要。
+            from coreman.core.api_tasks.uploads import UploadFetcher
+
+            fetcher = UploadFetcher(  # type: ignore[assignment]
+                ctx.session_factory, str(ctx.task.payload["api_task_id"])
+            )
+        elif pre.intake.bot.platform == "feishu":
             from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
             from coreman.core.platforms.feishu import FeishuClient
             from coreman.core.platforms.feishu_media import FeishuMediaFetcher

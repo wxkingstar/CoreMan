@@ -175,6 +175,14 @@ async def resolve(
         await _refuse(session, ctx, bot, row, reason or "AI 员工的运行时不可用")
         return None
     parts = [p for p in (event.payload.get("parts") or []) if isinstance(p, dict)]
+    if row.client_key is not None and row.image_ids:
+        # 图片多时只把前几张直接给模型，其余换成开轮这一刻签的下载链接。
+        from coreman.core.api_tasks import uploads
+        from coreman.core.timeutils import utcnow
+
+        parts = uploads.split_for_turn(
+            parts, cipher=ctx.cipher, base_url=ctx.public_base_url, now=utcnow()
+        )
     intake = Intake(
         bot,
         relay,

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Any, Literal
 
@@ -19,10 +20,17 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.infra_auth import require_scope
 from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.security import verify_csrf
-from coreman.core.api_tasks import service, tokens
+from coreman.core.api_tasks import service, tokens, uploads
 from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.audit import record_audit
-from coreman.core.db.models import ApiClient, ApiTask, Bot, PersonalAccessToken, User
+from coreman.core.db.models import (
+    ApiClient,
+    ApiTask,
+    ApiTaskUpload,
+    Bot,
+    PersonalAccessToken,
+    User,
+)
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["api-tasks"])
@@ -146,6 +154,8 @@ class ClientTaskIn(BaseModel):
     bot_key: str = Field(min_length=1, max_length=50)
     prompt: str = Field(min_length=1, max_length=service.PROMPT_MAX)
     request_id: str | None = Field(default=None, min_length=1, max_length=service.REQUEST_ID_MAX)
+    # 先用 /api/infra/tasks/uploads 逐张上传拿到的 upload_id，按顺序；张数不限。
+    images: list[uuid.UUID] = Field(default_factory=list)
 
 
 class ClientUserIn(BaseModel):
@@ -154,6 +164,63 @@ class ClientUserIn(BaseModel):
 
 
 tasks_client = require_scope(service.CLIENT_SCOPE)
+tasks_upload_client = require_scope(service.CLIENT_SCOPE, upload=True)
+
+
+@router.post("/api/infra/tasks/uploads", status_code=201)
+async def upload_client_image(
+    request: Request,
+    client: ApiClient = Depends(tasks_upload_client),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """一次一张：表单字段 `user`、`sha256`（都在签名里）和文件 `file`。"""
+    form = await request.form()
+    subject, digest, upload = form.get("user"), form.get("sha256"), form.get("file")
+    if not isinstance(subject, str) or not isinstance(digest, str) or isinstance(upload, str):
+        raise ApiError(422, 422, "需要表单字段 user、sha256 和文件 file")
+    if upload is None:
+        raise ApiError(422, 422, "需要文件 file")
+    data = await upload.read(uploads.MAX_BYTES + 1)
+    if len(data) > uploads.MAX_BYTES:
+        raise ApiError(413, 413, f"单张图片不能超过 {uploads.MAX_BYTES // 1024 // 1024}MB")
+    # 文件不在签名里：靠签过名的 sha256 绑定，对不上就当签名无效。
+    if hashlib.sha256(data).hexdigest() != digest.strip().lower():
+        raise ApiError(401, 401, "接口签名无效或已过期")
+    try:
+        user = await service.resolve_member(session, subject)
+        row = await uploads.save(session, client_key=client.app_key, user_id=user.id, data=data)
+    except TokenError as exc:
+        await session.rollback()
+        raise _error(exc) from None
+    out = {
+        "upload_id": str(row.id),
+        "sha256": row.sha256,
+        "bytes": row.size,
+        "content_type": row.content_type,
+        "expires_at": row.expires_at.isoformat(),
+    }
+    await session.commit()
+    return {"code": 0, "data": out}
+
+
+@router.get("/api/infra/tasks/uploads/{upload_id}/raw")
+async def client_image_raw(
+    upload_id: uuid.UUID,
+    request: Request,
+    token: str = Query(min_length=1, max_length=2048),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """AI 员工下载第 9 张以后的图片：链接里的令牌是平台签的，24 小时有效。"""
+    if not uploads.link_valid(request.app.state.cipher, upload_id, token, utcnow()):
+        raise not_found("图片不存在或链接已过期")
+    row = await session.get(ApiTaskUpload, upload_id)
+    if row is None:
+        raise not_found("图片不存在或链接已过期")
+    return Response(
+        content=bytes(row.data),
+        media_type=row.content_type,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post("/api/infra/tasks/run", status_code=202)
@@ -172,6 +239,7 @@ async def create_client_task(
             bot_key=body.bot_key,
             prompt=body.prompt,
             request_id=body.request_id,
+            images=body.images,
         )
     except TokenError as exc:
         await session.rollback()
@@ -184,7 +252,11 @@ async def create_client_task(
             actor_login=body.user.strip().lower(),
             target_type="bot",
             target_id=str(row.bot_id),
-            diff={"api_task_id": str(row.id), "api_client": client.app_key},
+            diff={
+                "api_task_id": str(row.id),
+                "api_client": client.app_key,
+                "images": len(row.image_ids),
+            },
             ip=client_ip(request),
         )
     data = await service.view(session, row)
