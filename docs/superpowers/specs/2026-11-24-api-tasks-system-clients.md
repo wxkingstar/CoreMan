@@ -1,6 +1,6 @@
 # API 驱动 AI 员工（二期）：业务系统代员工调用
 
-状态：已确认（2026-11-24），第 1 步 PR #382，第 2 步 PR #383，第 3 步 PR（图片），第 4 步实现中。一期见 [2026-11-06-api-driven-tasks.md](2026-11-06-api-driven-tasks.md)。
+状态：已确认（2026-11-24），第 1 步 PR #382，第 2 步 PR #383，第 3–5 步各一个 PR（图片、额度排队与去重、引用回复载入）。一期见 [2026-11-06-api-driven-tasks.md](2026-11-06-api-driven-tasks.md)。
 
 ## 1. 背景
 
@@ -204,7 +204,7 @@ POST /api/infra/tasks/run/{id}/cancel     {"user": "alice"}
 迁移（编号按实现时顺延）：
 
 - `api_clients.bot_ids`：uuid 数组，默认空。
-- 会话记录（现有会话表）加 `loaded_api_task_ids`：本会话已载入的 API 任务，会话换新时清空（第 7 节）。
+- 会话记录（现有会话表）加 `api_tasks_loaded`（迁移 0128，JSONB：`relay_session_id` 与已载入的任务 ID）：relay 会话换新即作废（第 7 节）。
 - `api_task_uploads`（迁移 0126）：`id`、`client_key`、`user_id`、`sha256`、`size`、`content_type`、`data`（图片内容直接存库，单张不超过 10MB；平台对象存储的链接最长 24 小时，留不住 30 天）、`created_at`、`expires_at`；`(client_key, user_id, sha256)` 唯一。
 - `api_tasks` 扩展：`client_key`（与一期的 `token_id` 二选一）、`image_ids`（uuid 数组）、`content_hash`（去重用）、`quota_waiting_since`、`resume_at`、`push_message_id`（6.3 的飞书消息 ID，供第 7 节反查）；`(client_key, request_id)` 唯一；`(client_key, user_id, bot_id, content_hash)` 上建未结束任务的部分唯一索引，保证并发去重。
 - 图片保留 30 天，到期清理对象存储，任务行保留。

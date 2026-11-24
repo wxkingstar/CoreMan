@@ -40,6 +40,8 @@ ENTITY_SELECTS = {
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
     # 业务系统发起的任务里的写操作批次：显式还原后只读状态与业务系统、操作名
     "coreman/core/api_tasks/writes.py": 1,
+    # 引用回复载入原任务：原任务会话第一轮和最后一轮的回复，session.scalar（自动还原）
+    "coreman/core/api_tasks/recall.py": 1,
     # 调度单：同一份内容有没有在途的单，session.scalar（自动还原）
     "coreman/core/assistants/approvals/dispatching.py": 1,
     # 审批单：去重、决定与平台自动撤回是 session.scalar（自动还原）；列表、清理附件与取合单的
@@ -113,6 +115,8 @@ ENTITY_SELECTS = {
 }
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
+    # 引用的是哪个 API 任务：只按明文键 _feishu_message_id 找出站项，取的是 dedupe_key
+    "coreman/core/api_tasks/recall.py": 1,
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受
     # 批量任务按发起人过滤：只用留明文的键 user_id
     "coreman/api/routers/system_batches.py": 1,

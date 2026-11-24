@@ -13,6 +13,7 @@ from coreman.core.db.models import (
     ApiTask,
     ChatLog,
     ChatSession,
+    InboundEvent,
     OutboxItem,
     TaskStream,
     User,
@@ -353,3 +354,74 @@ async def test_same_content_while_unfinished_returns_the_same_task(db_session):
     await db_session.commit()
     third, third_created = await _create(db_session, client)
     assert third_created and third.id != first.id
+
+
+async def _quote(db_session, bot, parent_id, text="粉丝数不对，应该是 12 万"):  # type: ignore[no-untyped-def]
+    from tests.integration.test_chat_handler import chat_task
+
+    task = await chat_task(db_session, bot, text, sender="ou_alice", chat_id="p2p-alice")
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    event.reply_context = {
+        **event.reply_context,
+        "chat_id": "p2p-alice",
+        "message_id": event.platform_msg_id,
+        "parent_id": parent_id,
+    }
+    await db_session.commit()
+    return task
+
+
+async def _finished_api_task(db_engine, db_session, client, member, images=0):  # type: ignore[no-untyped-def]
+    from coreman.core.db.models import FeishuDelivery
+
+    ids = await _images(db_session, client, member, images) if images else []
+    row, _ = await _create(db_session, client, images=ids)
+    await _trigger_sent(db_session, row)
+    first = await _claim(db_session)
+    await _run(db_engine, first)
+    db_session.add(FeishuDelivery(task_id=first.id, message_id="om_result"))
+    trigger = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"api-task:{row.id}:trigger")
+    )
+    trigger.payload = {**trigger.payload, "_feishu_message_id": "om_trigger"}
+    await db_session.commit()
+    return row, ids
+
+
+async def test_quoting_the_result_brings_the_original_task_in_once(db_engine, db_session):
+    from coreman.core.db.models import Bot
+
+    bot_row, member, client = await _setup(db_session)
+    bot = await db_session.get(Bot, bot_row.id)
+    row, ids = await _finished_api_task(db_engine, db_session, client, member, images=2)
+    fake = await _run(db_engine, await _quote(db_session, bot, "om_result"))
+    content = fake.requests[0]["messages"][1]["content"]
+    assert isinstance(content, list)
+    text = "\n".join(str(p.get("text") or "") for p in content)
+    assert "业务系统「资料录入」里发起" in text and "识别截图里的账号信息" in text
+    assert "原任务的回复" in text and "你好，世界" in text
+    assert len([p for p in content if p.get("type") == "image_url"]) == 2
+    # 同一个会话里再引用（这次引用「在某系统里发起」那句）不再重复带。
+    again = await _run(db_engine, await _quote(db_session, bot, "om_trigger", "再看一下"))
+    assert "业务系统「资料录入」里发起" not in str(again.requests[0]["messages"][1]["content"])
+
+
+async def test_recall_only_for_the_member_in_their_own_chat(db_engine, db_session):
+    from coreman.core.db.models import Bot
+
+    bot_row, member, client = await _setup(db_session)
+    bot = await db_session.get(Bot, bot_row.id)
+    await _finished_api_task(db_engine, db_session, client, member)
+    stranger = User(login_name="u-eve", display_name="伊芙", email="eve@example.test")
+    db_session.add(stranger)
+    await db_session.flush()
+    db_session.add(UserIdentity(user_id=stranger.id, platform="feishu", platform_user_id="ou_eve"))
+    await db_session.commit()
+    from tests.integration.test_chat_handler import chat_task
+
+    task = await chat_task(db_session, bot, "这是什么", sender="ou_eve", chat_id="p2p-alice")
+    event = await db_session.get(InboundEvent, task.inbound_event_id)
+    event.reply_context = {**event.reply_context, "chat_id": "p2p-alice", "parent_id": "om_result"}
+    await db_session.commit()
+    fake = await _run(db_engine, task)
+    assert "业务系统「资料录入」里发起" not in str(fake.requests[0]["messages"][1]["content"])
