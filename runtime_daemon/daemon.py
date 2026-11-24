@@ -484,7 +484,7 @@ class RuntimeAgent(Agent):
         # 工作目录的删除（停用助理）只在助理专用实例上做，见 workspace.Workspace.remove。
         self.assistant_only = daemon.assistant_only
         # 服务端在心跳里给的检查模型（模型目录的默认模型）。驱动发现的列表只是默认值，
-        # 第一个未必是账号能用的（如 ChatGPT 账号用不了 gpt-5.5）。
+        # 第一个未必是账号能用的（ChatGPT 账号已用不了 gpt-5.5，驱动默认现为 gpt-6.2-sol）。
         self.probe_model = ""
         self.lock = daemon.operations_lock
         self.direct = daemon.direct
