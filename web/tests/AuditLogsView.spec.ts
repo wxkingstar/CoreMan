@@ -16,7 +16,7 @@ describe('AuditLogsView', () => {
     const wrapper = mount(AuditLogsView, { global: { plugins: [ElementPlus, i18n] } })
     await flushPromises()
     expect(wrapper.text()).toContain('bot.update')
-    expect(wrapper.text()).toContain('2026-09-10 08:00:00')
+    expect(wrapper.text()).toContain('2026-09-09 20:00:00')
     ;(wrapper.vm as unknown as { paged: { filters: { action: string }; load: () => Promise<void> } }).paged.filters.action = 'bot.'
     await (wrapper.vm as unknown as { paged: { load: () => Promise<void> } }).paged.load()
     expect(auditLogs.list).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'bot.' }))

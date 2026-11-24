@@ -600,7 +600,7 @@ coreman clients token-providers
 ```bash
 coreman audit list [--actor alice] [--action bot.] [--target-type bot] [--target-id ID] \
   [--since 2026-01-01T00:00:00Z] [--until 时间] [--limit 200]
-coreman stats [--start 2026-01-01] [--end 2026-01-31] [--timezone UTC|Asia/Shanghai|America/New_York]
+coreman stats [--start 2026-01-01] [--end 2026-01-31] [--timezone UTC|Asia/Shanghai|America/New_York|America/Los_Angeles]
 coreman chats list [--bot sales_bot] [--user alice] [--status error] [--chat-type group] [--keyword 词] \
   [--token-id jti] [--since 时间] [--until 时间] [--limit 100]
 coreman chats show 12345

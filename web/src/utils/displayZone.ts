@@ -1,17 +1,19 @@
 import { ref } from 'vue'
 
 /** 顶栏可切换的显示时区；按 IANA 名计算，夏令时由 Intl 处理。 */
-export const DISPLAY_ZONES = ['Asia/Shanghai', 'America/New_York', 'UTC'] as const
+export const DISPLAY_ZONES = ['America/New_York', 'America/Los_Angeles', 'Asia/Shanghai', 'UTC'] as const
 export type DisplayZone = (typeof DISPLAY_ZONES)[number]
+/** 业务时间以美东为准：没选过的浏览器默认美东。 */
+const DEFAULT_ZONE: DisplayZone = 'America/New_York'
 
 const STORAGE_KEY = 'coreman.displayZone'
 
 function saved(): DisplayZone {
   try {
     const v = localStorage.getItem(STORAGE_KEY)
-    return (DISPLAY_ZONES as readonly string[]).includes(v ?? '') ? (v as DisplayZone) : 'Asia/Shanghai'
+    return (DISPLAY_ZONES as readonly string[]).includes(v ?? '') ? (v as DisplayZone) : DEFAULT_ZONE
   } catch {
-    return 'Asia/Shanghai'
+    return DEFAULT_ZONE
   }
 }
 

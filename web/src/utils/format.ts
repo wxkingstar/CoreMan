@@ -22,7 +22,7 @@ function formatter(timeZone: string): Intl.DateTimeFormat {
   return fmt
 }
 
-/** 按顶栏所选显示时区（默认东八区）输出 `YYYY-MM-DD HH:mm:ss`；空值或非法时间返回 '—'。 */
+/** 按顶栏所选显示时区（默认美东）输出 `YYYY-MM-DD HH:mm:ss`；空值或非法时间返回 '—'。 */
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return '—'
   const d = new Date(value)

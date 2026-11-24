@@ -37,7 +37,7 @@ describe('ChatLogsView', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('销售')
     expect(wrapper.text()).not.toContain('sales_bot')
-    expect(wrapper.text()).toContain('2026-09-11 08:00:00')
+    expect(wrapper.text()).toContain('2026-09-10 20:00:00')
     const vm = wrapper.vm as unknown as { paged: { filters: { status: string }; load: () => Promise<void> }; openDetail: (id: number) => Promise<void> }
     vm.paged.filters.status = 'error'
     await vm.paged.load()
