@@ -247,3 +247,46 @@ def test_tunnel_starts_when_pid_file_points_at_a_gone_process(tmp_path, monkeypa
     )
     devpreview.DevPreview(settings).ensure_tunnel()
     assert started and (settings.data_dir / "frpc.pid").read_text() == "4242"
+
+
+def test_restart_override_covers_only_services_without_their_own_policy(tmp_path, monkeypatch):
+    """开发服务器崩了要自己起来：没写 restart 的服务补上，仓库自己写了的不动。"""
+    settings = make_settings(tmp_path)
+    config = {"services": {"web": {"image": "node"}, "api": {}, "job": {"restart": "no"}}}
+    monkeypatch.setattr(devpreview, "run", lambda cmd, **kw: json.dumps(config))
+    path = devpreview.restart_override(settings, "repo-abc123", tmp_path, {})
+    assert path is not None
+    assert json.loads(path.read_text()) == {
+        "services": {"web": {"restart": "on-failure:5"}, "api": {"restart": "on-failure:5"}}
+    }
+    config["services"] = {"job": {"restart": "no"}}
+    assert devpreview.restart_override(settings, "repo-abc123", tmp_path, {}) is None
+    assert not path.exists()
+
+
+def test_up_layers_the_restart_override_and_status_lists_exited_services(
+    tmp_path, monkeypatch, capsys
+):
+    settings = make_settings(tmp_path)
+    tree = tmp_path / "tree"
+    (tree / "dev").mkdir(parents=True)
+    (tree / devpreview.COMPOSE_FILE).write_text("services: {}\n")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return json.dumps({"services": {"web": {}}}) if "config" in cmd else ""
+
+    monkeypatch.setattr(devpreview, "run", fake_run)
+    monkeypatch.setattr(devpreview, "current_tree", lambda: tree)
+    monkeypatch.setattr(devpreview, "repo_name", lambda t: "repo")
+    monkeypatch.setattr(devpreview, "probe", lambda url, timeout: (True, "200"))
+    monkeypatch.setattr(devpreview, "reload_tunnel", lambda s: None)
+    assert devpreview.cmd_up(settings, "/") == 0
+    [up] = [c for c in calls if "up" in c]
+    override = str(
+        settings.data_dir / "compose" / f"{devpreview.preview_id(settings, tree, 'repo')}.yaml"
+    )
+    assert up[up.index(str(tree / devpreview.COMPOSE_FILE)) + 1 :][:2] == ["-f", override]
+    assert devpreview.cmd_status(settings) == 0
+    assert calls[-1][-2:] == ["ps", "-a"]

@@ -1259,7 +1259,9 @@ class FeishuTransport:
         if isinstance(item.payload.get("_feed_delete"), dict):
             await self.expire_feed(item.payload["_feed_delete"])
             return
-        if isinstance(item.payload.get("_long_done"), dict) and await self.long_done_feed(item):
+        if isinstance(item.payload.get("_long_done"), dict) and (
+            await self.long_done_feed(item) or await self.long_done_reply(item)
+        ):
             return
         if isinstance(item.payload.get("_file"), dict):
             item.payload = {
@@ -1575,6 +1577,33 @@ class FeishuTransport:
                     select(OutboxItem.id).where(OutboxItem.dedupe_key == f"feed_ttl:{task_id}")
                 )
             ) is not None
+
+    async def long_done_reply(self, item: OutboxItem) -> bool:
+        """完成提醒要发成会话消息时，引用这一轮的回复卡片来发。
+
+        直接发在会话末尾的话，同一会话已经开始下一轮时，这句会落在下一轮的卡片下面，
+        看起来像是下一轮做完了。找不到这一轮的卡片、或引用回复失败，返回 False 照旧发。
+        """
+        task_id = item.payload["_long_done"].get("task_id")
+        if not isinstance(task_id, int):
+            return False
+        async with self.factory() as session:
+            delivery = await session.get(FeishuDelivery, task_id)
+        mid = delivery.message_id if delivery is not None else None
+        if not mid:
+            return False
+        try:
+            await self.send(
+                str(item.target.get("chat_id") or ""),
+                post_content(str(item.payload.get("markdown") or "")),
+                kind="post",
+                key=f"outbox:{item.id}",
+                reply_to=mid,
+            )
+        except FeishuError as exc:
+            log.info("feishu_long_done_reply_failed", code=exc.code)
+            return False
+        return True
 
     async def reply_position(self, task_id: int) -> str | None:
         """这一轮回复卡片在会话里的位置（消息接口的 message_position），读不到返回 None。"""

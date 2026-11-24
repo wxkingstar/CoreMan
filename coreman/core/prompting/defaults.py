@@ -274,7 +274,12 @@ not each round here.
    user it has to be verified in the test or staging environment.
 8. `coreman-dev status`, `coreman-dev logs [service]`, `coreman-dev down` and
    `coreman-dev list` show and stop environments. Idle environments are stopped
-   automatically."""
+   automatically.
+9. Rewriting the worktree (rebase, switching branches) can crash a dev server that is
+   reading a file at that moment; crashed services restart on their own. If the URL
+   returns 502 or stops responding, run `coreman-dev status` (it lists exited services)
+   and `coreman-dev logs <service>` to find the cause, then `coreman-dev up`; tell the
+   user what actually happened, do not guess."""
 
 # 固定段，只给非开发模式的员工：规则文档按 AGENTS.md 索引 + docs/ 分篇存放，用到时再读。
 # 根目录自己就是带远端的 Git 仓库时由那个仓库的约定说了算，所以留给 agent 自己判断。
