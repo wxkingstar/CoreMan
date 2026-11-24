@@ -82,6 +82,55 @@ def test_service_definitions_do_not_restart_configuration_errors(tmp_path):
     assert lifecycle.fatal_exit_status("systemd-user") == EXIT_CONFIG
 
 
+class LaunchctlRecorder(Recorder):
+    """``launchctl print`` reports ``pid`` only after the given number of probes (None: never)."""
+
+    def __init__(self, running_after=None):
+        super().__init__()
+        self.running_after = running_after
+        self.probes = 0
+
+    def __call__(self, command, check=False, **kwargs):
+        super().__call__(command, check=check, **kwargs)
+        if list(map(str, command[:2])) == ["launchctl", "print"] and "/" in str(command[2]):
+            self.probes += 1
+            if self.running_after is not None and self.probes > self.running_after:
+                stdout = "com.example = {\n\tstate = running\n\tpid = 4242\n}\n"
+                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+            stopped = "\tstate = not running\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stopped, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+
+@pytest.fixture
+def launchd(home, monkeypatch):
+    monkeypatch.setattr(install_service, "launchd_domain", lambda: "gui/501")
+
+    def use(recorder):
+        monkeypatch.setattr(install_service.subprocess, "run", recorder)
+        return recorder
+
+    return use
+
+
+def test_launchd_start_does_not_kickstart_a_running_job(tmp_path, launchd):
+    recorder = launchd(LaunchctlRecorder(running_after=1))
+    install_service.start_service("launchd", tmp_path / "config.json")
+    assert recorder.ran("launchctl", "bootstrap", "gui/501")
+    assert not recorder.ran("launchctl", "kickstart")
+
+
+def test_launchd_start_kickstarts_a_job_launchd_left_stopped(
+    tmp_path, launchd, monkeypatch, capsys
+):
+    monkeypatch.setattr(install_service, "LAUNCHD_START_GRACE_SECONDS", 0)
+    recorder = launchd(LaunchctlRecorder(running_after=None))
+    install_service.start_service("launchd", tmp_path / "config.json")
+    kick = [c for c in recorder.calls if c[:2] == ["launchctl", "kickstart"]]
+    assert kick == [["launchctl", "kickstart", f"gui/501/{lifecycle.LAUNCHD_LABEL}"]]
+    assert "kickstart" in capsys.readouterr().err
+
+
 def test_systemd_working_directory_is_not_quoted(tmp_path):
     # systemd 不解析 WorkingDirectory= 的引号，带引号时报 "path is not absolute" 并拒绝整个 unit。
     unit = install_service.systemd_unit({"release": "/srv/rt/50%/release-1"}, tmp_path / "c.json")

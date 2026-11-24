@@ -47,6 +47,8 @@ EXIT_NOT_CONFIRMED = 3
 ONLINE_TIMEOUT_SECONDS = 60
 UPGRADE_TIMEOUT_SECONDS = 120
 STOP_TIMEOUT_SECONDS = 45
+# How long a freshly bootstrapped launchd job may take to get a pid before we kickstart it.
+LAUNCHD_START_GRACE_SECONDS = 5
 
 
 def systemd_quote(value: str) -> str:
@@ -211,6 +213,39 @@ def launchd_domain() -> str:
     return domain if probe.returncode == 0 else f"user/{os.getuid()}"
 
 
+def launchd_pid(target: str) -> int | None:
+    """The running pid of ``domain/label``, or None when it is not loaded or not running."""
+    result = subprocess.run(
+        ["launchctl", "print", target], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        return None
+    for line in (result.stdout or "").splitlines():
+        key, sep, value = line.strip().partition(" = ")
+        if key == "pid" and sep and value.isdigit():
+            return int(value)
+    return None
+
+
+def ensure_launchd_running(
+    target: str,
+    grace: float | None = None,
+    *,
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> None:
+    """``bootstrap`` only registers the job; RunAtLoad does not always start it (seen after an
+    upgrade, where the node stayed offline until a manual kickstart). Kickstart it if no
+    process shows up within the grace period."""
+    deadline = clock() + (LAUNCHD_START_GRACE_SECONDS if grace is None else grace)
+    while launchd_pid(target) is None:
+        if clock() >= deadline:
+            print("launchd 未拉起 Runtime 进程，正在 kickstart…", file=sys.stderr, flush=True)
+            run(["launchctl", "kickstart", target])
+            return
+        sleep(0.5)
+
+
 def write_service(kind: str, cfg: dict, config_path: Path) -> None:
     if kind == "launchd":
         write_private(launchd_plist_path(), plistlib.dumps(launchd_definition(cfg, config_path)))
@@ -226,7 +261,9 @@ def write_service(kind: str, cfg: dict, config_path: Path) -> None:
 
 def start_service(kind: str, config_path: Path) -> None:
     if kind == "launchd":
-        run(["launchctl", "bootstrap", launchd_domain(), str(launchd_plist_path())])
+        domain = launchd_domain()
+        run(["launchctl", "bootstrap", domain, str(launchd_plist_path())])
+        ensure_launchd_running(f"{domain}/{LAUNCHD_LABEL}")
     elif kind == "systemd":
         # A unit that hit 78 stays "failed"; clear it so a fixed config can start again.
         run_quiet(["systemctl", "--user", "reset-failed", SERVICE_NAME])
