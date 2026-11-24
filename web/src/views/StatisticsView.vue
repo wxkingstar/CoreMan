@@ -83,6 +83,9 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
           :label="t('statistics.newYork')"
           value="America/New_York"
         /><el-option
+          :label="t('statistics.losAngeles')"
+          value="America/Los_Angeles"
+        /><el-option
           label="UTC"
           value="UTC"
         />
