@@ -186,8 +186,8 @@ coreman bots observe-set demo-bot --unprompted-tokens on|off   # 没人点名的
 coreman bots observe-decisions demo-bot [--chat 群id] [--would-speak|--silent] [--limit 50] [--before 记录id] [--messages]
 coreman bots observe-review demo-bot 记录id should|should_not|none
 coreman bots alert-source-list demo-bot
-coreman bots alert-source-add demo-bot --chat 群id --sender-union-id 机器人union_id --service-user svc-demo [--dedupe-seconds 600]
-coreman bots alert-source-set demo-bot 来源id [--service-user svc-demo] [--dedupe-seconds 600] [--enable|--disable]
+coreman bots alert-source-add demo-bot --chat 群id --sender-union-id 机器人union_id --service-user svc-demo [--dedupe-seconds 600] [--skip-routine-recoveries]
+coreman bots alert-source-set demo-bot 来源id [--service-user svc-demo] [--dedupe-seconds 600] [--enable|--disable] [--skip-routine-recoveries|--no-skip-routine-recoveries]
 coreman bots alert-source-remove demo-bot 来源id
 ```
 

@@ -43,6 +43,10 @@ _RULE_NAME = re.compile(
     r"([^\]\n\"\\]{1,200})",
     re.IGNORECASE,
 )
+_TITLE_TAG = r"\[([^\[\]\r\n]+)\]|【([^【】\r\n]+)】"
+_RECOVERY_TAGS = re.compile(rf"^【恢复】(?P<tags>(?:\s*(?:{_TITLE_TAG}))*)")
+_ROUTINE_LEVELS = {"p1", "p2", "p3", "p4", "普通", "非紧急"}
+_URGENT_LEVELS = {"p0", "紧急", "urgent", "critical", "emergency"}
 
 
 def _raw_sender(raw: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -65,7 +69,34 @@ def sender_union_id(raw: dict[str, Any] | None, *, chat_id: str, message_id: str
     return union_id
 
 
-def alert_key(message: InboundMessage) -> str:
+def _card_title(content: str) -> str:
+    try:
+        card = json.loads(content)
+    except ValueError:
+        return ""
+    if not isinstance(card, dict):
+        return ""
+    title = card.get("title")
+    if not isinstance(title, str) or not title.strip():
+        header = card.get("header")
+        title = header.get("title") if isinstance(header, dict) else None
+        if isinstance(title, dict):
+            title = title.get("content")
+    return title.strip() if isinstance(title, str) else ""
+
+
+def _is_routine_recovery(title: str) -> bool:
+    match = _RECOVERY_TAGS.match(title)
+    if match is None:
+        return False
+    tags = {
+        (ascii_tag or chinese_tag).strip().casefold()
+        for ascii_tag, chinese_tag in re.findall(_TITLE_TAG, match["tags"])
+    }
+    return bool(tags & _ROUTINE_LEVELS) and tags.isdisjoint(_URGENT_LEVELS)
+
+
+def alert_key(message: InboundMessage, *, card_title: str | None = None) -> str:
     """同名告警的去重键：规则名，其次卡片标题，都取不到时用内容哈希。"""
     _, raw_message = _raw_sender(message.raw)
     content = str(raw_message.get("content") or "")
@@ -73,17 +104,9 @@ def alert_key(message: InboundMessage) -> str:
     found = _RULE_NAME.search(f"{text}\n{content}")
     if found and found.group(1).strip():
         return f"rule:{found.group(1).strip()}"
-    try:
-        card = json.loads(content)
-    except ValueError:
-        card = None
-    if isinstance(card, dict):
-        header = card.get("header")
-        title = card.get("title") or (
-            (header.get("title") or {}).get("content") if isinstance(header, dict) else None
-        )
-        if isinstance(title, str) and title.strip():
-            return f"title:{title.strip()[:200]}"
+    title = _card_title(content) if card_title is None else card_title
+    if title:
+        return f"title:{title[:200]}"
     return "hash:" + hashlib.sha256(f"{text}\n{content}".encode()).hexdigest()
 
 
@@ -147,11 +170,19 @@ async def trigger(
     mode = await session.scalar(select(Bot.group_observe).where(Bot.id == source.bot_id))
     if mode not in ("shadow", "on"):
         return None
-    key = alert_key(message)
+    _, raw_message = _raw_sender(message.raw)
+    card_title = _card_title(str(raw_message.get("content") or ""))
+    key = alert_key(message, card_title=card_title)
     state = {"alert_source_id": str(source.id), "alert_key": key}
     outcome = "would_intervene" if mode == "shadow" else "alert_intervene"
     task: Task | None = None
-    if await _duplicate(session, source, key, event_id, datetime.now(UTC)):
+    if (
+        source.skip_routine_recoveries
+        and raw_message.get("message_type") == "interactive"
+        and _is_routine_recovery(card_title)
+    ):
+        outcome = "alert_recovery"
+    elif await _duplicate(session, source, key, event_id, datetime.now(UTC)):
         outcome = "alert_duplicate"
     elif mode == "on":
         digest = hashlib.sha256(key.encode()).hexdigest()[:16]

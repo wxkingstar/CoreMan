@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select, update
 
 from coreman.core.chat import alert_sources
@@ -106,6 +107,44 @@ async def test_registered_bot_starts_task_when_on(db_session):
     task = await alert(db_session, bot, "m1", "告警名称: 网关异常")
     assert task is not None and task.kind == "chat"
     assert task.payload["origin"] == "alert" and task.payload["alert_source_id"] == str(source.id)
+    assert await decisions(db_session, bot) == ["alert_intervene"]
+
+
+async def test_configured_source_records_routine_recovery_without_task_or_dedupe(db_session):
+    bot, _, source = await setup(db_session)
+    source.skip_routine_recoveries = True
+    await db_session.commit()
+    title = "【恢复】 [P2][service] 接口延迟告警触发"
+    for mid, body in [
+        ("m1", {"title": title}),
+        ("m2", {"header": {"title": {"tag": "plain_text", "content": title}}}),
+    ]:
+        content = json.dumps(body, ensure_ascii=False)
+        assert await alert(db_session, bot, mid, title, content=content) is None
+        assert await _event(db_session, bot, mid) is not None
+        assert await alert(db_session, bot, mid, title, content=content) is None
+    assert await decisions(db_session, bot) == ["alert_recovery", "alert_recovery"]
+    assert await chat_tasks(db_session, bot) == []
+    assert await db_session.get(BotAlertState, (source.id, f"title:{title}")) is None
+
+
+@pytest.mark.parametrize(
+    ("enabled", "title"),
+    [
+        (False, "【恢复】 [P2][gateway] 核心接口延迟"),
+        (True, "【恢复】 [P0][gateway] 核心接口延迟"),
+        (True, "【恢复】 [P2]【紧急】 核心接口延迟"),
+        (True, "【恢复】 核心接口延迟"),
+        (True, "【告警】 [P2][gateway] 恢复流程失败"),
+    ],
+)
+async def test_other_alerts_still_start_investigation(db_session, enabled, title):
+    bot, _, source = await setup(db_session)
+    if enabled:
+        source.skip_routine_recoveries = True
+        await db_session.commit()
+    content = json.dumps({"title": title}, ensure_ascii=False)
+    assert await alert(db_session, bot, "m1", title, content=content) is not None
     assert await decisions(db_session, bot) == ["alert_intervene"]
 
 

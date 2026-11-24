@@ -37,9 +37,13 @@ async def test_crud_and_validation(client: httpx.AsyncClient, db_session: AsyncS
     assert created.status_code == 200
     source = created.json()["data"]
     assert source["enabled"] is True and source["dedupe_seconds"] == 600
+    assert source["skip_routine_recoveries"] is False
     assert (await client.post(url, json=body)).status_code == 409
+    configured = await client.patch(f"{url}/{source['id']}", json={"skip_routine_recoveries": True})
+    assert configured.json()["data"]["skip_routine_recoveries"] is True
     patched = await client.patch(f"{url}/{source['id']}", json={"enabled": False})
     assert patched.json()["data"]["enabled"] is False
-    assert len((await client.get(url)).json()["data"]["items"]) == 1
+    items = (await client.get(url)).json()["data"]["items"]
+    assert len(items) == 1 and items[0]["skip_routine_recoveries"] is True
     assert (await client.delete(f"{url}/{source['id']}")).status_code == 200
     assert (await client.get(url)).json()["data"]["items"] == []
