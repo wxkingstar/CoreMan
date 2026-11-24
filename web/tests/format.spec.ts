@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { formatBytes, formatDateTime, resetCountdown, secondsBetween, secondsParts } from '@/utils/format'
-import { setDisplayZone } from '@/utils/displayZone'
+import { setDisplayZone, systemDisplayZone } from '@/utils/displayZone'
 
 describe('formatDateTime', () => {
+  beforeEach(() => setDisplayZone('Asia/Shanghai'))
   it('renders in Asia/Shanghai regardless of host timezone', () => {
     expect(formatDateTime('2026-09-10T00:30:00Z')).toBe('2026-09-10 08:30:00')
     expect(formatDateTime('2026-09-10T08:30:00+08:00')).toBe('2026-09-10 08:30:00')
@@ -21,11 +22,26 @@ describe('formatDateTime', () => {
       setDisplayZone('America/New_York')
       expect(formatDateTime('2026-10-31T16:00:00Z')).toBe('2026-10-31 12:00:00') // EDT, UTC-4
       expect(formatDateTime('2026-11-02T17:00:00Z')).toBe('2026-11-02 12:00:00') // EST, UTC-5
-      setDisplayZone('UTC')
-      expect(formatDateTime('2026-11-02T17:00:00Z')).toBe('2026-11-02 17:00:00')
+      setDisplayZone('America/Los_Angeles')
+      expect(formatDateTime('2026-11-02T17:00:00Z')).toBe('2026-11-02 09:00:00') // PST, UTC-8
+      expect(localStorage.getItem('coreman.displayZone')).toBe('America/Los_Angeles')
     } finally {
       setDisplayZone('Asia/Shanghai')
     }
+  })
+})
+
+describe('systemDisplayZone', () => {
+  const summer = new Date('2026-07-01T00:00:00Z')
+  it('uses the system zone when it is one of the choices', () => {
+    expect(systemDisplayZone('America/Los_Angeles', summer)).toBe('America/Los_Angeles')
+    expect(systemDisplayZone('Asia/Shanghai', summer)).toBe('Asia/Shanghai')
+  })
+  it('maps other zones by current offset, falling back to Beijing', () => {
+    expect(systemDisplayZone('America/Toronto', summer)).toBe('America/New_York')
+    expect(systemDisplayZone('America/Vancouver', summer)).toBe('America/Los_Angeles')
+    expect(systemDisplayZone('Asia/Singapore', summer)).toBe('Asia/Shanghai')
+    expect(systemDisplayZone('Europe/London', summer)).toBe('Asia/Shanghai')
   })
 })
 
