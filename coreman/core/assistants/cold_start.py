@@ -66,7 +66,6 @@ HOURS = (("09:00", "18:00"), ("09:30", "19:00"), ("10:00", "19:00"), ("10:00", "
 ALWAYS = "always"
 ZONES = (
     "Asia/Shanghai",
-    "Asia/Tokyo",
     "Asia/Singapore",
     "Europe/London",
     "Europe/Berlin",
