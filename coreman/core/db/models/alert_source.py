@@ -37,6 +37,7 @@ class BotAlertSource(Base):
         Uuid, ForeignKey("users.id", ondelete="CASCADE")
     )
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    skip_routine_recoveries: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     dedupe_seconds: Mapped[int] = mapped_column(Integer, server_default=text("600"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")

@@ -30,12 +30,14 @@ class AlertSourceIn(BaseModel):
     sender_union_id: str = Field(min_length=1, max_length=128)
     service_user_id: uuid.UUID
     enabled: bool = True
+    skip_routine_recoveries: bool = False
     dedupe_seconds: int = Field(default=600, ge=0, le=86400)
 
 
 class AlertSourcePatch(BaseModel):
     service_user_id: uuid.UUID | None = None
     enabled: bool | None = None
+    skip_routine_recoveries: bool | None = None
     dedupe_seconds: int | None = Field(default=None, ge=0, le=86400)
 
 
@@ -46,6 +48,7 @@ def source_out(row: BotAlertSource) -> dict[str, Any]:
         "sender_union_id": row.sender_union_id,
         "service_user_id": str(row.service_user_id),
         "enabled": row.enabled,
+        "skip_routine_recoveries": row.skip_routine_recoveries,
         "dedupe_seconds": row.dedupe_seconds,
         "created_at": row.created_at,
     }
@@ -87,7 +90,11 @@ async def _audit(
         actor_login=user.login_name,
         target_type="bot_alert_source",
         target_id=str(row.id),
-        diff={"bot_id": str(row.bot_id), "service_user_id": str(row.service_user_id)},
+        diff={
+            "bot_id": str(row.bot_id),
+            "service_user_id": str(row.service_user_id),
+            "skip_routine_recoveries": row.skip_routine_recoveries,
+        },
         ip=request.client.host if request.client else None,
     )
 

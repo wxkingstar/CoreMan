@@ -937,11 +937,17 @@ def _register_observe(ops: Any) -> None:
     p.add_argument("--sender-union-id", required=True, help="告警机器人的飞书 union_id")
     p.add_argument("--service-user", required=True, help="服务用户：id、登录名或邮箱")
     p.add_argument("--dedupe-seconds", type=int, default=600, help="同名告警的去重窗口（秒）")
+    p.add_argument("--skip-routine-recoveries", action="store_true", help="常规恢复卡只留档")
     p = leaf(ops, "alert-source-set", "修改告警来源（只改给出的字段）", alert_source_set)
     _bot_arg(p)
     p.add_argument("source", metavar="来源 id")
     p.add_argument("--service-user", help="服务用户：id、登录名或邮箱")
     p.add_argument("--dedupe-seconds", type=int, help="同名告警的去重窗口（秒）")
+    p.add_argument(
+        "--skip-routine-recoveries",
+        action=argparse.BooleanOptionalAction,
+        help="常规恢复卡只留档",
+    )
     enabled = p.add_mutually_exclusive_group()
     enabled.add_argument("--enable", action="store_true", help="启用")
     enabled.add_argument("--disable", action="store_true", help="停用")
@@ -964,6 +970,7 @@ async def alert_source_list(c: AdminClient, args: argparse.Namespace) -> int:
             ("发送者", "sender_union_id"),
             ("服务用户", "service_user_id"),
             ("启用", "enabled"),
+            ("常规恢复只留档", "skip_routine_recoveries"),
             ("去重秒数", "dedupe_seconds"),
         ],
         empty="（还没有告警来源）",
@@ -974,16 +981,15 @@ async def alert_source_list(c: AdminClient, args: argparse.Namespace) -> int:
 async def alert_source_add(c: AdminClient, args: argparse.Namespace) -> int:
     bot = await c.bot(args.bot)
     user = await c.user(args.service_user)
-    data = await c.request(
-        "POST",
-        f"{BOTS}/{bot['id']}/alert-sources",
-        body={
-            "chat_id": args.chat,
-            "sender_union_id": args.sender_union_id,
-            "service_user_id": user["id"],
-            "dedupe_seconds": args.dedupe_seconds,
-        },
-    )
+    body: dict[str, Any] = {
+        "chat_id": args.chat,
+        "sender_union_id": args.sender_union_id,
+        "service_user_id": user["id"],
+        "dedupe_seconds": args.dedupe_seconds,
+    }
+    if args.skip_routine_recoveries:
+        body["skip_routine_recoveries"] = True
+    data = await c.request("POST", f"{BOTS}/{bot['id']}/alert-sources", body=body)
     return _done(args, data, f"已登记告警来源 {data['id']}")
 
 
@@ -994,6 +1000,8 @@ async def alert_source_set(c: AdminClient, args: argparse.Namespace) -> int:
         body["service_user_id"] = (await c.user(args.service_user))["id"]
     if args.dedupe_seconds is not None:
         body["dedupe_seconds"] = args.dedupe_seconds
+    if args.skip_routine_recoveries is not None:
+        body["skip_routine_recoveries"] = args.skip_routine_recoveries
     if args.enable or args.disable:
         body["enabled"] = args.enable
     if not body:
