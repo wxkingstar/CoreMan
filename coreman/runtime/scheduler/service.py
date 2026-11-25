@@ -45,6 +45,8 @@ MAX_HEARTBEAT_SECONDS = 10.0
 RECONCILE_SECONDS = 300.0
 CONTACT_SYNC_CHECK_SECONDS = 300.0
 RULES_BACKUP_CHECK_SECONDS = 600.0
+# 任务平台的账本镜像与截止提醒。
+WORK_TASKS_SECONDS = 30
 # 个人助理的开通与停用：多久推进一次（授权完成后最多这么久就开通好）。
 ASSISTANT_LIFECYCLE_SECONDS = 5.0
 # 个人助理盯消息：多久认领一次到期的助理（每位助理自己的轮询间隔是 60 秒起）。
@@ -138,6 +140,7 @@ class SchedulerService(Service):
                 ("scheduler-assistant-watch", self._assistant_watch_loop()),
                 ("scheduler-assistant-delivery", self._assistant_delivery_loop()),
                 ("scheduler-assistant-shift", self._assistant_shift_loop()),
+                ("scheduler-work-tasks", self._work_tasks_loop()),
             )
         ]
         self.ready = True
@@ -346,6 +349,24 @@ class SchedulerService(Service):
             except Exception:
                 self._log.exception("escalation_tick_failed")
             await self._sleep(30)
+
+    async def _work_tasks_loop(self) -> None:
+        """任务平台：账本镜像（API 任务、求助）与截止提醒。"""
+        from coreman.core.work_tasks import due, ledger
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    now = datetime.now(UTC)
+                    async with self._factory() as session:
+                        mirrored = await ledger.sync(session, now)
+                        reminded = await due.tick(session, now, get_settings().public_base_url)
+                        await session.commit()
+                    if mirrored or reminded:
+                        self._log.info("work_tasks_tick", mirrored=mirrored, reminded=reminded)
+            except Exception as exc:  # noqa: BLE001 出错只记类型，下一轮再来
+                self._log.warning("work_tasks_tick_failed", error=type(exc).__name__)
+            await self._sleep(WORK_TASKS_SECONDS)
 
     async def _relay_health_loop(self) -> None:
         from coreman.core.observability.relay_health import tick

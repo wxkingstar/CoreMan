@@ -70,6 +70,13 @@ class WorkTask(Base):
         Index("work_tasks_principal_idx", "principal_user_id"),
         Index("work_tasks_requester_idx", "requester_user_id"),
         Index("work_tasks_parent_idx", "parent_id"),
+        Index(
+            "work_tasks_origin_ref_idx",
+            "origin_ref",
+            unique=True,
+            postgresql_where=text("origin_ref IS NOT NULL"),
+        ),
+        Index("work_tasks_due_idx", "due_at", postgresql_where=text("due_at IS NOT NULL")),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     code: Mapped[str] = mapped_column(
@@ -140,6 +147,10 @@ class WorkTask(Base):
     # auto：发起时就有人在等结果，交出去就开工；manual：人派给 AI 员工的，等人叫它或定时领取。
     start_mode: Mapped[str] = mapped_column(Text, server_default=text("'auto'"))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 镜像的账本记录（`api:<编号>`、`bot_help:<编号>`、`human_help:<编号>`）：只读，在原处处理。
+    origin_ref: Mapped[str | None] = mapped_column(Text)
+    due_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    overdue_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

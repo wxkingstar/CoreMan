@@ -130,6 +130,9 @@ def can_manage(row: WorkTask, user: User) -> bool:
 
 
 def _manage(row: WorkTask, user: User) -> None:
+    if row.origin_ref:
+        # 镜像的账本记录（API 任务、求助）：在原处处理，这里只能看、评论、关注。
+        raise WorkTaskError(409, "这是自动记下的记录，请在原处处理")
     if not can_manage(row, user):
         raise WorkTaskError(403, "只有发起人、代表人、执行人、验收人或平台管理员能这样做")
 
@@ -441,6 +444,8 @@ async def comment(session: AsyncSession, row: WorkTask, user: User, text: str) -
 
 async def complete(session: AsyncSession, row: WorkTask, user: User, result: str) -> None:
     """人类执行人交付：要验收的进待验收，不要的直接完成。"""
+    if row.origin_ref:
+        raise WorkTaskError(409, "这是自动记下的记录，请在原处处理")
     if row.assignee_user_id != user.id:
         raise WorkTaskError(403, "只有执行人能交付")
     if row.status not in HELD:
@@ -509,6 +514,7 @@ async def update(
         changes.append("优先级")
     if "due_at" in fields:
         row.due_at = fields["due_at"]
+        row.due_reminded_at = row.overdue_notified_at = None
         changes.append("截止时间")
     if "reviewer_user_id" in fields:
         reviewer = fields["reviewer_user_id"]

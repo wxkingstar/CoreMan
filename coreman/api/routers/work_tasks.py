@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -21,6 +21,7 @@ from coreman.api.deps import current_user, get_session
 from coreman.api.errors import ApiError, not_found
 from coreman.api.security import verify_csrf
 from coreman.core.db.models import (
+    WORK_TASK_OPEN,
     WORK_TASK_STATUSES,
     Bot,
     GroupObserveDecision,
@@ -115,6 +116,7 @@ def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -
         "summary": row.summary,
         "status": row.status,
         "source": row.source,
+        "mirror": bool(row.origin_ref),
         "platform": row.platform,
         "chat_id": row.chat_id,
         "requester_name": row.requester_name,
@@ -307,6 +309,124 @@ async def _detail(session: AsyncSession, row: WorkTask, user: User) -> dict[str,
                 if decision is not None
                 else None
             ),
+        },
+    }
+
+
+@router.get("/stats")
+async def work_task_stats(
+    days: int = Query(default=30, ge=1, le=365),
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """运营统计：积压、各来源处理时长、平均交接次数、AI 员工一次验收通过率。"""
+    _active(user)
+    since = datetime.now(UTC) - timedelta(days=days)
+    open_rows = (
+        await session.execute(
+            select(
+                WorkTask.assignee_bot_id,
+                WorkTask.assignee_user_id,
+                func.count(),
+                func.count().filter(WorkTask.due_at < func.now()),
+            )
+            .where(WorkTask.status.in_(WORK_TASK_OPEN))
+            .group_by(WorkTask.assignee_bot_id, WorkTask.assignee_user_id)
+            .order_by(func.count().desc())
+            .limit(20)
+        )
+    ).all()
+    names = await _names(
+        session,
+        {b for b, _, _, _ in open_rows if b},
+        {u for _, u, _, _ in open_rows if u},
+    )
+    backlog = [
+        {
+            "assignee": _actor(bot_id, user_id, names),
+            "open": int(n),
+            "overdue": int(overdue),
+        }
+        for bot_id, user_id, n, overdue in open_rows
+    ]
+    hours = func.extract("epoch", WorkTask.closed_at - WorkTask.created_at) / 3600
+    by_source = (
+        await session.execute(
+            select(
+                WorkTask.source,
+                func.count(),
+                func.count().filter(WorkTask.status == "done"),
+                func.avg(hours).filter(WorkTask.status == "done"),
+            )
+            .where(WorkTask.created_at >= since, WorkTask.status != "shadow")
+            .group_by(WorkTask.source)
+        )
+    ).all()
+    closed = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkTask)
+            .where(WorkTask.closed_at >= since, WorkTask.status == "done")
+        )
+        or 0
+    )
+    handoffs = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkTaskEvent)
+            .join(WorkTask, WorkTask.id == WorkTaskEvent.work_task_id)
+            .where(
+                WorkTaskEvent.kind == "handoff",
+                WorkTask.closed_at >= since,
+                WorkTask.status == "done",
+            )
+        )
+        or 0
+    )
+    reviewed = select(WorkTaskEvent.work_task_id).where(
+        WorkTaskEvent.kind.in_(("review_pass", "review_reject")),
+        WorkTaskEvent.created_at >= since,
+    )
+    rejected = select(WorkTaskEvent.work_task_id).where(WorkTaskEvent.kind == "review_reject")
+    agent_reviewed = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkTask)
+            .where(WorkTask.id.in_(reviewed), WorkTask.assignee_bot_id.is_not(None))
+        )
+        or 0
+    )
+    agent_first_pass = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkTask)
+            .where(
+                WorkTask.id.in_(reviewed),
+                WorkTask.assignee_bot_id.is_not(None),
+                WorkTask.id.not_in(rejected),
+            )
+        )
+        or 0
+    )
+    return {
+        "code": 0,
+        "data": {
+            "days": days,
+            "backlog": backlog,
+            "by_source": [
+                {
+                    "source": source,
+                    "created": int(total),
+                    "done": int(done),
+                    "avg_hours": round(float(avg), 1) if avg is not None else None,
+                }
+                for source, total, done, avg in by_source
+            ],
+            "handoffs_per_task": round(handoffs / closed, 2) if closed else None,
+            "agent_first_pass_rate": (
+                round(agent_first_pass / agent_reviewed, 3) if agent_reviewed else None
+            ),
+            "agent_reviewed": agent_reviewed,
         },
     }
 
