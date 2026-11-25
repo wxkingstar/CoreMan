@@ -8,6 +8,14 @@ CoreMan 登记了公司各业务系统的 OpenAPI 描述，并整理成分层的
 - 其他系统（`call_mode` 为 `direct`）：Agent 用你本机环境变量里的业务系统令牌直接调用，这个令牌不经过 CoreMan。
 - 能做什么由业务系统按你本人的权限判定，和你自己操作时一样。CoreMan 的登录令牌只用来认你，从不转发给业务系统。
 
+## 快速开始（Claude Code）
+
+```bash
+claude mcp add --transport http coreman-systems '{{COREMAN_BASE_URL}}/api/systems/mcp?token_env=SSO_TOKEN'
+```
+
+然后在 Claude Code 里执行 `/mcp`，选 `coreman-systems`，在打开的浏览器里登录 CoreMan 并点「允许」。之后直接对 Claude Code 说要查什么、做什么，例如「查一下库存系统有哪些和出库单相关的操作」。直连系统还要按第 1 节准备令牌；Codex 和其他客户端见第 3 节。想在终端里管理 AI 员工等，用 [命令行 coreman](coreman-cli.md)。
+
 ## 1. 准备令牌
 
 只用平台代理的系统可以跳过这一步。直连的系统要把你在业务系统可用的令牌放进本机环境变量，例如统一登录（SSO）的个人访问令牌：
