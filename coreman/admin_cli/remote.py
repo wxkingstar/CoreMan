@@ -32,6 +32,34 @@ LOGIN_TIMEOUT = 300
 TIMEOUT = 300
 # 访问令牌离过期不到这么久就先续期，免得命令跑到一半 401。
 REFRESH_MARGIN = 60
+# 等别的命令续期完、放开锁时的轮询间隔（秒）。
+LOCK_POLL = 0.05
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 class RemoteError(Exception):
@@ -237,24 +265,61 @@ async def login(server: str, *, open_browser: bool = True) -> dict[str, Any]:
         callback_server.close()
 
 
+@contextlib.asynccontextmanager
+async def _refresh_lock() -> AsyncIterator[None]:
+    """本机所有 coreman 进程共用一把续期锁（登录信息旁边的 .lock 文件）。
+
+    轮询非阻塞锁：等的时候不卡住事件循环，同一进程里另一个正在续期的协程也能跑完放锁。
+    进程退出时系统会自动放锁，不会留下死锁。
+    """
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        while not _try_lock(fd):  # noqa: ASYNC110 锁在别的进程手里，没有可等的事件
+            await asyncio.sleep(LOCK_POLL)
+        try:
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
+
+
 async def refresh(creds: Credentials) -> Credentials:
-    async with _http(creds.server) as http:
-        r = await http.post(
-            "/api/oauth/token",
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": creds.refresh_token,
-                "client_id": creds.client_id,
-            },
-        )
-    if r.status_code != 200:
-        raise RemoteError(f"登录已失效（{_oauth_error(r)}），请重新 coreman login")
-    tokens = r.json()
-    creds.access_token = tokens["access_token"]
-    creds.refresh_token = tokens["refresh_token"]
-    creds.expires_at = time.time() + int(tokens.get("expires_in", 3600))
-    save(creds)
-    return creds
+    """`creds` 的访问令牌过期或被拒时换新的。
+
+    同一台电脑上并行的多条命令会同时发现过期，而续期令牌是轮换的：同一个用第二次，服务端会当成
+    泄露、吊销整次登录。所以续期放在锁里，拿到锁先重读本机登录信息，别的命令已经换过、新令牌
+    还能用就直接用；只有确实没人换过才去续期并写回。
+    """
+    async with _refresh_lock():
+        latest = load()
+        if latest is not None and latest.server != creds.server:
+            raise RemoteError(f"本机已改为登录 {latest.server}，请重新运行命令")
+        current = latest or creds
+        if (
+            current.access_token != creds.access_token
+            and current.expires_at - REFRESH_MARGIN >= time.time()
+        ):
+            return current
+        async with _http(current.server) as http:
+            r = await http.post(
+                "/api/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": current.refresh_token,
+                    "client_id": current.client_id,
+                },
+            )
+        if r.status_code != 200:
+            raise RemoteError(f"登录已失效（{_oauth_error(r)}），请重新 coreman login")
+        tokens = r.json()
+        current.access_token = tokens["access_token"]
+        current.refresh_token = tokens["refresh_token"]
+        current.expires_at = time.time() + int(tokens.get("expires_in", 3600))
+        save(current)
+        return current
 
 
 async def logout() -> bool:
