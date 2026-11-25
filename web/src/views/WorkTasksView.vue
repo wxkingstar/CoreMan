@@ -506,7 +506,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
             </el-button>
           </template>
           <el-button
-            v-if="mine && ['todo', 'in_progress', 'waiting'].includes(detail.status) && !detail.ask"
+            v-if="mine && !detail.mirror && ['todo', 'in_progress', 'waiting'].includes(detail.status) && !detail.ask"
             size="small"
             type="primary"
             data-test="deliver"

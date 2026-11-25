@@ -1,11 +1,11 @@
-"""统一账本：把 API 任务、AI 员工互相求助、向同事求助镜像成任务，任务页上一处看全。
+"""统一账本：把 API 任务、AI 员工互相求助、向同事求助、人工求助镜像成任务，任务页上一处看全。
 
 这些事各有自己的执行逻辑（触达、过期、续跑），这里不插手：调度器定期按原表建镜像、刷新状态。
 镜像只读（`origin_ref` 不为空），在原处处理；发生在任务会话里的求助挂成那件任务的子任务。
 
 范围：新建镜像只看最近 7 天的原记录（更早的历史不回填）；已有镜像只要还没结束，不论多久都继续
-刷新，直到原记录结束。私聊里发起的（API 任务回到私聊、私聊或定时任务里向同事求助）只记谁找谁、
-状态，不复制内容：任务页所有成员都能看，私聊内容不该因此外露。
+刷新，直到原记录结束。私聊里发起的（API 任务回到私聊、私聊或定时任务里向同事求助、人工求助——
+它总是私发给被问的人）只记谁找谁、状态，不复制内容：任务页所有成员都能看，私聊内容不该因此外露。
 见 docs/superpowers/specs/2026-11-25-company-task-platform.md §7。
 """
 
@@ -27,6 +27,7 @@ from coreman.core.db.models import (
     Bot,
     BotCollaboration,
     BotCollaborationRoute,
+    Escalation,
     HumanCollaboration,
     Task,
     User,
@@ -114,7 +115,11 @@ def _event(session: AsyncSession, row: WorkTask, text: str, detail: dict[str, An
 
 
 async def _sources(
-    session: AsyncSession, model: Any, prefix: str, now: datetime
+    session: AsyncSession,
+    model: Any,
+    prefix: str,
+    now: datetime,
+    parse: Callable[[str], Any] = uuid.UUID,
 ) -> tuple[list[Any], dict[str, WorkTask]]:
     """要处理的原记录：最近 7 天新建的，加上镜像还没结束的（不论多久）。"""
     rows = list(
@@ -136,7 +141,7 @@ async def _sources(
     stale = []
     for ref in open_refs:
         try:
-            source_id = uuid.UUID(str(ref).removeprefix(prefix))
+            source_id = parse(str(ref).removeprefix(prefix))
         except ValueError:
             continue
         if source_id not in known:
@@ -318,10 +323,68 @@ async def _human_help(session: AsyncSession, now: datetime) -> int:
     return await _each(session, rows, one)
 
 
+# 人工求助怎么结束的：给人看的一句。
+_RESOLUTION = {
+    "agent": "已答复",
+    "observed": "线下已解决",
+    "offline": "对方不在，已改线下处理",
+    "expired": "没人回复，已过期",
+}
+
+
+async def _escalations(session: AsyncSession, now: datetime) -> int:
+    rows, mirrors = await _sources(session, Escalation, "escalation:", now, parse=int)
+
+    async def one(row: Escalation) -> bool:
+        ref = f"escalation:{row.id}"
+        mirror = mirrors.get(ref)
+        to = await session.get(User, row.to_user_id)
+        created = False
+        if mirror is None:
+            bot = await session.get(Bot, row.bot_id)
+            asker = await session.get(User, row.from_user_id) if row.from_user_id else None
+            who = bot.name if bot else "AI 员工"
+            mirror = _mirror(
+                ref=ref,
+                title=clip(f"人工求助：问{name_of(to)}", TITLE_MAX),
+                brief="",
+                source="collaboration",
+                parent=None,
+                summary=clip(f"{who}向{name_of(to)}求助", SUMMARY_MAX),
+                requester_bot_id=row.bot_id,
+                requester_user_id=asker.id if asker else None,
+                requester_name=who,
+                principal_user_id=asker.id if asker else None,
+                assignee_user_id=row.to_user_id,
+                platform="wecom" if row.notify_platform.startswith("wecom") else "feishu",
+                created_at=row.created_at,
+            )
+            session.add(mirror)
+            await session.flush()
+            mirrors[ref] = mirror
+            _event(session, mirror, f"{who}向{name_of(to)}发起人工求助", {"escalation": ref})
+            created = True
+        if row.status in ("pending", "queued"):
+            waiting = f"等{name_of(to)}回复" if row.status == "pending" else "排队等前一条求助结束"
+            target, summary = "running", ""
+        elif row.status == "replied":
+            target, summary, waiting = "running", "", ""
+        elif row.status == "completed":
+            target, waiting = "done", ""
+            summary = _RESOLUTION.get(row.resolution or "agent", "已答复")
+        else:
+            target, waiting = "cancelled", ""
+            summary = _RESOLUTION.get(row.resolution or "", "已取消")
+        return _apply(mirror, target, now, summary, waiting) or created
+
+    return await _each(session, rows, one)
+
+
 async def sync(session: AsyncSession, now: datetime) -> int:
     """建新镜像、刷新没结束的镜像；返回改动条数。"""
     return (
         await _api_tasks(session, now)
         + await _bot_help(session, now)
         + await _human_help(session, now)
+        + await _escalations(session, now)
     )
