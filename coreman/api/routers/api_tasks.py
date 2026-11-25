@@ -20,7 +20,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.infra_auth import require_scope
 from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.security import verify_csrf
-from coreman.core.api_tasks import groups, service, tokens, uploads
+from coreman.core.api_tasks import control, groups, service, tokens, uploads
 from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
@@ -34,6 +34,7 @@ from coreman.core.db.models import (
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["api-tasks"])
+tasks_client = require_scope(service.CLIENT_SCOPE)
 
 
 def _error(exc: TokenError) -> ApiError:
@@ -124,6 +125,78 @@ async def _own_task(
     return row
 
 
+# 业务系统的列表与批量取消要排在 `/api/infra/tasks/{task_id}` 前面：否则 `run` 会被当成任务 id。
+ClientState = Literal["open", "queued", "running"]
+
+
+@router.get("/api/infra/tasks/run")
+async def list_client_tasks(
+    state: ClientState = "open",
+    bot_key: str | None = Query(default=None, min_length=1, max_length=50),
+    chat_id: str | None = Query(default=None, min_length=1, max_length=128),
+    user: str | None = Query(default=None, min_length=1, max_length=128),
+    client: ApiClient = Depends(tasks_client),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """这个调用方还没结束的任务（最早的在前，最多 100 条），以及各承接群现在忙不忙。"""
+    try:
+        rows = await control.open_rows(
+            session, client, state=state, bot_key=bot_key, chat_id=chat_id, subject=user
+        )
+        groups_now = await control.group_states(session, client, bot_key, chat_id)
+    except TokenError as exc:
+        raise _error(exc) from None
+    items = [await service.view(session, row) for row in rows]
+    await session.commit()
+    return {"code": 0, "data": {"items": items, "groups": groups_now}}
+
+
+class ClientCancelIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # 按 id 取消；不给 ids 时按下面的条件取消这个调用方所有符合的任务。
+    ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=control.LIMIT)
+    state: ClientState = "open"
+    bot_key: str | None = Field(default=None, min_length=1, max_length=50)
+    chat_id: str | None = Field(default=None, min_length=1, max_length=128)
+    user: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+@router.post("/api/infra/tasks/run/cancel")
+async def cancel_client_tasks(
+    body: ClientCancelIn,
+    request: Request,
+    client: ApiClient = Depends(tasks_client),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """批量取消这个调用方自己发起、还没结束的任务：排队的直接不做，执行中的当场停下。"""
+    try:
+        rows = await control.open_rows(
+            session,
+            client,
+            state=body.state,
+            ids=body.ids,
+            bot_key=body.bot_key,
+            chat_id=body.chat_id,
+            subject=body.user,
+        )
+    except TokenError as exc:
+        raise _error(exc) from None
+    done = await control.cancel_many(session, client, rows)
+    if done:
+        await record_audit(
+            session,
+            action="api_task.cancel",
+            actor_id=None,
+            actor_login=client.app_key,
+            target_type="api_client",
+            target_id=client.app_key,
+            diff={"api_task_ids": [str(i) for i in done]},
+            ip=client_ip(request),
+        )
+    await session.commit()
+    return {"code": 0, "data": {"cancelled": [str(i) for i in done]}}
+
+
 @router.get("/api/infra/tasks/{task_id}")
 async def get_task(
     task_id: uuid.UUID, request: Request, session: AsyncSession = Depends(get_session)
@@ -168,7 +241,6 @@ class ClientUserIn(BaseModel):
     user: str | None = Field(default=None, min_length=1, max_length=128)
 
 
-tasks_client = require_scope(service.CLIENT_SCOPE)
 tasks_upload_client = require_scope(service.CLIENT_SCOPE, upload=True)
 
 
@@ -339,7 +411,7 @@ async def cancel_client_task(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     row = await _client_task(session, client, task_id, body.user)
-    await service.cancel(session, row)
+    await control.cancel(session, client, row)
     await session.commit()
     return {"code": 0, "data": await service.view(session, row)}
 
