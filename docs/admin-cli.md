@@ -621,7 +621,7 @@ coreman clients token-providers
 
 群承接：调用方为某个 AI 员工配了群承接后，驱动它时不再指定员工，任务以配置的服务账号（必须是在用的 service 账号）在群的主会话里运行，确认卡发到群里按点卡人身份执行。AI 员工要先在调用方的可驱动列表里（`--bot`）。详见 [API 驱动 AI 员工](features/api-tasks.md#群承接模式)。
 
-## 审计日志、统计、对话记录与任务
+## 审计日志、统计与对话记录
 
 ```bash
 coreman audit list [--actor alice] [--action bot.] [--target-type bot] [--target-id ID] \
@@ -631,11 +631,44 @@ coreman chats list [--bot sales_bot] [--user alice] [--status error] [--chat-typ
   [--token-id jti] [--since 时间] [--until 时间] [--limit 100]
 coreman chats show 12345
 coreman chats stats [与 list 相同的筛选]
-coreman tasks list [--status running] [--bot sales_bot] [--chat-id 群] [--keyword 词] [--limit 50] [--before-id 100]
-coreman tasks show T-12
 ```
 
-审计日志需要 AI 委员会或平台管理员角色，`--action` 按前缀匹配，`--actor` 按登录名模糊匹配。统计与任务所有成员都能看，统计只有聚合数字，费用为估算。对话记录只列出自己有份的部分（自己管的 AI 员工或自己说过的话；私聊只有本人能看），列表只有摘要，全文用 `chats show`。列表默认显示最新 50 条，`--limit` 调整。
+审计日志需要 AI 委员会或平台管理员角色，`--action` 按前缀匹配，`--actor` 按登录名模糊匹配。统计所有成员都能看，只有聚合数字，费用为估算。对话记录只列出自己有份的部分（自己管的 AI 员工或自己说过的话；私聊只有本人能看），列表只有摘要，全文用 `chats show`。列表默认显示最新 50 条，`--limit` 调整。
+
+## 任务平台
+
+与管理台「任务」页一致，见 [全公司任务平台](superpowers/specs/2026-11-25-company-task-platform.md)。
+
+```bash
+# 查看
+coreman tasks list [--view all|needs_me|created|watching] [--status todo] [--assignee 执行人] \
+  [--chat-id 群] [--keyword 词] [--include-shadow] [--limit 50] [--before-id 100]
+coreman tasks show T-12                     # 现在在等什么、待回答的问题、子任务、产出、事件、运行记录、完整汇报
+coreman tasks stats [--days 30]             # 积压、各来源处理时长、交接次数、AI 员工一次验收通过率
+
+# 新建与指派
+coreman tasks create "整理供应商名单" [--summary 一句话] [--brief 文字 | --brief-file brief.md] \
+  [--assignee bob] [--reviewer alice] [--review on|off] [--priority normal|high|urgent] [--due 2026-12-01T18:00]
+coreman tasks assign T-12 sales_bot [--note 交接说明] [--review on|off]
+
+# 处理
+coreman tasks answer T-12 accept                    # 接受；拒绝要写理由：answer T-12 decline "这周排不开"
+coreman tasks answer T-12 reject "要按渠道拆开"      # 验收退回；通过是 pass；其他是 other "说明"
+coreman tasks comment T-12 "推荐 A 场地"
+coreman tasks complete T-12 ["交付说明"]
+coreman tasks reopen T-12 ["原因"]
+coreman tasks cancel T-12 ["原因"] --yes
+coreman tasks update T-12 [--title …] [--summary …] [--brief-file …] [--priority …] [--due … | --no-due] \
+  [--reviewer … | --no-reviewer] [--review on|off]
+coreman tasks watch T-12 --on|--off
+```
+
+- 执行人可以是 AI 员工（标识、名称或 id）或成员（登录名、邮箱或姓名）；同一个名字两边都有时写 `bot:sales_bot` 或 `user:bob`。
+- `list` 默认不含调度试运行（shadow）的记录，加 `--include-shadow` 或 `--status shadow` 查看；`--view needs_me` 是待我处理（要我回答、我手上的、等我验收的）。
+- `answer` 默认回答任务当前的问题，选项 key 见 `show` 的「选项」行；问题已经变了会报错，重新 `show` 一下再答。
+- 截止时间不带时区时按本机时区。
+- 指派给 AI 员工的任务不会自动开工：在飞书里对它说「做 T-12」叫它开工（`show` 的「现在」一行会提示），命令行不提供开工操作。
+- 所有成员都能看、评论、关注；改任务（指派、完成、取消、重开、修改）限发起人、代表人、执行人、验收人和平台管理员。写操作成功后打印编号、状态和现在在等什么，`--json` 输出完整详情。
 
 ## 其余操作
 

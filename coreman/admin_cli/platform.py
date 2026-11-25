@@ -1,15 +1,16 @@
-"""平台管理：平台设置、模型目录与价格、平台应用、接口调用方、审计日志、统计、对话记录与任务跟进。"""
+"""平台管理：平台设置、模型目录与价格、平台应用、接口调用方、审计日志、统计、对话记录与任务平台。"""
 
 from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from typing import Any
 
 from coreman.admin_cli import output
 from coreman.admin_cli.base import add_yes, changed, group, leaf, on_off, read_text, require_yes
 from coreman.admin_cli.client import PAGE_SIZE, AdminClient, CliError
-from coreman.core.db.models import CAPABILITIES, WORK_TASK_STATUSES
+from coreman.core.db.models import CAPABILITIES, WORK_TASK_PRIORITIES, WORK_TASK_STATUSES
 from coreman.core.relay.models import backend_of
 from coreman.core.settings_schema import SettingsPatch
 
@@ -1188,31 +1189,164 @@ async def chats_stats(c: AdminClient, args: argparse.Namespace) -> int:
     return 0
 
 
-# ---- 任务跟进 ----
+# ---- 任务平台 ----
 
 
 def register_tasks(sub: Any) -> None:
-    ops = group(sub, "tasks", "任务跟进：调度员分派的任务（只读）")
+    ops = group(sub, "tasks", "任务平台：查看、新建、指派、回答、评论、完成任务（同网页任务页）")
     p = leaf(ops, "list", "列出任务，最新的在前", tasks_list)
+    p.add_argument(
+        "--view",
+        choices=("all", "needs_me", "created", "watching"),
+        default="all",
+        help="all 全部（默认）、needs_me 待我处理、created 我发起的、watching 我关注的",
+    )
     p.add_argument("--status", choices=WORK_TASK_STATUSES)
-    p.add_argument("--bot", metavar="AI员工", help="承接任务的 AI 员工")
+    p.add_argument("--assignee", metavar="执行人", help=ASSIGNEE_HELP)
+    p.add_argument("--bot", metavar="AI员工", help="承接任务的 AI 员工（同 --assignee bot:…）")
     p.add_argument("--chat-id", help="群聊 id")
     p.add_argument("--keyword", help="在编号、标题与摘要里搜索")
+    p.add_argument("--include-shadow", action="store_true", help="包含调度试运行（shadow）的记录")
     p.add_argument("--limit", type=int, default=50, help="最多显示几条（1-200）")
     p.add_argument("--before-id", type=int, metavar="id", help="只看 id 小于它的（翻页用）")
-    leaf(ops, "show", "查看任务详情与事件", tasks_show).add_argument("code", help="任务编号")
+    leaf(ops, "show", "查看任务详情、待回答的问题、事件与运行记录", tasks_show).add_argument(
+        "code", help="任务编号"
+    )
+
+    p = leaf(ops, "create", "新建任务（指派给 AI 员工后要在飞书里叫它开工）", tasks_create)
+    p.add_argument("title", help="标题")
+    p.add_argument("--summary", help="一句话说明")
+    add_brief(p)
+    p.add_argument("--assignee", metavar="执行人", help=ASSIGNEE_HELP)
+    add_task_fields(p)
+
+    p = leaf(ops, "assign", "指派或改派（交给成员或 AI 员工）", tasks_assign)
+    p.add_argument("code", help="任务编号")
+    p.add_argument("assignee", metavar="执行人", help=ASSIGNEE_HELP)
+    p.add_argument("--note", default="", help="交接说明")
+    p.add_argument("--review", type=on_off, metavar="on|off", help="交付后是否要验收")
+
+    p = leaf(
+        ops, "answer", "回答任务上待回答的问题（接受/拒绝、验收通过/退回、其他）", tasks_answer
+    )
+    p.add_argument("code", help="任务编号")
+    p.add_argument(
+        "option",
+        help="选项 key：accept、decline、pass、reject、other 或问题给出的其他选项",
+    )
+    p.add_argument("text", nargs="?", default="", help="补充说明（decline、reject、other 必填）")
+    p.add_argument("--ask-id", help="问题 id（默认取任务当前的问题）")
+
+    for name, help_text in (
+        ("comment", "评论；AI 员工停下来等人时，能管这件事的人评论会交回它接着做"),
+        ("complete", "标记完成，可附交付说明"),
+        ("reopen", "重新打开已完成或已取消的任务，可附原因"),
+        ("cancel", "取消任务，可附原因"),
+    ):
+        p = leaf(ops, name, help_text, tasks_text)
+        p.add_argument("code", help="任务编号")
+        p.add_argument("text", nargs="?" if name != "comment" else None, default="", help="内容")
+        if name == "cancel":
+            add_yes(p)
+
+    p = leaf(ops, "update", "修改任务（只改给出的字段）", tasks_update)
+    p.add_argument("code", help="任务编号")
+    p.add_argument("--title", help="标题")
+    p.add_argument("--summary", help="一句话说明")
+    add_brief(p)
+    add_task_fields(p)
+    p.add_argument("--no-due", action="store_true", help="清掉截止时间")
+    p.add_argument("--no-reviewer", action="store_true", help="清掉验收人（改由代表人验收）")
+
+    p = leaf(ops, "watch", "关注或取消关注任务", tasks_watch)
+    p.add_argument("code", help="任务编号")
+    switch = p.add_mutually_exclusive_group(required=True)
+    switch.add_argument("--on", dest="on", action="store_true", help="关注")
+    switch.add_argument("--off", dest="on", action="store_false", help="取消关注")
+
+    p = leaf(ops, "stats", "运营统计：积压、各来源处理时长、交接次数、一次验收通过率", tasks_stats)
+    p.add_argument("--days", type=int, default=30, help="统计最近几天（1-365）")
 
 
-def bot_name(value: dict[str, Any] | None) -> str | None:
+ASSIGNEE_HELP = (
+    "AI 员工（标识、名称或 id）或成员（登录名、邮箱或姓名）；两边都匹配时写 bot:标识 或 user:登录名"
+)
+
+
+def add_brief(p: argparse.ArgumentParser) -> None:
+    brief = p.add_mutually_exclusive_group()
+    brief.add_argument("--brief", help="背景与要求")
+    brief.add_argument("--brief-file", metavar="文件", help="从文件读背景与要求，- 表示标准输入")
+
+
+def add_task_fields(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--reviewer", metavar="成员", help="验收人（默认代表人）")
+    p.add_argument("--review", type=on_off, metavar="on|off", help="交付后是否要验收")
+    p.add_argument("--priority", choices=WORK_TASK_PRIORITIES)
+    p.add_argument(
+        "--due",
+        type=due_time,
+        metavar="时间",
+        help="截止时间，ISO 格式（2026-12-01 或 2026-12-01T18:00）；不带时区按本机时区",
+    )
+
+
+def due_time(value: str) -> str:
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("时间格式应为 2026-12-01 或 2026-12-01T18:00") from None
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    return moment.isoformat()
+
+
+async def task_assignee(c: AdminClient, ref: str) -> dict[str, str]:
+    """执行人：bot:/user: 前缀指定类型；不带前缀时两边都找，只能匹配上一边。"""
+    kind, sep, rest = ref.partition(":")
+    if sep and kind in ("bot", "user"):
+        if kind == "bot":
+            return {"type": "bot", "id": str((await c.bot(rest))["id"])}
+        return {"type": "human", "id": str((await c.user(rest))["id"])}
+    found: list[dict[str, str]] = []
+    errors: list[str] = []
+    for kind, lookup in (("bot", c.bot), ("human", c.user)):
+        try:
+            found.append({"type": kind, "id": str((await lookup(ref))["id"])})
+        except CliError as exc:
+            errors.append(str(exc))
+    if len(found) > 1:
+        raise CliError(f"「{ref}」既是 AI 员工又是成员，请写 bot:{ref} 或 user:{ref}")
+    if not found:
+        # 优先给「匹配到多个」这类更具体的提示。
+        raise CliError(next((e for e in errors if "多个" in e), f"找不到 AI 员工或成员：{ref}"))
+    return found[0]
+
+
+def actor_name(value: dict[str, Any] | None) -> str | None:
     return value["name"] if value else None
 
 
+def start_mode(row: dict[str, Any]) -> str | None:
+    if row.get("needs_drive"):
+        return "待叫开工"
+    return row.get("start_mode")
+
+
 async def tasks_list(c: AdminClient, args: argparse.Namespace) -> int:
+    target = None
+    if args.assignee:
+        target = await task_assignee(c, args.assignee)
+    elif args.bot:
+        target = {"type": "bot", "id": str((await c.bot(args.bot))["id"])}
     data = await c.get(
         TASKS,
+        view=args.view,
         status=args.status,
-        assignee_bot_id=(await c.bot(args.bot))["id"] if args.bot else None,
+        assignee_bot_id=target["id"] if target and target["type"] == "bot" else None,
+        assignee_user_id=target["id"] if target and target["type"] == "human" else None,
         chat_id=args.chat_id,
+        include_shadow=args.include_shadow,
         q=args.keyword,
         limit=args.limit,
         before_id=args.before_id,
@@ -1225,8 +1359,11 @@ async def tasks_list(c: AdminClient, args: argparse.Namespace) -> int:
         [
             ("编号", "code"),
             ("状态", "status"),
+            ("优先级", "priority"),
             ("标题", "title"),
-            ("承接", lambda r: bot_name(r["assignee"])),
+            ("承接", lambda r: actor_name(r["assignee"])),
+            ("开工方式", start_mode),
+            ("截止", "due_at"),
             ("提出人", "requester_name"),
             ("更新时间", "updated_at"),
         ],
@@ -1234,7 +1371,9 @@ async def tasks_list(c: AdminClient, args: argparse.Namespace) -> int:
     )
     if data["counts"]:
         counts = "，".join(f"{k} {v}" for k, v in sorted(data["counts"].items()))
-        print(f"\n全部任务：{counts}")
+        print(f"\n按状态：{counts}")
+    if data.get("needs_me"):
+        print(f"待我处理：{data['needs_me']}（--view needs_me 查看）")
     return 0
 
 
@@ -1243,35 +1382,229 @@ async def tasks_show(c: AdminClient, args: argparse.Namespace) -> int:
     if args.json:
         output.dump(data)
         return 0
+    print_task(data)
+    return 0
+
+
+def parent_line(data: dict[str, Any]) -> str | None:
+    parent = data.get("parent")
+    return f"{parent['code']} {parent['title']}" if parent else None
+
+
+def print_task(data: dict[str, Any]) -> None:
     output.fields(
         data,
         [
             ("编号", "code"),
             ("标题", "title"),
             ("状态", "status"),
-            ("承接", lambda d: bot_name(d["assignee"])),
-            ("调度员", lambda d: bot_name(d["dispatcher"])),
-            ("提出人", "requester_name"),
+            ("现在", "now"),
+            ("优先级", "priority"),
+            ("截止", "due_at"),
+            ("承接", lambda d: actor_name(d["assignee"])),
+            ("开工方式", start_mode),
+            ("代表人", lambda d: actor_name(d["principal"])),
+            ("验收人", lambda d: actor_name(d["reviewer"])),
+            ("要验收", "review_required"),
+            ("调度员", lambda d: actor_name(d["dispatcher"])),
+            ("提出人", lambda d: d["requester_name"] or actor_name(d["requester"])),
+            ("来源", "source"),
             ("平台", "platform"),
             ("群聊", "chat_id"),
+            ("父任务", parent_line),
             ("相关任务", "related_codes"),
+            ("关注的人", lambda d: [w["name"] for w in d.get("watchers") or []]),
+            ("我在关注", "watching"),
+            ("我能管理", "can_manage"),
             ("创建时间", "created_at"),
             ("关闭时间", "closed_at"),
             ("摘要", "summary"),
         ],
     )
-    print("\n事件：")
-    output.table(
-        data["events"],
+    ask = data.get("ask")
+    if ask:
+        print(f"\n待回答（{ask['kind']}，问 {actor_name(ask['to']) or '-'}）：{ask['question']}")
+        if ask.get("why"):
+            print(f"原因：{ask['why']}")
+        keys = [f"{o['key']}={o['label']}" for o in ask["options"]]
+        if ask.get("other"):
+            keys.append("other=其他")
+        print(f"选项：{'，'.join(keys)}（{'、'.join(ask['needs_text'])} 要写说明）")
+        print(f"问题 id：{ask['id']}；能回答：{output.text(ask['can_answer'])}")
+    if data.get("children"):
+        print("\n子任务：")
+        output.table(
+            data["children"],
+            [
+                ("编号", "code"),
+                ("状态", "status"),
+                ("标题", "title"),
+                ("承接", lambda r: actor_name(r["assignee"])),
+            ],
+        )
+    if data.get("artifacts"):
+        print("\n产出：")
+        for item in data["artifacts"]:
+            print(f"- {output.text(item)}")
+    if "events" in data:
+        print("\n事件：")
+        output.table(
+            data["events"],
+            [
+                ("时间", "created_at"),
+                ("类型", "kind"),
+                ("由谁", lambda e: e["actor_name"] or e["actor_type"]),
+                ("内容", "human_text"),
+            ],
+        )
+    agent = data.get("agent") or {}
+    if agent.get("runs"):
+        print("\n运行记录：")
+        output.table(
+            agent["runs"],
+            [
+                ("id", "id"),
+                ("AI 员工", lambda r: actor_name(r["bot"])),
+                ("触发", "trigger"),
+                ("状态", "status"),
+                ("结果", "outcome"),
+                ("开始", "started_at"),
+                ("结束", "ended_at"),
+            ],
+        )
+    for title, key in (
+        ("交接说明（brief）", "brief"),
+        ("记要（digest）", "digest"),
+        ("完整汇报（report）", "report"),
+    ):
+        if agent.get(key):
+            print(f"\n{title}：\n{agent[key]}")
+
+
+def echo(args: argparse.Namespace, data: dict[str, Any]) -> int:
+    """写操作的回显：--json 打全部，否则一行编号、状态和现在在等什么。"""
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"{data['code']}  {data['status']}  {data['now']}")
+    return 0
+
+
+def brief_of(args: argparse.Namespace) -> str | None:
+    if args.brief_file:
+        return read_text(args.brief_file)
+    return args.brief  # type: ignore[no-any-return]
+
+
+async def task_fields(c: AdminClient, args: argparse.Namespace) -> dict[str, Any]:
+    body = changed(
+        args,
+        {
+            "summary": "summary",
+            "review": "review_required",
+            "priority": "priority",
+            "due": "due_at",
+        },
+    )
+    brief = brief_of(args)
+    if brief is not None:
+        body["brief"] = brief
+    if args.reviewer:
+        body["reviewer_user_id"] = str((await c.user(args.reviewer))["id"])
+    return body
+
+
+async def tasks_create(c: AdminClient, args: argparse.Namespace) -> int:
+    body = {"title": args.title, **await task_fields(c, args)}
+    if args.assignee:
+        body["assignee"] = await task_assignee(c, args.assignee)
+    return echo(args, await c.request("POST", TASKS, body=body))
+
+
+async def tasks_assign(c: AdminClient, args: argparse.Namespace) -> int:
+    body: dict[str, Any] = {"assignee": await task_assignee(c, args.assignee), "note": args.note}
+    if args.review is not None:
+        body["review_required"] = args.review
+    return echo(args, await c.request("POST", f"{TASKS}/{args.code}/assign", body=body))
+
+
+async def tasks_answer(c: AdminClient, args: argparse.Namespace) -> int:
+    ask_id = args.ask_id
+    if ask_id is None:
+        ask = (await c.get(f"{TASKS}/{args.code}"))["ask"]
+        if not ask:
+            raise CliError(f"{args.code} 现在没有待回答的问题")
+        if args.option in ask["needs_text"] and not args.text.strip():
+            raise CliError(f"选 {args.option} 要写一句说明")
+        ask_id = ask["id"]
+    body = {"ask_id": ask_id, "option": args.option, "text": args.text}
+    return echo(args, await c.request("POST", f"{TASKS}/{args.code}/answer", body=body))
+
+
+async def tasks_text(c: AdminClient, args: argparse.Namespace) -> int:
+    if args.operation == "cancel" and not args.yes:
+        raise CliError(f"取消 {args.code} 会通知相关的人，确认无误后加 --yes 再执行")
+    path = f"{TASKS}/{args.code}/{args.operation}"
+    return echo(args, await c.request("POST", path, body={"text": args.text}))
+
+
+async def tasks_update(c: AdminClient, args: argparse.Namespace) -> int:
+    body = await task_fields(c, args)
+    if args.title is not None:
+        body["title"] = args.title
+    if args.no_due:
+        if args.due is not None:
+            raise CliError("--due 和 --no-due 只能给一个")
+        body["due_at"] = None
+    if args.no_reviewer:
+        if args.reviewer:
+            raise CliError("--reviewer 和 --no-reviewer 只能给一个")
+        body["reviewer_user_id"] = None
+    if not body:
+        raise CliError("没有要改的字段")
+    return echo(args, await c.request("PATCH", f"{TASKS}/{args.code}", body=body))
+
+
+async def tasks_watch(c: AdminClient, args: argparse.Namespace) -> int:
+    data = await c.request("POST", f"{TASKS}/{args.code}/watch", body={"on": args.on})
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"{data['code']}  {'已关注' if data['watching'] else '已取消关注'}")
+    return 0
+
+
+async def tasks_stats(c: AdminClient, args: argparse.Namespace) -> int:
+    data = await c.get(f"{TASKS}/stats", days=args.days)
+    if args.json:
+        output.dump(data)
+        return 0
+    output.fields(
+        data,
         [
-            ("时间", "created_at"),
-            ("类型", "kind"),
-            ("由谁", lambda e: e["actor_name"] or e["actor_type"]),
-            ("内容", "human_text"),
+            ("统计天数", "days"),
+            ("平均交接次数", "handoffs_per_task"),
+            ("AI 员工一次验收通过率", "agent_first_pass_rate"),
+            ("AI 员工验收过的任务", "agent_reviewed"),
         ],
     )
-    agent = data["agent"]
-    for title, key in (("交接说明（brief）", "brief"), ("记要（digest）", "digest")):
-        if agent[key]:
-            print(f"\n{title}：\n{agent[key]}")
+    print("\n积压（未关闭）：")
+    output.table(
+        data["backlog"],
+        [
+            ("执行人", lambda r: actor_name(r["assignee"]) or "未指派"),
+            ("未关闭", "open"),
+            ("已逾期", "overdue"),
+        ],
+    )
+    print("\n按来源：")
+    output.table(
+        data["by_source"],
+        [
+            ("来源", "source"),
+            ("新建", "created"),
+            ("完成", "done"),
+            ("平均处理小时", "avg_hours"),
+        ],
+    )
     return 0
