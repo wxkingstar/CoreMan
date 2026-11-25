@@ -18,6 +18,7 @@ from coreman.api.routers import (
     audit_logs,
     auth,
     auth_feishu,
+    auth_oidc,
     auth_wecom,
     bot_alert_sources,
     bot_group_observe,
@@ -49,6 +50,7 @@ from coreman.api.routers import (
     metrics,
     model_catalog,
     notification_settings,
+    oauth,
     objects,
     personal_credentials,
     personal_schedules,
@@ -154,10 +156,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(feishu_open.router)
     app.include_router(systems_catalog.admin_router)
     app.include_router(infra_relay.router)
+    app.include_router(oauth.router)
     app.include_router(auth.public_router)
     app.include_router(auth.admin_router)
     app.include_router(auth_wecom.router)
     app.include_router(auth_feishu.router)
+    app.include_router(auth_oidc.router)
     app.include_router(platform_apps.router)
     app.include_router(platform_apps.runs_router)
     from coreman.api.routers import assistants_admin

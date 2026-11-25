@@ -54,14 +54,20 @@ async def _login_app(session: AsyncSession) -> PlatformApp | None:
 
 
 @router.get("/providers")
-async def providers(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def providers(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
     from coreman.api.routers.auth_feishu import _login_app as _feishu_login_app
+
+    settings = request.app.state.settings
 
     return {
         "code": 0,
         "data": {
             "wecom": await _login_app(session) is not None,
             "feishu": await _feishu_login_app(session) is not None,
+            # 配了通用 OIDC 登录时给出按钮上显示的名字，没配为 None。
+            "oidc": settings.oidc_display_name if settings.oidc_enabled else None,
         },
     }
 

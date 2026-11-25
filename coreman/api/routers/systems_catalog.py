@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -38,6 +39,7 @@ from coreman.core.db.models import (
     Task,
     User,
 )
+from coreman.core.oauth import server as oauth
 from coreman.core.systems_catalog import context, policy, service, spill, tools, uploads
 from coreman.core.timeutils import utcnow
 
@@ -337,18 +339,70 @@ async def no_sse() -> Response:
     return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})
 
 
+def _challenge(request: Request, error: str | None = None) -> Response:
+    """401/403 带 RFC 9728 的资源元数据地址：支持 MCP 授权规范的客户端据此自动走登录流程。"""
+    base = str(request.app.state.settings.public_base_url).rstrip("/")
+    value = f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource{PUBLIC_PATH}"'
+    if error:
+        value += f', error="{error}"'
+    if error == "insufficient_scope":
+        value += ', scope="mcp"'
+    status = 403 if error == "insufficient_scope" else 401
+    return Response(
+        json.dumps({"error": error or "unauthorized"}),
+        status_code=status,
+        media_type="application/json",
+        headers={"WWW-Authenticate": value, **mcp_rpc.NO_STORE},
+    )
+
+
+class _RateLimit:
+    """按成员限制目录调用次数（每个 API 进程各自计数，够挡住失控的循环）。"""
+
+    def __init__(self, per_minute: int) -> None:
+        self.per_minute = per_minute
+        self.hits: dict[uuid.UUID, list[float]] = {}
+
+    def allow(self, key: uuid.UUID) -> bool:
+        now = time.monotonic()
+        recent = [t for t in self.hits.get(key, []) if now - t < 60]
+        if len(recent) >= self.per_minute:
+            self.hits[key] = recent
+            return False
+        recent.append(now)
+        self.hits[key] = recent
+        if len(self.hits) > 10_000:
+            self.hits = {k: v for k, v in self.hits.items() if v and now - v[-1] < 60}
+        return True
+
+
+MEMBER_CALLS_PER_MINUTE = 120
+_member_limit = _RateLimit(MEMBER_CALLS_PER_MINUTE)
+
+
 @router.post(PUBLIC_PATH)
 async def public_mcp(request: Request, session: AsyncSession = Depends(get_session)) -> Response:
-    """Anonymous, read-only catalog of every enabled system: browse, search and describe.
+    """Read-only catalog of every enabled system: browse, search and describe.
 
-    Nothing here issues a token or reaches a business system. Lists are not filtered by
-    permission; the caller calls the system directly with its own credential and the system
-    decides. Off unless the deployment sets SYSTEMS_CATALOG_PUBLIC.
+    With `Authorization: Bearer` (a CoreMan OAuth access token with the `mcp` scope) the caller is
+    a member: rate limited per member. Without it the catalog is anonymous, and only when the
+    deployment sets SYSTEMS_CATALOG_PUBLIC; otherwise the 401 points the client at the
+    authorization server. Nothing here issues a business token or reaches a business system;
+    lists are not filtered by permission, the caller calls the system with its own credential.
     """
-    if not request.app.state.settings.systems_catalog_public:
-        raise not_found("Not found")
     if "origin" in request.headers:
         raise ApiError(403, 403, "Browser origins are not supported")
+    member: User | None = None
+    token = oauth.bearer(request.headers.get("Authorization"))
+    if token is not None:
+        try:
+            _, member = await oauth.authenticate(session, token, "mcp")
+        except oauth.Unauthenticated as exc:
+            return _challenge(request, exc.error)
+    elif "authorization" in request.headers:
+        return _challenge(request, "invalid_token")
+    elif not request.app.state.settings.systems_catalog_public:
+        return _challenge(request)
     token_env = request.query_params.get("token_env", context.DIRECT_TOKEN_ENV)
     if not TOKEN_ENV.fullmatch(token_env):
         raise ApiError(400, 400, "token_env must be an environment variable name")
@@ -370,6 +424,8 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
             or not isinstance(params.get("arguments", {}), dict)
         ):
             return mcp_rpc.error(rid, -32602, "Invalid params")
+        if member is not None and not _member_limit.allow(member.id):
+            return mcp_rpc.error(rid, -32000, "调用过于频繁，请稍后再试")
         ctx = context.Context(
             session=session,
             issuance=await issuance(request),
@@ -389,7 +445,5 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
 
 
 @router.get(PUBLIC_PATH)
-async def public_no_sse(request: Request) -> Response:
-    if not request.app.state.settings.systems_catalog_public:
-        raise not_found("Not found")
+async def public_no_sse() -> Response:
     return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})
