@@ -8,6 +8,8 @@ declare module 'vue-router' {
   interface RouteMeta {
     public?: boolean
     roles?: string[]
+    /** 布局按它决定换地址时要不要重建页面，见 router/viewKey.ts。 */
+    viewKey?: string
   }
 }
 
@@ -43,7 +45,7 @@ export const router = createRouter({
         { path: 'cron', name: 'cron', component: () => import('@/views/CronView.vue') },
         { path: 'chat-logs', name: 'chat-logs', component: () => import('@/views/ChatLogsView.vue') },
         // 列表和详情同一个路由：打开、关闭详情只换参数，列表不重新挂载、不刷新。
-        { path: 'work-tasks/:code?', name: 'work-tasks', component: () => import('@/views/WorkTasksView.vue') },
+        { path: 'work-tasks/:code?', name: 'work-tasks', meta: { viewKey: 'work-tasks' }, component: () => import('@/views/WorkTasksView.vue') },
         {
           path: 'announcements',
           name: 'announcements',

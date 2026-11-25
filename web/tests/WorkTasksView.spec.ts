@@ -2,7 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { defineComponent, h } from 'vue'
+import { createMemoryHistory, createRouter, RouterView, useRoute } from 'vue-router'
 
 const task = vi.hoisted(() => ({
   id: 7, code: 'T-7', title: '查上周退货率', summary: '算出上周退货率并和前一周比较', status: 'todo', source: 'web', mirror: false,
@@ -56,12 +57,13 @@ vi.mock('@/api/workTasks', () => ({
 import { workTasks } from '@/api/workTasks'
 import { i18n } from '@/i18n'
 import WorkTasksView from '@/views/WorkTasksView.vue'
+import { viewKey } from '@/router/viewKey'
 
 function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/work-tasks/:code?', name: 'work-tasks', component: WorkTasksView },
+      { path: '/work-tasks/:code?', name: 'work-tasks', meta: { viewKey: 'work-tasks' }, component: WorkTasksView },
     ],
   })
 }
@@ -141,20 +143,32 @@ describe('WorkTasksView', () => {
     const router = makeRouter()
     await router.push('/work-tasks')
     await router.isReady()
+    // 和管理台布局一样给 router-view 加 key（布局用的就是 viewKey）。
     const wrapper = mount(
-      { template: '<router-view />' },
+      defineComponent({
+        setup: () => {
+          const route = useRoute()
+          return () => h(RouterView, { key: viewKey(route) })
+        },
+      }),
       { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body },
     )
     await flushPromises()
     expect(wrapper.text()).toContain(i18n.global.t('workTasks.created'))
+    // 先切到「我发起的」，点开任务后仍停在这一栏。
+    const tabs = wrapper.findAll('[data-test="work-task-views"] input')
+    await tabs[1].setValue(true)
+    await flushPromises()
     const listed = vi.mocked(workTasks.list).mock.calls.length
+    expect(vi.mocked(workTasks.list).mock.lastCall?.[0]).toMatchObject({ view: 'created' })
     vi.mocked(workTasks.get).mockClear()
     await wrapper.find('.tasks-table .el-table__row').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.params.code).toBe('T-7')
     expect(workTasks.get).toHaveBeenCalledWith('T-7')
-    // 点开详情不重新加载列表。
+    // 点开详情不重建页面、不重新加载列表，也不跳回「待我处理」。
     expect(vi.mocked(workTasks.list).mock.calls.length).toBe(listed)
+    expect((wrapper.findAll('[data-test="work-task-views"] input')[1].element as HTMLInputElement).checked).toBe(true)
     const dialog = document.body.querySelector('.task-dialog')
     expect(dialog).not.toBeNull()
     // 关掉弹窗（Esc 与右上角关闭走同一个 close 事件），回到列表，同样不重新加载。
