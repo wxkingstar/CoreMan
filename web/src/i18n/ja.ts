@@ -652,9 +652,11 @@ export default {
     usePassword: '{platform} を使っていない場合は、ユーザー名とパスワードでログイン',
     backToScan: '{platform} の QR ログインに戻る',
 
+    useOidc: '{name} でログイン',
     required: '{field}を入力してください',
     failed: 'ログインに失敗しました',
     errors: {
+      oidc_error: 'シングルサインオンに失敗しました。再試行してください', oidc_not_configured: 'シングルサインオンが設定されていません',
       feishu_error: 'Feishu ログインに失敗しました。再試行してください', feishu_not_configured: 'Feishu ログインが設定されていません',
       invalid_state: 'ログインセッションが失効しました。もう一度ログインしてください',
       code_replayed: 'ログイン情報はすでに使用されています。もう一度ログインしてください',

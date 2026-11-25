@@ -265,20 +265,21 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 并追加一段代理规则。运行时不能挂载目录 MCP（未升级）或系统没有 OpenAPI 地址时，代理系统本轮不可用，提示词如实说明，不会退回下发令牌。
 
-## 匿名只读目录
+## 成员本机的只读目录
 
-给不经过 AI 员工的调用方（例如成员本机的 Claude Code、Codex）用：从 CoreMan 拿到各系统的操作目录，再用自己的令牌直连业务系统。CoreMan 只提供目录，不签发令牌、不代理调用，调用方的令牌不经过 CoreMan。
+给不经过 AI 员工的调用方（例如成员本机的 Claude Code、Codex）用：从 CoreMan 拿到各系统的操作目录，再用自己的令牌直连业务系统。CoreMan 只提供目录，不签发业务令牌、不代理调用，调用方的业务令牌不经过 CoreMan。
 
-- 端点 `POST /api/systems/mcp`，无需认证，工具与上文相同但只有 `systems_browse`、`systems_search`、`systems_describe`（`systems_call` 不提供）。带 `Origin` 头的请求拒绝，请求体最大 16 KiB，`GET` 返回 405。
-- 默认关闭：部署设置 `SYSTEMS_CATALOG_PUBLIC=true` 才开放，未开放时返回 404。目录不按权限过滤，系统地址和接口说明会对能访问 CoreMan 的所有人可见，只在入口限定内网的部署里开启；端点不在 `/api/runtime/` 下，按前缀对外开放运行时路径的入口不会顺带放出它。
+- 端点 `POST /api/systems/mcp`，工具与上文相同但只有 `systems_browse`、`systems_search`、`systems_describe`（`systems_call` 不提供）。带 `Origin` 头的请求拒绝，请求体最大 16 KiB，`GET` 返回 405。
+- 成员登录：带 CoreMan 的 OAuth 访问令牌（`mcp` scope，见 [成员本机接入设计](superpowers/specs/2026-11-25-coreman-oauth-mcp-cli.md)）时按成员认人，每人每分钟 120 次工具调用（各 API 进程分别计数）。没带令牌时返回 401 和 `WWW-Authenticate: Bearer resource_metadata=…`，支持 MCP 授权规范的客户端据此自动登录。
+- 匿名：部署设置 `SYSTEMS_CATALOG_PUBLIC=true` 时不带令牌也能读。目录不按权限过滤，系统地址和接口说明会对能访问 CoreMan 的所有人可见，只在入口限定内网的部署里开启；端点不在 `/api/runtime/` 下，按前缀对外开放运行时路径的入口不会顺带放出它。
 - 系统范围：已启用、并且配了系统地址与 OpenAPI 地址的系统，不看 AI 员工授权和允许范围。最终能调什么由业务系统按调用方令牌对应用户的权限判定。
-- 只读已存的目录，不为匿名请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
+- 只读已存的目录，不为这些请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
 - 结果里 `call_mode` 为 `direct`，`permission_check` 为 `not_checked`；`systems_describe` 的 curl 模板引用调用方本机的环境变量（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。变量名默认 `SYSTEMS_TOKEN`，可在接入地址上用 `?token_env=<变量名>` 指定（字母、数字、下划线，不以数字开头，最长 64 字符，否则 400），只传变量名，不传令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
-- 没有调用预算和重复限制：匿名调用不关联任务。
+- 没有调用预算和重复限制：这些调用不关联任务。
 
 给成员看的接入说明在文档站 `/docs/systems-catalog-mcp`（源文件 `coreman/docs_site/pages/systems-catalog-mcp.md`），改动时两边一起改。
 
-本机接入：端点是标准的 MCP Streamable HTTP（只用 POST，返回 JSON，不需要认证头），支持远程 HTTP MCP 的客户端都能接，只要填同一个地址：
+本机接入：端点是标准的 MCP Streamable HTTP（只用 POST，返回 JSON，认证走 MCP 授权规范的 OAuth），支持的客户端都能接，只要填同一个地址：
 
 ```text
 https://coreman.example.com/api/systems/mcp?token_env=SSO_TOKEN

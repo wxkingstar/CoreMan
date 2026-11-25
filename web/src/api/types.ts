@@ -27,7 +27,8 @@ export interface PlatformAppOut {
 }
 export type PlatformAppIn = Omit<PlatformAppOut, 'id' | 'version' | 'created_at' | 'updated_at' | 'callback_url'>
 export interface SyncRun { id: number; status: 'running' | 'success' | 'failed' | 'aborted'; started_at: string; finished_at: string | null; stats: Record<string, unknown>; error: string | null; triggered_by: string | null }
-export interface Providers { wecom: boolean; feishu: boolean }
+/** 登录方式：扫码平台是否配置；`oidc` 是通用 OIDC 登录按钮上显示的名字，没配为 null。 */
+export interface Providers { wecom: boolean; feishu: boolean; oidc?: string | null }
 /** 登录页内嵌扫码：飞书扫码组件的授权地址。 */
 export interface FeishuQr { goto: string }
 /** 登录页内嵌扫码：企业微信登录组件（ww.createWWLoginPanel）的参数。 */

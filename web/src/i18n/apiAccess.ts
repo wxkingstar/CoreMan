@@ -1,5 +1,12 @@
 // 「API 令牌」页与 AI 员工详情里的「API 驱动」面板。避免在文案里写 @ { } |：vue-i18n 会当成语法。
 export const apiAccessZh = {
+  grants: {
+    title: '本机应用授权',
+    intro: '你在本机 Agent（如 Claude Code、Codex）或命令行里登录 CoreMan 时，会在这里留下一条授权。撤销后它立即不能再以你的身份访问。',
+    empty: '还没有授权过本机应用。', client: '应用（自报名称）', scope: '范围', createdAt: '授权时间', lastUsedAt: '最近使用',
+    never: '未使用', revoke: '撤销', revokeConfirm: '撤销「{name}」的授权？它需要重新登录才能再用。', revoked: '已撤销',
+    scopes: { mcp: '业务系统目录', api: '管理接口' },
+  },
   tokens: {
     intro: '外部程序（自己的脚本、CI、工单系统）可以用 API 令牌以你的身份给 AI 员工下任务。任务在你和 AI 员工的私聊里，或者绑定了别名的群里承接：会话里能看到「通过 API 发起」和回复，你可以接着在飞书里往下推进。令牌只能驱动你选的 AI 员工，而且对方要开启「允许 API 驱动」。',
     create: '新建令牌', refresh: '刷新', guide: '使用手册（图解 · 给 Agent 的版本）', empty: '还没有 API 令牌。',
@@ -25,6 +32,13 @@ export const apiAccessZh = {
 }
 
 export const apiAccessEn: typeof apiAccessZh = {
+  grants: {
+    title: 'Local app authorizations',
+    intro: 'Signing in to CoreMan from a local agent (such as Claude Code or Codex) or the command line leaves an authorization here. Revoking one stops it from acting as you immediately.',
+    empty: 'No local apps authorized yet.', client: 'App (self-reported name)', scope: 'Scope', createdAt: 'Authorized', lastUsedAt: 'Last used',
+    never: 'Never', revoke: 'Revoke', revokeConfirm: 'Revoke "{name}"? It will have to sign in again.', revoked: 'Revoked',
+    scopes: { mcp: 'Business system catalog', api: 'Admin API' },
+  },
   tokens: {
     intro: 'External programs (your scripts, CI, ticketing systems) can use an API token to give AI employees tasks as you. Tasks run in your direct chat with the employee, or in a group that has an alias: the chat shows "started via API" and the reply, and you can keep going in Feishu. A token can drive only the employees you choose, and they must have "Allow API driving" on.',
     create: 'New token', refresh: 'Refresh', guide: 'Guide (diagrams · version for agents)', empty: 'No API tokens yet.',
@@ -50,6 +64,13 @@ export const apiAccessEn: typeof apiAccessZh = {
 }
 
 export const apiAccessJa: typeof apiAccessZh = {
+  grants: {
+    title: 'ローカルアプリの認可',
+    intro: 'ローカルのエージェント（Claude Code、Codex など）やコマンドラインから CoreMan にログインすると、ここに認可が残ります。取り消すと、すぐにあなたとしてアクセスできなくなります。',
+    empty: '認可したローカルアプリはありません。', client: 'アプリ（自己申告の名前）', scope: '範囲', createdAt: '認可日時', lastUsedAt: '最終使用',
+    never: '未使用', revoke: '取り消す', revokeConfirm: '「{name}」の認可を取り消しますか？再度ログインが必要になります。', revoked: '取り消しました',
+    scopes: { mcp: '業務システムカタログ', api: '管理 API' },
+  },
   tokens: {
     intro: '外部プログラム（自分のスクリプト、CI、チケットシステム）は API トークンを使って、あなたとして AI 社員にタスクを依頼できます。タスクはあなたと AI 社員の個別チャット、またはエイリアスを設定したグループで実行され、「API から開始」と返信が表示されるので、そのまま Feishu で続けられます。トークンで操作できるのは選んだ AI 社員だけで、相手側で「API からの操作を許可」が有効である必要があります。',
     create: 'トークンを作成', refresh: '更新', guide: '利用ガイド（図解 · エージェント向け版）', empty: 'API トークンはまだありません。',

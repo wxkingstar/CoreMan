@@ -120,6 +120,9 @@ async def create_admin_session(
 async def verify_csrf(request: Request) -> None:
     if request.method in _SAFE_METHODS:
         return
+    if request.headers.get("authorization", "")[:7].lower() == "bearer ":
+        # 浏览器不会自动附带 Bearer（Basic 会）；带了它，current_user 只按令牌认人、不看 cookie。
+        return
     if request.cookies.get("bot_token"):
         # 必须先完成验签和当前用户状态校验，不能仅凭 cookie 存在就豁免 CSRF。
         from coreman.api.bot_auth import token_user

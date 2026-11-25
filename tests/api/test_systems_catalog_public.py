@@ -60,10 +60,15 @@ async def call(client: httpx.AsyncClient, name: str, arguments: dict[str, Any]) 
     return json.loads(text)  # type: ignore[no-any-return]
 
 
-async def test_off_by_default(client: httpx.AsyncClient) -> None:
+async def test_anonymous_off_by_default_asks_for_login(client: httpx.AsyncClient) -> None:
+    """没开匿名目录时不再 404：401 指向授权服务器，成员登录后用自己的令牌访问。"""
     r = await client.post(PUBLIC_PATH, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    assert r.status_code == 404
-    assert (await client.get(PUBLIC_PATH)).status_code == 404
+    assert r.status_code == 401
+    assert r.headers["WWW-Authenticate"] == (
+        'Bearer resource_metadata="http://testserver/.well-known/oauth-protected-resource'
+        f'{PUBLIC_PATH}"'
+    )
+    assert (await client.get(PUBLIC_PATH)).status_code == 405
 
 
 async def test_lists_every_enabled_catalog_without_tokens(

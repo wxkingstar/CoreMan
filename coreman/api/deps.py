@@ -64,21 +64,60 @@ def via_bot_token(request: Request) -> bool:
     return bool(getattr(request.state, "bot_token_authenticated", False))
 
 
+def via_oauth(request: Request) -> bool:
+    """本次请求是不是以 OAuth 访问令牌认证的（成员本机的 Agent 或命令行）。"""
+    return getattr(request.state, "oauth_grant", None) is not None
+
+
 def via_cli(request: Request) -> bool:
-    """本次请求的管理台会话是不是管理命令建的（`coreman … --as 登录名`）。
+    """本次请求是不是本人不在管理台里：管理命令建的会话（`coreman … --as 登录名`），或 OAuth 令牌。
 
     管理命令以指定成员的身份建一个真的会话（见 `coreman/admin_cli/client.py`），权限与那位成员
-    一致；但操作的人在服务器上，不是成员本人。只对本人开放的个人内容据此区分：个人助理加密保存
-    的内容对这种会话一律不还原。
+    一致；但操作的人在服务器上，不是成员本人。OAuth 令牌在本机 Agent 和脚本手里，同样不算本人
+    在场。只对本人开放的个人内容据此区分：个人助理加密保存的内容对这两种认证一律不还原。
     """
+    if via_oauth(request):
+        return True
     login = getattr(request.state, "admin_session", None)
     return login is not None and login.auth_method == "cli"
+
+
+async def oauth_user(request: Request, session: AsyncSession, token: str) -> User:
+    """`Authorization: Bearer cmo_…` 认人：必须带 `api` scope，不从浏览器页面发起。"""
+    from coreman.core.oauth import server
+
+    if "origin" in request.headers:
+        raise ApiError(403, 403, "不支持从浏览器页面使用访问令牌")
+    try:
+        grant, user = await server.authenticate(session, token, "api")
+    except server.Unauthenticated as exc:
+        raise ApiError(
+            403 if exc.error == "insufficient_scope" else 401,
+            403 if exc.error == "insufficient_scope" else 401,
+            "访问令牌不能用于管理接口"
+            if exc.error == "insufficient_scope"
+            else "访问令牌无效或已过期",
+        ) from None
+    request.state.oauth_grant = grant
+    request.state.admin_session = None
+    request.state.bot_token_authenticated = False
+    return user
 
 
 async def current_user(
     request: Request, response: Response, session: AsyncSession = Depends(get_session)
 ) -> User:
     unauthorized = ApiError(401, 401, "未登录或会话已过期")
+    authorization = request.headers.get("Authorization") or ""
+    if authorization[:7].lower() == "bearer ":
+        # 带了 Bearer 就只按它认人，绝不回落到 cookie：免 CSRF 的前提是这一点。
+        # 别的方案（例如部署在前面加的 Basic 认证）浏览器会自动带上，照旧按 cookie 认人。
+        from coreman.core.oauth.server import bearer
+
+        token = bearer(authorization)
+        if token is None:
+            raise ApiError(401, 401, "访问令牌无效或已过期")
+        return await oauth_user(request, session, token)
     if request.cookies.get("bot_token"):
         from coreman.api.bot_auth import token_user
 

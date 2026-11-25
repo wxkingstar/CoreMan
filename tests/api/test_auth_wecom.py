@@ -52,11 +52,13 @@ async def test_providers(client: httpx.AsyncClient, db_session: AsyncSession) ->
     assert (await client.get("/api/auth/providers")).json()["data"] == {
         "wecom": False,
         "feishu": False,
+        "oidc": None,
     }
     await _seed(db_session)
     assert (await client.get("/api/auth/providers")).json()["data"] == {
         "wecom": True,
         "feishu": False,
+        "oidc": None,
     }
 
 
