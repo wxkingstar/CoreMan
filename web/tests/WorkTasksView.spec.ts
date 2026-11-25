@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 const task = vi.hoisted(() => ({
-  id: 7, code: 'T-7', title: '查上周退货率', summary: '算出上周退货率并和前一周比较', status: 'todo', source: 'web',
+  id: 7, code: 'T-7', title: '查上周退货率', summary: '算出上周退货率并和前一周比较', status: 'todo', source: 'web', mirror: false,
   platform: null, chat_id: null, requester_name: '李雷',
   requester: { type: 'human', id: 'u1', name: '李雷' }, principal: { type: 'human', id: 'u1', name: '李雷' },
   assignee: { type: 'bot', id: 'b1', name: '数据助手' }, reviewer: { type: 'human', id: 'u1', name: '李雷' },
@@ -16,7 +16,7 @@ const task = vi.hoisted(() => ({
   created_at: '2026-11-02T00:00:00Z', updated_at: '2026-11-02T00:00:00Z', closed_at: null,
 }))
 const asked = vi.hoisted(() => ({
-  id: 8, code: 'T-8', title: '订团建场地', summary: '', status: 'todo', source: 'web',
+  id: 8, code: 'T-8', title: '订团建场地', summary: '', status: 'todo', source: 'web', mirror: false,
   platform: null, chat_id: null, requester_name: '李雷',
   requester: { type: 'human', id: 'u1', name: '李雷' }, principal: { type: 'human', id: 'u1', name: '李雷' },
   assignee: { type: 'human', id: 'u2', name: '韩梅梅' }, reviewer: null,
@@ -45,6 +45,11 @@ vi.mock('@/api/workTasks', () => ({
       agent: { brief: '统计上周退货率，口径按退货单数除以签收单数', digest: '', report: '总结论：退货率 4.2%', waiting_on: null, runs: [], decision: null },
     }),
     answer: vi.fn().mockResolvedValue({ ...asked, ask: null, status: 'in_progress' }),
+    stats: vi.fn().mockResolvedValue({
+      days: 30, handoffs_per_task: 1.5, agent_first_pass_rate: 0.8, agent_reviewed: 5,
+      by_source: [{ source: 'api', created: 3, done: 2, avg_hours: 1.2 }],
+      backlog: [{ assignee: { type: 'human', id: 'u2', name: '韩梅梅' }, open: 4, overdue: 1 }],
+    }),
   },
 }))
 
@@ -117,5 +122,19 @@ describe('WorkTasksView', () => {
     const layer = drawer.querySelector('[data-test="agent-layer"]')
     expect(layer?.querySelector('.el-collapse-item.is-active')).toBeNull()
     expect(layer?.querySelector('[data-test="agent-report"]')?.textContent).toContain(i18n.global.t('workTasks.report'))
+  })
+
+  it('shows stats: backlog, sources and the first-pass rate', async () => {
+    const router = makeRouter()
+    await router.push('/work-tasks')
+    const wrapper = mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    const tabs = wrapper.findAll('[data-test="work-task-views"] input')
+    await tabs[tabs.length - 1].setValue(true)
+    await flushPromises()
+    expect(workTasks.stats).toHaveBeenCalledWith(30)
+    const panel = wrapper.find('[data-test="work-task-stats"]')
+    expect(panel.text()).toContain('韩梅梅')
+    expect(panel.text()).toContain(i18n.global.t('workTasks.sources.api'))
   })
 })

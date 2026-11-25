@@ -12,7 +12,7 @@ import AssigneePicker from '@/components/workTasks/AssigneePicker.vue'
 import WorkTaskAsk from '@/components/workTasks/WorkTaskAsk.vue'
 import WorkTaskCreateDialog from '@/components/workTasks/WorkTaskCreateDialog.vue'
 import {
-  workTasks, type AssigneeIn, type WorkTask, type WorkTaskDetail, type WorkTaskView,
+  workTasks, type AssigneeIn, type WorkTask, type WorkTaskDetail, type WorkTaskStats, type WorkTaskView,
 } from '@/api/workTasks'
 import { useAuthStore } from '@/stores/auth'
 import { errorMessage } from '@/utils/errors'
@@ -22,13 +22,14 @@ const { t, te } = useI18n()
 const route = useRoute(), router = useRouter()
 const auth = useAuthStore()
 const PAGE = 50
-const VIEWS: WorkTaskView[] = ['needs_me', 'created', 'watching', 'all']
+const VIEWS: (WorkTaskView | 'stats')[] = ['needs_me', 'created', 'watching', 'all', 'stats']
 const STATUSES = ['todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled', 'shadow']
 const AGENT_OPEN_KEY = 'coreman.workTasks.agentOpen'
 const rows = ref<(WorkTask & { id: number })[]>([])
 const counts = ref<Record<string, number>>({})
 const needsMe = ref(0)
-const view = ref<WorkTaskView>('needs_me')
+const view = ref<WorkTaskView | 'stats'>('needs_me')
+const stats = ref<WorkTaskStats | null>(null)
 const status = ref('')
 const query = ref('')
 const loading = ref(false)
@@ -61,6 +62,10 @@ async function load(append = false): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
+    if (view.value === 'stats') {
+      stats.value = await workTasks.stats(30)
+      return
+    }
     const data = await workTasks.list({
       view: view.value,
       status: status.value || undefined,
@@ -270,7 +275,67 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
       :error="loadError"
       @retry="load()"
     />
+    <div
+      v-if="view === 'stats'"
+      v-loading="loading"
+      class="stats"
+      data-test="work-task-stats"
+    >
+      <template v-if="stats">
+        <div class="stat-row">
+          <el-statistic
+            :title="t('workTasks.statHandoffs')"
+            :value="stats.handoffs_per_task ?? 0"
+            :precision="2"
+          />
+          <el-statistic
+            :title="t('workTasks.statFirstPass', { n: stats.agent_reviewed })"
+            :value="stats.agent_first_pass_rate === null ? 0 : stats.agent_first_pass_rate * 100"
+            :precision="1"
+            suffix="%"
+          />
+        </div>
+        <h4>{{ t('workTasks.statBySource', { days: stats.days }) }}</h4>
+        <el-table :data="stats.by_source">
+          <el-table-column :label="t('workTasks.source')">
+            <template #default="{ row }">
+              {{ t(`workTasks.sources.${row.source}`, row.source) }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            :label="t('workTasks.statCreated')"
+            prop="created"
+          />
+          <el-table-column
+            :label="t('workTasks.statDone')"
+            prop="done"
+          />
+          <el-table-column :label="t('workTasks.statAvgHours')">
+            <template #default="{ row }">
+              {{ row.avg_hours ?? '—' }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <h4>{{ t('workTasks.statBacklog') }}</h4>
+        <el-table :data="stats.backlog">
+          <el-table-column :label="t('workTasks.assignee')">
+            <template #default="{ row }">
+              {{ actorLabel(row.assignee) }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            :label="t('workTasks.statOpen')"
+            prop="open"
+          />
+          <el-table-column
+            :label="t('workTasks.statOverdue')"
+            prop="overdue"
+          />
+        </el-table>
+      </template>
+    </div>
     <el-table
+      v-else
       v-loading="loading"
       :data="rows"
       row-key="code"
@@ -297,6 +362,14 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
               effect="plain"
             >
               {{ startTag(row)?.text }}
+            </el-tag>
+            <el-tag
+              v-if="row.mirror"
+              size="small"
+              type="info"
+              effect="plain"
+            >
+              {{ t(`workTasks.sources.${row.source}`, row.source) }}
             </el-tag>
             <el-tag
               v-if="row.priority !== 'normal'"
@@ -355,7 +428,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
       </el-table-column>
     </el-table>
     <div
-      v-if="more"
+      v-if="more && view !== 'stats'"
       class="tasks-more"
     >
       <el-button
@@ -415,7 +488,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
         />
 
         <div class="task-actions">
-          <template v-if="!closed && detail.can_manage">
+          <template v-if="!closed && detail.can_manage && !detail.mirror">
             <el-button
               size="small"
               data-test="assign"
@@ -442,7 +515,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
             {{ t('workTasks.deliver') }}
           </el-button>
           <el-button
-            v-if="!closed && detail.can_manage"
+            v-if="!closed && detail.can_manage && !detail.mirror"
             size="small"
             @click="cancelTask"
           >
@@ -754,6 +827,8 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
 .view-badge :deep(.el-badge__content) { position: static; transform: none; }
 .tasks-table :deep(.el-table__row) { cursor: pointer; }
 .tasks-more { display: flex; justify-content: center; margin-top: 12px; }
+.stats { display: flex; flex-direction: column; gap: 12px; }
+.stat-row { display: flex; flex-wrap: wrap; gap: 48px; }
 .title-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .now-line { margin-top: 2px; }
 .task-detail { display: flex; flex-direction: column; gap: 12px; }
