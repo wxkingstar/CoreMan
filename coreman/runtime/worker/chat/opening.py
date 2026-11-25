@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks import groups as api_groups
 from coreman.core.assistants import platform_turns
 from coreman.core.assistants.approvals import batch as assistant_writes
 from coreman.core.assistants.kinds import BOT_HELP_KIND, COLD_START_KIND
@@ -265,11 +266,12 @@ class OpenStage(ChatStageBase):
         relay = current_relay
         intake = replace(intake, bot=bot, relay=relay)
         if intake.speaker.known:
-            # A service user has no platform identity to look up, so an alert turn rechecks the
-            # user itself.
+            # A service user has no platform identity to look up, so an alert turn (and a
+            # business system's group delivery) rechecks the user itself.
             fresh_speaker = (
                 await alert_sources.refresh_speaker(session, intake.speaker)
                 if ctx.task.payload.get("origin") == alert_sources.ORIGIN
+                or api_groups.is_group_payload(ctx.task.payload)
                 else await resolve_speaker(
                     session, platform=bot.platform, platform_user_id=intake.speaker.platform_user_id
                 )
@@ -537,10 +539,17 @@ class OpenStage(ChatStageBase):
             extra, env, personal_secrets = await credentials.stored_only(
                 session, ctx, intake, extra, env
             )
-        elif not joined and ctx.task.payload.get("origin") not in (
-            "observe",
-            "dispatch",
-            alert_sources.ORIGIN,
+        elif (
+            not joined
+            and ctx.task.payload.get("origin")
+            not in (
+                "observe",
+                "dispatch",
+                alert_sources.ORIGIN,
+            )
+            # 群承接模式以服务账号身份跑：和告警回合一样，不挂以发言者本人为前提的能力，
+            # 也不向服务账号索要个人凭证。
+            and not api_groups.is_group_payload(ctx.task.payload)
         ):
             # 主动插话只答不做：求助同事、个人工具、定时任务、索要凭证这些有后果的能力都不挂，
             # 真要做就由它认领、等对方 @ 它，走正常回合。

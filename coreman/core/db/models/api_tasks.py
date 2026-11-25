@@ -138,3 +138,30 @@ class BotConversationAlias(Base):
         Uuid, ForeignKey("users.id", ondelete="SET NULL")
     )
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class ApiClientGroupRoute(Base):
+    """群承接配置：调用方让这个 AI 员工在这个群的主会话里，以固定的服务账号身份跑一轮。
+
+    调用方为某个 AI 员工配了任何一行，驱动它时就只走群模式（请求里不能再指定员工）。
+    """
+
+    __tablename__ = "api_client_group_routes"
+    __table_args__ = (
+        UniqueConstraint("client_key", "bot_id", "chat_id", name="uq_api_client_group_routes_chat"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")
+    )
+    client_key: Mapped[str] = mapped_column(
+        Text, ForeignKey("api_clients.app_key", ondelete="CASCADE")
+    )
+    bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))
+    chat_id: Mapped[str] = mapped_column(Text)
+    service_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))

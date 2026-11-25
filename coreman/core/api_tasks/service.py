@@ -82,9 +82,21 @@ def client_trigger_text(user: User, client_name: str, prompt: str, images: int =
 async def _bot_for(
     session: AsyncSession, bot_ids: list[uuid.UUID], user: User, key: str, denied: str
 ) -> Bot:
+    bot = await _bot_by_key(session, key)
+    return await check_bot(session, bot_ids, bot, user, denied)
+
+
+async def _bot_by_key(session: AsyncSession, key: str) -> Bot:
     bot = await session.scalar(select(Bot).where(Bot.bot_key == key))
     if bot is None:
         raise TokenError(404, "AI 员工不存在")
+    return bot
+
+
+async def check_bot(
+    session: AsyncSession, bot_ids: list[uuid.UUID], bot: Bot, user: User | None, denied: str
+) -> Bot:
+    """发起方和 AI 员工两边都放行。`user` 为 None（群承接模式）时不看使用白名单。"""
     if bot.id not in bot_ids:
         raise TokenError(403, denied)
     if not bot.enabled:
@@ -93,7 +105,7 @@ async def _bot_for(
         raise TokenError(422, "目前只支持飞书 AI 员工")
     if not bot.api_access:
         raise TokenError(403, "该 AI 员工没有开启「允许 API 驱动」，请联系它的负责人")
-    if not await allowed_to_use(session, bot, user.id):
+    if user is not None and not await allowed_to_use(session, bot, user.id):
         raise TokenError(403, "你不在该 AI 员工的可用名单里")
     return bot
 
@@ -222,7 +234,7 @@ async def create(
         replay = await _replay(session, token, request_id, (bot.id, prompt, target, alias))
         assert replay is not None
         return replay, False
-    return await _start_turn(
+    return await start_turn(
         session,
         row,
         bot=bot,
@@ -235,7 +247,7 @@ async def create(
     ), True
 
 
-async def _start_turn(
+async def start_turn(
     session: AsyncSession,
     row: ApiTask,
     *,
@@ -284,7 +296,7 @@ async def _start_turn(
             kind="message",
             chat_type=chat_type,
             chat_id=chat_id,
-            sender_platform_user_id=pid,
+            sender_platform_user_id=pid or None,
             sender_open_id=None,
             payload=event["payload"],
             reply_context=event["reply_context"],
@@ -361,7 +373,7 @@ async def resolve_member(session: AsyncSession, subject: str) -> User:
     raise TokenError(403, f"无法按邮箱前缀「{subject[:64]}」认出唯一一位在职员工")
 
 
-async def _client_replay(
+async def client_replay(
     session: AsyncSession,
     client: ApiClient,
     request_id: str,
@@ -379,7 +391,7 @@ async def _client_replay(
     return row
 
 
-async def _open_duplicate(
+async def open_duplicate(
     session: AsyncSession,
     client: ApiClient,
     user_id: uuid.UUID,
@@ -407,21 +419,45 @@ async def create_for_client(
     session: AsyncSession,
     *,
     client: ApiClient,
-    subject: str,
+    subject: str | None,
     bot_key: str,
     prompt: str,
     request_id: str | None,
     images: list[uuid.UUID] | None = None,
+    chat_id: str | None = None,
 ) -> tuple[ApiTask, bool]:
-    """业务系统代员工发起一轮：独立会话，结果发在员工和 AI 员工的私聊里。调用方负责提交。"""
+    """业务系统发起一轮。调用方负责提交。
+
+    调用方为这个 AI 员工配了群承接，就以配置的服务账号在群里跑（`groups.create`）；否则代员工
+    发起：独立会话，结果发在员工和 AI 员工的私聊里。"""
     if not prompt.strip() or len(prompt) > PROMPT_MAX:
         raise TokenError(422, f"prompt 须非空且不超过 {PROMPT_MAX} 个字符")
+    from coreman.core.api_tasks import groups
+
+    target_bot = await _bot_by_key(session, bot_key)
+    routes = await groups.routes_for(session, client.app_key, target_bot.id)
+    if routes:
+        return await groups.create(
+            session,
+            client=client,
+            bot=target_bot,
+            routes=routes,
+            subject=subject,
+            prompt=prompt,
+            request_id=request_id,
+            chat_id=chat_id,
+            images=images,
+        )
+    if chat_id is not None:
+        raise TokenError(422, "调用方没有为这个 AI 员工配置群承接，不能指定 chat_id")
+    if subject is None:
+        raise TokenError(422, "需要 user（员工邮箱前缀）")
     user = await resolve_member(session, subject)
-    bot = await _bot_for(session, client.bot_ids, user, bot_key, "调用方没有授权驱动该 AI 员工")
+    bot = await check_bot(session, client.bot_ids, target_bot, user, "调用方没有授权驱动该 AI 员工")
     wanted = list(dict.fromkeys(images or []))
     fingerprint = (user.id, bot.id, prompt, wanted)
     if request_id is not None:
-        replay = await _client_replay(session, client, request_id, fingerprint)
+        replay = await client_replay(session, client, request_id, fingerprint)
         if replay is not None:
             return replay, False
     pid = await feishu_user_id(session, user.id)
@@ -435,7 +471,7 @@ async def create_for_client(
         select(ApiClient.app_key).where(ApiClient.app_key == client.app_key).with_for_update()
     )
     if request_id is not None:
-        replay = await _client_replay(session, client, request_id, fingerprint)
+        replay = await client_replay(session, client, request_id, fingerprint)
         if replay is not None:
             return replay, False
     open_count = await session.scalar(
@@ -449,7 +485,7 @@ async def create_for_client(
             Task.cancel_requested_at.is_(None),
         )
     )
-    same = await _open_duplicate(session, client, user.id, bot.id, prompt, wanted)
+    same = await open_duplicate(session, client, user.id, bot.id, prompt, wanted)
     if same is not None:
         # 同样的内容上一条还没做完（排队、等额度、执行中）：不再建一条。
         return same, False
@@ -471,7 +507,7 @@ async def create_for_client(
     )
     session.add(row)
     await session.flush()
-    return await _start_turn(
+    return await start_turn(
         session,
         row,
         bot=bot,
@@ -569,7 +605,8 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
         conversation["alias"] = row.alias
     who: dict[str, Any] = {"conversation": conversation}
     if row.client_key is not None:
-        # 业务系统代员工发起的：回报是哪位员工，承接固定是他的私聊（独立会话）。
+        # 业务系统发起的：私聊模式回报是哪位员工（承接固定是他的私聊、独立会话），群承接模式
+        # 回报是哪个群。
         from coreman.core.api_tasks import writes
 
         user = await session.get(User, row.user_id)
@@ -582,8 +619,16 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
         )
         if waiting:
             status = "waiting_quota"
+        from coreman.core.api_tasks import groups
+
+        identity: dict[str, Any] = (
+            # 群承接模式：没有员工，回报在哪个群里承接。
+            {"conversation": {"target": "chat", "chat_id": row.chat_id}}
+            if groups.is_group_row(row)
+            else {"user": (user.email or "").split("@", 1)[0].lower() if user else None}
+        )
         who = {
-            "user": (user.email or "").split("@", 1)[0].lower() if user else None,
+            **identity,
             # 运行时额度用完、排队等恢复时的预计重跑时间。
             "resume_at": row.resume_at.isoformat() if waiting and row.resume_at else None,
             # 写操作要员工在私聊里点确认卡：任务结束不等于数据已经写进业务系统。

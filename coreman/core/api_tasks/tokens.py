@@ -24,10 +24,12 @@ NAME_MAX = 64
 class TokenError(ValueError):
     """令牌相关的业务错误；`status` 是给 HTTP 层的状态码。"""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, error: str | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        # 给调用方程序判断用的错误标识（如 `queue_full`），放在响应的 errors 里。
+        self.error = error
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,147 @@
+"""群承接模式的 HTTP 层：管理台配置（只能选服务账号）、发起与查询不带员工、排队满时的错误。"""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from coreman.core.api_tasks import groups
+from coreman.core.db.models import (
+    ApiClient,
+    ApiClientGroupRoute,
+    AuditLog,
+    BotAlertSource,
+    User,
+)
+from tests.api.conftest import login_as
+from tests.api.test_escalations import Signed
+from tests.integration.worker_helpers import seed_bot
+
+
+async def _setup(client, session):  # type: ignore[no-untyped-def]
+    bot, _, cipher = await seed_bot(session)
+    bot.platform, bot.api_access = "feishu", True
+    svc = User(login_name="svc-ops", display_name="运维服务账号", email="svc-ops@example.test")
+    svc.source = "service"
+    person = User(login_name="u-alice", display_name="爱丽丝", email="alice@example.test")
+    session.add_all([svc, person])
+    session.add(
+        ApiClient(
+            app_key="monitor",
+            name="监控系统",
+            scopes=["tasks"],
+            bot_ids=[bot.id],
+            secret_enc=cipher.encrypt("client-secret", "api_clients.secret_enc"),
+        )
+    )
+    await session.flush()
+    session.add(
+        BotAlertSource(
+            bot_id=bot.id, chat_id="oc_alerts", sender_union_id="on_x", service_user_id=svc.id
+        )
+    )
+    await session.commit()
+    return bot, svc, person
+
+
+async def test_admin_configures_group_routes_with_service_accounts_only(client, db_session):
+    bot, svc, person = await _setup(client, db_session)
+    await login_as(client, db_session, role="platform_admin")
+    options = await client.get(
+        "/api/admin/api-clients/group-route-options", params={"bot_id": str(bot.id)}
+    )
+    assert options.status_code == 200, options.text
+    data = options.json()["data"]
+    assert data["alert_sources"] == [{"chat_id": "oc_alerts", "service_user_id": str(svc.id)}]
+    assert [u["id"] for u in data["service_users"]] == [str(svc.id)]
+
+    url = "/api/admin/api-clients/monitor/group-routes"
+    person_route = await client.post(
+        url, json={"bot_id": str(bot.id), "chat_id": "oc_alerts", "service_user_id": str(person.id)}
+    )
+    assert person_route.status_code == 422 and "服务账号" in person_route.json()["message"]
+    created = await client.post(
+        url, json={"bot_id": str(bot.id), "chat_id": "oc_alerts", "service_user_id": str(svc.id)}
+    )
+    assert created.status_code == 201, created.text
+    route = created.json()["data"]
+    assert route["chat_id"] == "oc_alerts" and route["service_user"] == "运维服务账号"
+    again = await client.post(
+        url, json={"bot_id": str(bot.id), "chat_id": "oc_alerts", "service_user_id": str(svc.id)}
+    )
+    assert again.status_code == 409
+    listed = await client.get(url)
+    assert [r["id"] for r in listed.json()["data"]] == [route["id"]]
+    clients = await client.get("/api/admin/api-clients")
+    assert clients.json()["data"]["items"][0]["group_routes"] == 1
+    removed = await client.delete(f"{url}/{route['id']}")
+    assert removed.status_code == 200
+    assert await db_session.scalar(select(ApiClientGroupRoute)) is None
+    actions = set(await db_session.scalars(select(AuditLog.action)))
+    assert {"api_client.group_route.create", "api_client.group_route.delete"} <= actions
+
+
+async def test_bot_must_be_drivable_by_the_client(client, db_session):
+    bot, svc, _ = await _setup(client, db_session)
+    monitor = await db_session.get(ApiClient, "monitor")
+    monitor.bot_ids = []
+    await db_session.commit()
+    await login_as(client, db_session, role="platform_admin")
+    refused = await client.post(
+        "/api/admin/api-clients/monitor/group-routes",
+        json={"bot_id": str(bot.id), "chat_id": "oc_alerts", "service_user_id": str(svc.id)},
+    )
+    assert refused.status_code == 422
+
+
+async def test_only_platform_admins_manage_group_routes(client, db_session):
+    await _setup(client, db_session)
+    await login_as(client, db_session, role="member")
+    denied = await client.get("/api/admin/api-clients/monitor/group-routes")
+    assert denied.status_code == 403
+
+
+async def test_signed_client_runs_queries_and_cancels_without_a_member(client, db_session):
+    bot, svc, _ = await _setup(client, db_session)
+    db_session.add(
+        ApiClientGroupRoute(
+            client_key="monitor", bot_id=bot.id, chat_id="oc_alerts", service_user_id=svc.id
+        )
+    )
+    await db_session.commit()
+    client.auth = Signed("monitor", "client-secret")
+    with_user = await client.post(
+        "/api/infra/tasks/run", json={"user": "alice", "bot_key": "sales_bot", "prompt": "查一下"}
+    )
+    assert with_user.status_code == 422
+    body = {"bot_key": "sales_bot", "prompt": "查一下", "request_id": "alert-9"}
+    created = await client.post("/api/infra/tasks/run", json=body)
+    assert created.status_code == 202, created.text
+    task = created.json()["data"]
+    assert task["conversation"] == {"target": "chat", "chat_id": "oc_alerts"}
+    replay = await client.post("/api/infra/tasks/run", json=body)
+    assert replay.status_code == 200 and replay.json()["data"]["id"] == task["id"]
+    got = await client.get(f"/api/infra/tasks/run/{task['id']}")
+    assert got.status_code == 200 and got.json()["data"]["id"] == task["id"]
+    as_user = await client.get(f"/api/infra/tasks/run/{task['id']}", params={"user": "alice"})
+    assert as_user.status_code == 422
+    cancelled = await client.post(f"/api/infra/tasks/run/{task['id']}/cancel", json={})
+    assert cancelled.status_code == 200 and cancelled.json()["data"]["status"] == "cancelled"
+    audit = await db_session.scalar(select(AuditLog).where(AuditLog.action == "api_task.create"))
+    assert audit.actor_login == "svc-ops" and audit.diff["chat_id"] == "oc_alerts"
+
+
+async def test_full_queue_answers_429_queue_full(client, db_session, monkeypatch):
+    bot, svc, _ = await _setup(client, db_session)
+    db_session.add(
+        ApiClientGroupRoute(
+            client_key="monitor", bot_id=bot.id, chat_id="oc_alerts", service_user_id=svc.id
+        )
+    )
+    await db_session.commit()
+    monkeypatch.setattr(groups, "QUEUE_MAX", 1)
+    client.auth = Signed("monitor", "client-secret")
+    first = await client.post("/api/infra/tasks/run", json={"bot_key": "sales_bot", "prompt": "1"})
+    assert first.status_code == 202
+    full = await client.post("/api/infra/tasks/run", json={"bot_key": "sales_bot", "prompt": "2"})
+    assert full.status_code == 429
+    assert full.json()["errors"] == [{"type": "queue_full"}]

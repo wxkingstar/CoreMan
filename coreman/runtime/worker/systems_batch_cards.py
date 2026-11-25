@@ -4,7 +4,9 @@ Only the asker of the turn that staged the batch counts, in the chat the card wa
 confirm the operation is checked again against today's grants and catalog; if it no longer passes
 nothing runs. Then run tasks (`batch.RUN_KIND`) send the items one by one as the asker, carrying on
 after a failed item, and the conversation continues with the outcome. The asker can stop it from
-the progress card.
+the progress card. A business system's group delivery staged the batch as its service account:
+any group member allowed to use the bot may confirm it, and it then runs as them (they become the
+asker for stopping and continuing).
 """
 
 from __future__ import annotations
@@ -15,12 +17,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks import writes
 from coreman.core.bus import tasks
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, Task, User
 from coreman.core.systems_catalog import batch, confirm
 from coreman.core.timeutils import utcnow
 from coreman.runtime.worker.context import TaskContext
-from coreman.runtime.worker.systems_write_cards import _clicker, _context, _update
+from coreman.runtime.worker.systems_write_cards import _answerer, _clicker, _context, _update, taken
 
 
 async def handle(
@@ -70,8 +73,12 @@ async def handle(
     staged = state.state if state else {}
     if state is None or staged.get("origin_task_id") != origin.id or not staged.get("sent"):
         return "ignored"
-    who = await _clicker(session, origin, inbound, str(staged.get("chat_type")))
-    if who is None or str(who[0]) != staged.get("user_id") or who[1] != staged.get("chat_id"):
+    clicked = await _clicker(session, origin, inbound, str(staged.get("chat_type")), ctx.cipher)
+    group = await writes.group_origin(session, origin)
+    # 群承接模式：确认前群里有权限的人都能答；确认后这一批按确认人执行，停止、继续只认他。
+    who = _answerer(staged, state.status, clicked, group, anyone_while=("open", "expired"))
+    if who is None:
+        await taken(session, bot, inbound, state, clicked, group)
         return "ignored"
     now = utcnow()
     where: dict[str, Any] = {
@@ -141,6 +148,9 @@ async def handle(
     # 再点确认才都不会生效。进程在这之后没了的话，这一批不会执行，保留期满由清理任务删掉。
     state.status = "submitted"
     state.expires_at = now + confirm.KEEP
+    if str(who[0]) != staged.get("user_id"):
+        # 群承接模式由群里的人确认：之后各段都按确认人的身份执行。
+        state.state = {**staged, "user_id": str(who[0])}
     await session.commit()
     user = await session.get(User, who[0])
     pctx = await _context(session, ctx, bot, origin, user) if user is not None else None

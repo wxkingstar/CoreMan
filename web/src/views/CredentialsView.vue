@@ -5,7 +5,7 @@ import { useListQuery } from '@/composables/useListQuery'
 import { nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { credentials, type ApiClient, type JwtKey } from '@/api/infrastructure'
+import { credentials, type ApiClient, type ApiClientGroupRoute, type GroupRouteOptions, type JwtKey } from '@/api/infrastructure'
 import { bots as botsApi } from '@/api/admin'
 import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
@@ -35,12 +35,7 @@ async function edit(row: ApiClient | null) {
   editing.value = row
   // 已下线的接口组（如旧的 cron）不再提供勾选，编辑时丢弃，保存才不会被后端当作未知接口组拒绝。
   Object.assign(form, row ? { ...row, scopes: row.scopes.filter((s) => scopes.includes(s)), bot_ids: [...(row.bot_ids ?? [])] } : { app_key: '', name: '', scopes: [], bot_ids: [], enabled: true })
-  if (!botOptions.value.length) {
-    try {
-      const data = await botsApi.list({ scope: 'all', per_page: 200 })
-      botOptions.value = data.items.filter((b) => b.platform === 'feishu').map((b) => ({ id: b.id, label: `${b.name} (${b.bot_key})` }))
-    } catch (e) { fail(e) }
-  }
+  try { await loadBotOptions() } catch (e) { fail(e) }
   visible.value = true
   await nextTick()
   formRef.value?.clearValidate()
@@ -65,6 +60,61 @@ async function rotateKey() {
   if (busy.value) return
   try { await ElMessageBox.confirm(t('infra.rotateKeyWarning')); busy.value = true; await credentials.rotateKey(); await load() }
   catch (e) { fail(e) } finally { busy.value = false }
+}
+// 群承接：配了之后调用方驱动这个 AI 员工时以服务账号在群里跑，不再指定员工。
+const groupClient = ref<ApiClient | null>(null)
+const groupRows = ref<ApiClientGroupRoute[]>([])
+const groupOptions = ref<GroupRouteOptions>({ alert_sources: [], service_users: [] })
+const groupForm = reactive({ bot_id: '', chat_id: '', service_user_id: '' })
+const groupBusy = ref(false)
+async function loadBotOptions() {
+  if (botOptions.value.length) return
+  const data = await botsApi.list({ scope: 'all', per_page: 200 })
+  botOptions.value = data.items.filter((b) => b.platform === 'feishu').map((b) => ({ id: b.id, label: `${b.name} (${b.bot_key})` }))
+}
+async function openGroups(row: ApiClient) {
+  groupClient.value = row
+  Object.assign(groupForm, { bot_id: row.bot_ids[0] ?? '', chat_id: '', service_user_id: '' })
+  try {
+    await loadBotOptions()
+    groupRows.value = await credentials.groupRoutes(row.app_key)
+    await loadGroupOptions()
+  } catch (e) { fail(e) }
+}
+async function loadGroupOptions() {
+  groupOptions.value = await credentials.groupRouteOptions(groupForm.bot_id || undefined)
+}
+async function onGroupBot() {
+  try { await loadGroupOptions() } catch (e) { fail(e) }
+}
+// 选了告警来源里的群：顺带填上那条来源绑定的服务账号。
+function onGroupChat(chat: string) {
+  const source = groupOptions.value.alert_sources.find((s) => s.chat_id === chat)
+  if (source && !groupForm.service_user_id) groupForm.service_user_id = source.service_user_id
+}
+function botLabel(id: string) { return botOptions.value.find((o) => o.id === id)?.label ?? id }
+async function addGroup() {
+  const client = groupClient.value
+  if (!client || groupBusy.value) return
+  groupBusy.value = true
+  try {
+    const row = await credentials.addGroupRoute(client.app_key, { bot_id: groupForm.bot_id, chat_id: groupForm.chat_id.trim(), service_user_id: groupForm.service_user_id })
+    groupRows.value = [...groupRows.value, row]
+    groupForm.chat_id = ''
+    ElMessage.success(t('common.saved'))
+    await load()
+  } catch (e) { fail(e) } finally { groupBusy.value = false }
+}
+async function removeGroup(row: ApiClientGroupRoute) {
+  const client = groupClient.value
+  if (!client || groupBusy.value) return
+  try {
+    await ElMessageBox.confirm(t('infra.groupRouteRemoveConfirm'))
+    groupBusy.value = true
+    await credentials.removeGroupRoute(client.app_key, row.id)
+    groupRows.value = groupRows.value.filter((r) => r.id !== row.id)
+    await load()
+  } catch (e) { fail(e) } finally { groupBusy.value = false }
 }
 onMounted(load)
 </script>
@@ -152,6 +202,15 @@ onMounted(load)
                 @click="edit(row)"
               >
                 {{ t('common.edit') }}
+              </el-button><el-button
+                v-if="row.scopes.includes('tasks')"
+                link
+                data-test="client-groups"
+                @click="openGroups(row)"
+              >
+                {{ t('infra.groupRoutes') }}<template v-if="row.group_routes">
+                  ({{ row.group_routes }})
+                </template>
               </el-button><el-button
                 link
                 :disabled="busy"
@@ -308,6 +367,125 @@ onMounted(load)
       </template>
     </el-dialog>
     <el-dialog
+      :model-value="!!groupClient"
+      :close-on-click-modal="false"
+      :title="`${t('infra.groupRoutes')} · ${groupClient?.name ?? ''}`"
+      width="720px"
+      @close="groupClient = null"
+    >
+      <p class="field-hint">
+        {{ t('infra.groupRoutesHint') }}
+      </p>
+      <el-table
+        :data="groupRows"
+        :empty-text="t('infra.groupRouteEmpty')"
+      >
+        <el-table-column
+          min-width="140"
+          :label="t('infra.groupRouteBot')"
+        >
+          <template #default="{ row }">
+            {{ row.bot_name ?? row.bot_key ?? row.bot_id }}
+          </template>
+        </el-table-column>
+        <el-table-column
+          min-width="160"
+          prop="chat_id"
+          :label="t('infra.groupRouteChat')"
+        />
+        <el-table-column
+          min-width="120"
+          prop="service_user"
+          :label="t('infra.groupRouteUser')"
+        />
+        <el-table-column
+          width="90"
+          :label="t('common.actions')"
+        >
+          <template #default="{ row }">
+            <el-button
+              link
+              type="danger"
+              :disabled="groupBusy"
+              @click="removeGroup(row)"
+            >
+              {{ t('common.delete') }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <p
+        v-if="!groupClient?.bot_ids.length"
+        class="field-hint group-add"
+      >
+        {{ t('infra.groupRouteNeedsBots') }}
+      </p>
+      <el-form
+        v-else
+        class="group-add"
+        label-position="top"
+      >
+        <el-form-item :label="t('infra.groupRouteBot')">
+          <el-select
+            v-model="groupForm.bot_id"
+            style="width:100%"
+            data-test="group-bot"
+            @change="onGroupBot"
+          >
+            <el-option
+              v-for="id in groupClient?.bot_ids ?? []"
+              :key="id"
+              :value="id"
+              :label="botLabel(id)"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('infra.groupRouteChat')">
+          <el-select
+            v-model="groupForm.chat_id"
+            filterable
+            allow-create
+            default-first-option
+            style="width:100%"
+            :placeholder="t('infra.groupRouteChatHint')"
+            data-test="group-chat"
+            @change="onGroupChat"
+          >
+            <el-option
+              v-for="s in groupOptions.alert_sources"
+              :key="s.chat_id + s.service_user_id"
+              :value="s.chat_id"
+              :label="s.chat_id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('infra.groupRouteUser')">
+          <el-select
+            v-model="groupForm.service_user_id"
+            filterable
+            style="width:100%"
+            data-test="group-user"
+          >
+            <el-option
+              v-for="u in groupOptions.service_users"
+              :key="u.id"
+              :value="u.id"
+              :label="u.display_name ? `${u.display_name} (${u.login_name})` : u.login_name"
+            />
+          </el-select>
+        </el-form-item>
+        <el-button
+          type="primary"
+          :loading="groupBusy"
+          :disabled="!groupForm.bot_id || !groupForm.chat_id.trim() || !groupForm.service_user_id"
+          data-test="group-add"
+          @click="addGroup"
+        >
+          {{ t('infra.groupRouteAdd') }}
+        </el-button>
+      </el-form>
+    </el-dialog>
+    <el-dialog
       :model-value="!!secret"
       :close-on-click-modal="false"
       :title="t('infra.secretOnce')"
@@ -337,4 +515,4 @@ onMounted(load)
 <style scoped>
 :deep(.el-form-item__error) { position: static; width: 100%; padding-top: 6px; line-height: 1.5 }
 .scope-tags { display: flex; flex-wrap: wrap; gap: 6px }
-.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px }</style>
+.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px } .group-add { margin-top: 20px }</style>
