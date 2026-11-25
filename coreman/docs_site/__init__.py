@@ -45,6 +45,11 @@ PAGES: tuple[Page, ...] = (
         "用个人 API 令牌给飞书 AI 员工下任务、查询结果：接口、状态、错误与示例。",
     ),
     Page(
+        "business-system-tasks",
+        "业务系统代员工调用 AI 员工",
+        "业务系统用调用方签名、以员工身份给飞书 AI 员工下任务：图片、写回确认、额度排队、示例。",
+    ),
+    Page(
         "business-system-contract",
         "业务系统 OpenAPI 接入规范",
         "业务系统按这份 OpenAPI 契约提供描述，AI 员工即可按需发现和调用其操作。",
