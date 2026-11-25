@@ -332,6 +332,8 @@ class ChatSession(Base):
     forked_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     # 个人助理的主会话每天换新：这个 relay 会话是所有者时区里哪一天开始的。别的会话不写。
     local_day: Mapped[date | None] = mapped_column(Date)
+    # 引用回复已带进这个 relay 会话的 API 任务：{"relay_session_id", "ids"}；会话换新即作废。
+    api_tasks_loaded: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class UserReached(Base):

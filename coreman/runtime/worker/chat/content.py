@@ -20,6 +20,18 @@ from coreman.runtime.worker.chat.records import log_entry
 from coreman.runtime.worker.context import TaskContext
 
 
+def _with_recall(parts: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
+    """原任务的说明接在引用内容后面；没有引用块（父消息没读到）就单独作为一段文字。"""
+    if any(p.get("type") == "quote" for p in parts):
+        return [
+            {**p, "text": f"{p.get('text') or ''}\n\n{text}".strip()}
+            if p.get("type") == "quote"
+            else p
+            for p in parts
+        ]
+    return [*parts, {"type": "text", "text": text}]
+
+
 class ContentStage(ChatStageBase):
     """组装发给模型的内容。"""
 
@@ -29,6 +41,28 @@ class ContentStage(ChatStageBase):
         if all(p.get("type") == "text" for p in built.parts):
             return sanitize_user_input("\n".join(str(p["text"]) for p in built.parts))
         return sanitize_parts(built.parts)
+
+    @staticmethod
+    async def _recall(ctx: TaskContext, pre: Prepared, parent_id: str) -> Any:
+        """私聊里引用了业务系统 API 任务推来的消息：把原任务带进这一轮（同一会话只带一次）。"""
+        from coreman.core.api_tasks import recall
+        from coreman.core.timeutils import utcnow
+
+        async with ctx.session_factory() as session:
+            found = await recall.recall(
+                session,
+                bot_id=pre.intake.bot.id,
+                chat_id=pre.intake.chat_id,
+                user_id=pre.intake.speaker.user_id,
+                parent_id=parent_id,
+                session_key=pre.intake.session_key,
+                relay_session_id=pre.info.relay_session_id,
+                cipher=ctx.cipher,
+                base_url=ctx.public_base_url,
+                now=utcnow(),
+            )
+            await session.commit()
+        return found
 
     async def _build_content(
         self, ctx: TaskContext, pre: Prepared, parts: list[dict[str, Any]]
@@ -68,6 +102,18 @@ class ContentStage(ChatStageBase):
             quoted_message_id = enriched.media_message_id
         else:
             enriched_text, quoted_message_id = pre.intake.text, None
+        recalled = (
+            await self._recall(ctx, pre, parent_id)
+            if pre.intake.bot.platform == "feishu"
+            and pre.intake.chat_type == "single"
+            and has_parent
+            and not self_render
+            and not media_message_id
+            and isinstance(parent_id, str)
+            else None
+        )
+        if recalled is not None:
+            parts = _with_recall(parts, recalled.text) + recalled.parts
         if pre.intake.bot.platform == "feishu" and pre.intake.chat_type == "group":
             from coreman.runtime.worker.chat.feishu_docs import remember_links
 
@@ -97,6 +143,12 @@ class ContentStage(ChatStageBase):
             )
         else:
             fetcher = ctx.media_fetcher or MediaFetcher()
+
+        if recalled is not None and recalled.parts:
+            # 带进来的原任务图片从上传记录取，其余照旧找平台下载。
+            from coreman.core.api_tasks.recall import RecallFetcher
+
+            fetcher = RecallFetcher(fetcher, ctx.session_factory)  # type: ignore[assignment]
 
         async def on_hint(text: str) -> None:
             # 一有提示就刷出去：攒到 build 之后再写，用户在下载那十几秒里只能看到空白。
