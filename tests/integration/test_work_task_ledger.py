@@ -108,3 +108,55 @@ async def test_due_reminders_go_once_and_cards_postpone(db_session):
     # 延期后重新计。
     due.postpone(row, 1, now + timedelta(hours=4))
     assert row.overdue_notified_at is None and row.due_at > now + timedelta(hours=20)
+
+
+async def test_escalations_are_mirrored_without_their_content(db_session):
+    from coreman.core.crypto import Cipher
+    from coreman.core.db.models import ApiClient, Escalation
+    from tests.integration.worker_helpers import MASTER
+
+    bot, _, _ = await seed_bot(db_session)
+    alice = await _alice(db_session)
+    db_session.add(
+        ApiClient(
+            app_key="skill",
+            name="技能",
+            scopes=["escalations"],
+            secret_enc=Cipher(MASTER).encrypt("s", "api_clients.secret_enc"),
+        )
+    )
+    await db_session.flush()
+    now = datetime.now(UTC)
+    row = Escalation(
+        escalation_id="e1",
+        owner_client_key="skill",
+        request_fingerprint="f",
+        to_platform_user_id="ou_a",
+        bot_id=bot.id,
+        to_user_id=alice.id,
+        notify_platform="feishu_bot",
+        question="线上库存对不上，要不要回滚？",
+        status="pending",
+        expires_at=now + timedelta(minutes=30),
+    )
+    db_session.add(row)
+    await db_session.commit()
+    await ledger.sync(db_session, now)
+    await db_session.commit()
+    mirror = await db_session.scalar(
+        select(WorkTask).where(WorkTask.origin_ref == f"escalation:{row.id}")
+    )
+    assert mirror.title == "人工求助：问alice" and mirror.brief == ""
+    assert "库存" not in mirror.title + mirror.summary
+    assert mirror.status == "waiting" and mirror.waiting_on["human_text"] == "等alice回复"
+    assert mirror.assignee_user_id == alice.id
+    row.status, row.resolution = "completed", "observed"
+    await db_session.commit()
+    await ledger.sync(db_session, now)
+    await db_session.commit()
+    mirror = await db_session.scalar(
+        select(WorkTask)
+        .where(WorkTask.origin_ref == f"escalation:{row.id}")
+        .execution_options(populate_existing=True)
+    )
+    assert mirror.status == "done" and mirror.summary == "线下已解决"
