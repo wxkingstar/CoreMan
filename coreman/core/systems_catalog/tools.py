@@ -111,17 +111,33 @@ DESCRIPTIONS = {
 }
 
 
-def tool_definitions(*, proxied: bool) -> list[dict[str, Any]]:
-    """`proxied`: this turn has a platform-proxied system, so `systems_call` is listed too."""
-    return [
+def tool_definitions(*, proxied: bool, own_agent: bool = False) -> list[dict[str, Any]]:
+    """`proxied`: this turn has a platform-proxied system, so `systems_call` is listed too.
+    `own_agent`: a member's own agent, whose writes are confirmed on a card and then fetched
+    with `systems_call_result`."""
+    from coreman.core.systems_catalog import member_writes
+
+    descriptions = (
+        {**DESCRIPTIONS, "systems_call": member_writes.DESCRIPTION} if own_agent else DESCRIPTIONS
+    )
+    tools = [
         {
             "name": name,
-            "description": DESCRIPTIONS[name],
+            "description": descriptions[name],
             "inputSchema": _slim(model.model_json_schema()),
         }
         for name, model in MODELS.items()
         if proxied or name != "systems_call"
     ]
+    if proxied and own_agent:
+        tools.append(
+            {
+                "name": "systems_call_result",
+                "description": member_writes.RESULT_DESCRIPTION,
+                "inputSchema": _slim(member_writes.Result.model_json_schema()),
+            }
+        )
+    return tools
 
 
 def _slim(value: Any) -> Any:
@@ -218,7 +234,7 @@ ANONYMOUS_CONFIRM = ("destructive", "financial")
 
 def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
     """Whether this turn may call the operation, from the catalog's risk and the call mode."""
-    if ctx.anonymous:
+    if ctx.direct(system):
         return "需确认" if op["risk"] in ANONYMOUS_CONFIRM else ""
     if system.token_delivery == "proxy":
         denied = proxy.policy_error(ctx, system, op)
@@ -229,11 +245,17 @@ def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
 
 
 def call_mode(ctx: Context, system: BusinessSystem) -> str:
-    return "direct" if ctx.anonymous else system.token_delivery
+    return "direct" if ctx.direct(system) else system.token_delivery
 
 
 def call_rules(ctx: Context, system: BusinessSystem) -> str:
-    if ctx.anonymous:
+    if ctx.own_agent and not ctx.direct(system):
+        return (
+            "平台代理：用 systems_call 以你本人的身份调用，平台签发令牌、你本机拿不到。读操作直接"
+            "执行；写操作（write、destructive）平台会在飞书里给你发确认卡，你点确认后才执行，"
+            "之后用 systems_call_result 取结果；financial 不代理；上传文件和批量提交不支持。"
+        )
+    if ctx.direct(system):
         return (
             "调用方直连：平台不签发令牌、不代理。用你自己在这个系统可用的令牌（例如统一登录的"
             "个人访问令牌）按 systems_describe 的 curl 模板直接调用，能做什么由业务系统按令牌"
@@ -630,7 +652,29 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
 def call_template(
     ctx: Context, system: BusinessSystem, op: dict[str, Any], url: str
 ) -> dict[str, Any]:
-    if system.token_delivery == "proxy" and not ctx.anonymous:
+    if ctx.own_agent and not ctx.direct(system):
+        denied = proxy.policy_error(ctx, system, op)
+        multipart = bool(((op.get("validate") or {}).get("body") or {}).get("multipart"))
+        message = (
+            "这个系统由平台代理调用：用 systems_call 传 system、operation_id 和参数"
+            "（path_params、query、body），平台以你本人的身份调用，不要用 curl 直接调用。"
+        )
+        if denied is not None:
+            message += proxy.DENIALS[denied]
+        elif multipart:
+            message += "这个操作要上传文件，成员本机调用不支持，请到业务系统里操作。"
+        elif op["risk"] in proxy.CONFIRMED_RISKS:
+            message += (
+                "这是写操作：调用后平台在飞书里给你发确认卡，确认后才执行，"
+                "再用 systems_call_result 取结果。"
+            )
+        return {
+            "mode": "proxy",
+            "tool": "systems_call",
+            "allowed": denied is None and not multipart,
+            "message": message,
+        }
+    if system.token_delivery == "proxy" and not ctx.direct(system):
         denied = proxy.policy_error(ctx, system, op)
         template = {
             "mode": "proxy",
@@ -646,7 +690,7 @@ def call_template(
         elif op["risk"] in proxy.CONFIRMED_RISKS and denied is None and ctx.settings is not None:
             template["batch"] = batch.instructions(ctx.settings.public_base_url, system, op["risk"])
         return template
-    if ctx.anonymous:
+    if ctx.direct(system):
         env_var, mode = ctx.token_env, "bearer"
     else:
         env_var, mode = token_env_var(system.key), auth_mode(system)
@@ -659,7 +703,7 @@ def call_template(
         content_type = body.get("content_type") or "application/json"
         parts += ["-H", shlex.quote(f"Content-Type: {content_type}"), "-d", "'<请求体>'"]
     notes = "替换路径中的 {参数}，查询参数拼在 URL 上；令牌只用变量引用，不要写出它的值。"
-    if ctx.anonymous:
+    if ctx.direct(system):
         notes += (
             f"{env_var} 是调用方本机的环境变量，放你自己在这个系统可用的令牌"
             "（例如统一登录的个人访问令牌）；平台不提供令牌。"
@@ -667,7 +711,7 @@ def call_template(
             "写进 shell 启动文件后重开 Agent；不要改用别的凭据。"
         )
     return {
-        "mode": "direct" if ctx.anonymous else "env",
+        "mode": "direct" if ctx.direct(system) else "env",
         "token_env": env_var,
         "auth": auth_label(mode),
         "curl": " ".join(parts),
@@ -829,7 +873,13 @@ async def describe(
 
 
 async def dispatch(ctx: Context, name: str, arguments: Any) -> dict[str, Any]:
-    model = MODELS.get(name)
+    from coreman.core.systems_catalog import member_writes
+
+    model = (
+        member_writes.Result
+        if name == "systems_call_result" and ctx.own_agent
+        else MODELS.get(name)
+    )
     if model is None or not isinstance(arguments, dict):
         return {"error": "invalid_tool_or_arguments"}
     try:
@@ -862,6 +912,10 @@ async def dispatch(ctx: Context, name: str, arguments: Any) -> dict[str, Any]:
         if ctx.anonymous:
             return {"error": "invalid_tool_or_arguments"}
         return await proxy.call(ctx, args)
+    if isinstance(args, member_writes.Result):
+        if not ctx.own_agent:
+            return {"error": "invalid_tool_or_arguments"}
+        return await member_writes.result(ctx, args)
     assert isinstance(args, Describe)
     system = ctx.system(args.system)
     if system is None:

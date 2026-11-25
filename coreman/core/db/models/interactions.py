@@ -38,6 +38,7 @@ INTERACTION_KINDS = (
     "cloud_write",
     "assistant_write",
     "systems_batch",
+    "member_write",
 )
 INTERACTION_STATUSES = ("open", "submitted", "cancelled", "expired")
 ANNOUNCEMENT_SCOPES = ("global", "relay", "bot")

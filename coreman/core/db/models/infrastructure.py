@@ -227,6 +227,8 @@ class BusinessTokenIssue(Base):
     # JWT 的 jti；外部签发方返回不透明令牌时为空。
     token_id: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 为成员本机 Agent 签发（没有任务）：OAuth 授权 id。
+    oauth_grant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class SystemCall(Base):
@@ -240,6 +242,7 @@ class SystemCall(Base):
     __table_args__ = (
         Index("system_calls_task_idx", "task_id"),
         Index("system_calls_time_idx", "called_at"),
+        Index("system_calls_user_time_idx", "user_id", "called_at"),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     called_at: Mapped[datetime] = mapped_column(
@@ -259,6 +262,8 @@ class SystemCall(Base):
     token_id: Mapped[str | None] = mapped_column(Text)
     # 响应太大或是文件时转存到短期附件存储（stored_objects.id）；不加外键，附件过期删除后仍留记录。
     object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 成员本机 Agent 经目录 MCP 的调用（没有任务）：OAuth 授权 id。
+    oauth_grant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 BATCH_ITEM_STATUSES = (
