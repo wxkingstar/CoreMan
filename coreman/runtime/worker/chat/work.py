@@ -31,7 +31,7 @@ from coreman.core.db.models import (
     WorkTaskEvent,
     WorkTaskRun,
 )
-from coreman.core.work_tasks import cards
+from coreman.core.work_tasks import cards, flow
 from coreman.core.work_tasks.service import name_of, to_review
 from coreman.runtime.worker.chat.inbound import joined_text, message_type_of
 from coreman.runtime.worker.chat.models import Intake, Verdict
@@ -299,6 +299,13 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
         ]
         if row.brief:
             lines.append(f"调度员写的要求：{row.brief}")
+    elif row.requester_bot_id and row.parent_id:
+        parent = await session.get(WorkTask, row.parent_id)
+        lines = [
+            f"这一轮在做子任务 {row.code}（{row.title}）：AI 员工{row.requester_name}做"
+            f"{parent.code if parent else '上级任务'}时拆给你的。你是在替{owner}办事，"
+            f"权限和{owner}自己找你时一样。做完的结果由平台交回{row.requester_name}。",
+        ]
     else:
         lines = [
             f"这一轮在做任务 {row.code}（{row.title}）：{row.requester_name or owner}在任务平台上"
@@ -323,11 +330,23 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
         )
     extra = str(ctx.task.payload.get("work_note") or "")
     if extra:
-        if ctx.task.payload.get("work_trigger") == "rerun":
+        trigger = ctx.task.payload.get("work_trigger")
+        if trigger == "rerun":
             lines.append(f"这一轮是验收没通过、交回给你重做。退回理由：{extra}")
+        elif trigger == "resume":
+            lines.append(
+                extra + "\n汇总以上结果接着做；做完用 submit_result 交付，report 写完整汇报。"
+            )
+        elif trigger == "comment":
+            lines.append(f"这一轮是代表人看过后补充的话，按它接着做：{extra}")
         else:
             lines.append(f"这一轮是补充：{extra}")
-    if intake.chat_type == "group":
+    if ctx.task.payload.get("work_silent"):
+        reply = (
+            "怎么回复：这一轮的回复不发给任何人，用 submit_result 交付（result、output、digest），"
+            "回复里简短重复结论即可。"
+        )
+    elif intake.chat_type == "group":
         reply = "怎么回复：你的回复会发到群里、回复这条消息。"
     else:
         reply = f"怎么回复：你的回复会发到你和{owner}的私聊里。"
@@ -365,8 +384,10 @@ async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) 
     first = not await session.scalar(
         select(WorkTaskRun.id).where(WorkTaskRun.work_task_id == row.id).limit(1)
     )
-    row.status, row.closed_at, row.updated_at = "in_progress", None, datetime.now(UTC)
-    row.waiting_on, row.ask = None, None
+    row.closed_at, row.updated_at = None, datetime.now(UTC)
+    if not flow.waiting_for_children(row):
+        # 在等子任务时有人接着找它（例如带编号 @ 它）：照常回答，任务仍在等子任务的结果。
+        row.status, row.waiting_on, row.ask = "in_progress", None, None
     if row.claimed_at is None:
         row.claimed_at = row.updated_at
     payload = ctx.task.payload
@@ -434,8 +455,29 @@ async def final_transition(
     # 编号按要求写成了任务页链接：判断开头和记成一句话时都只看编号。
     first = _LINKED.sub(r"\1", first)
     now = datetime.now(UTC)
+    if flow.waiting_for_children(row) or (row.waiting_on or {}).get("kind") == "queue":
+        # 这一轮派出了子任务或问了人：任务在等结果，有结果时平台交回它接着做。
+        # 或者这一轮还没结束，平台已经排了下一轮（子任务都有结果了、被退回、有人补充）：
+        # 以下一轮为准，这一轮不改任务。
+        if run is not None:
+            run.status, run.outcome, run.ended_at = "waiting", first[:SUMMARY_LIMIT], now
+        return
+    # 这一轮用 submit_result 交付过：以它写的一句话为准，不从回复里猜。
+    submitted = await session.scalar(
+        select(WorkTaskEvent)
+        .where(
+            WorkTaskEvent.work_task_id == row.id,
+            WorkTaskEvent.kind == "submitted",
+            WorkTaskEvent.chat_task_id == ctx.task.id,
+        )
+        .order_by(WorkTaskEvent.id.desc())
+        .limit(1)
+    )
     stuck = first.startswith(f"{row.code} 卡住")
-    if verdict.log_status == "success" and not stuck:
+    if submitted is not None and verdict.log_status in ("success", "ask_user"):
+        outcome, kind = "done", "done"
+        first = f"{row.code} 完成：{submitted.agent_detail.get('result', '')}"
+    elif verdict.log_status == "success" and not stuck:
         # 没按格式写开头的（含不跟进的事）：在等代表人确认就是等确认，否则当作做完了。
         waiting = not first.startswith(f"{row.code} 完成") and "确认" in body
         outcome, kind = ("confirm", "need_confirm") if waiting else ("done", "done")
@@ -460,6 +502,20 @@ async def final_transition(
         _wait_on_principal(row, f"卡住了：{reason}")
     if run is not None:
         run.status, run.outcome, run.ended_at = outcome, text, now
+    if outcome == "done" and not row.report:
+        has_children = await session.scalar(
+            select(WorkTask.id).where(WorkTask.parent_id == row.id).limit(1)
+        )
+        if has_children:
+            session.add(
+                WorkTaskEvent(
+                    work_task_id=row.id,
+                    kind="missing_report",
+                    actor_type="system",
+                    human_text="交付时没有附完整汇报",
+                    chat_task_id=ctx.task.id,
+                )
+            )
     session.add(
         WorkTaskEvent(
             work_task_id=row.id,
@@ -472,7 +528,7 @@ async def final_transition(
         )
     )
     await session.flush()
-    await cards.sync(
+    await flow.settle(
         session,
         row,
         before_ask=before_ask,

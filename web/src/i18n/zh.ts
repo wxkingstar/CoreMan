@@ -491,6 +491,7 @@ export default {
     assignee: '执行人', requester: '发起人', dispatcher: '调度员', created: '创建时间', updated: '更新时间',
     summary: '一句话', related: '相关任务', timeline: '经过', noEvents: '还没有记录',
     agentLayer: '给 Agent 看的细节', agentLayerHint: '默认折叠。这里是交给 AI 员工的完整背景与每一轮的细节，所有人都能展开。',
+    report: '完整汇报', artifacts: '产出',
     brief: '背景与要求', digest: '任务记要', decision: '调度依据',
     probability: '判断概率', dispatchRaw: '调度员的原始输出', recentMessages: '当时的群聊', detail: '细节',
     notFound: '任务不存在', unassigned: '未指派', empty: '暂无任务',
@@ -509,8 +510,8 @@ export default {
     confirmAssign: '确定', principal: '代表人', reviewer: '验收人', noReview: '不验收', parent: '父任务', children: '子任务',
     commentPlaceholder: '写评论：所有人都能看到，也会带给接手的 AI 员工', comment: '评论',
     runs: 'AI 员工运行记录（{n} 轮）', fullEvents: '完整事件与细节',
-    triggers: { dispatch: '调度员交接', chat: '对话里叫它开工', cron: '定时领取', rerun: '退回重做', web: '网页开工', followup: '接着找它', api: '接口发起' },
-    runStatuses: { running: '运行中', done: '已交付', confirm: '等确认', failed: '卡住了', cancelled: '已取消' },
+    triggers: { subtask: '上级派的子任务', resume: '子任务有结果后接着做', comment: '补充后接着做', handoff: '别的员工转交', dispatch: '调度员交接', chat: '对话里叫它开工', cron: '定时领取', rerun: '退回重做', web: '网页开工', followup: '接着找它', api: '接口发起' },
+    runStatuses: { running: '运行中', done: '已交付', confirm: '等确认', failed: '卡住了', cancelled: '已取消', waiting: '等子任务' },
     deliverPrompt: '一句话写结果（给人看，60 字以内）', cancelPrompt: '为什么取消？', reopenPrompt: '为什么重开？（可选）',
   },
   groupObserve: {

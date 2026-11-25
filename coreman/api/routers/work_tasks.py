@@ -30,7 +30,7 @@ from coreman.core.db.models import (
     WorkTaskRun,
     WorkTaskWatcher,
 )
-from coreman.core.work_tasks import cards, execute, service
+from coreman.core.work_tasks import execute, flow, service
 from coreman.core.work_tasks.service import Assignee, WorkTaskError
 
 router = APIRouter(
@@ -149,6 +149,7 @@ def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -
         ),
         "can_manage": viewer is not None and service.can_manage(row, viewer),
         "related_codes": list(row.related_codes or []),
+        "artifacts": list(row.artifacts or []),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "closed_at": row.closed_at,
@@ -277,6 +278,7 @@ async def _detail(session: AsyncSession, row: WorkTask, user: User) -> dict[str,
         "agent": {
             "brief": row.brief,
             "digest": row.digest,
+            "report": row.report,
             "waiting_on": row.waiting_on,
             "runs": [
                 {
@@ -394,7 +396,7 @@ async def _act(
         await op(row)
     except WorkTaskError as exc:
         raise _fail(exc) from exc
-    await cards.sync(
+    await flow.settle(
         session,
         row,
         before_ask=before_ask,
@@ -428,7 +430,7 @@ async def create_work_task(
         )
     except WorkTaskError as exc:
         raise _fail(exc) from exc
-    await cards.sync(
+    await flow.settle(
         session,
         row,
         before_ask=None,
@@ -496,9 +498,28 @@ async def comment_work_task(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    return await _act(
-        request, session, user, code, lambda row: service.comment(session, row, user, body.text)
-    )
+    async def op(row: WorkTask) -> None:
+        await service.comment(session, row, user, body.text)
+        # AI 员工停下来等人（卡住、等确认）时，能管这件事的人补的话直接交回它接着做。
+        if row.assignee_bot_id and service.restartable(row) and service.can_manage(row, user):
+            bot = await session.get(Bot, row.assignee_bot_id)
+            if bot is None:
+                return
+            try:
+                async with session.begin_nested():
+                    await execute.start(
+                        session,
+                        row,
+                        bot=bot,
+                        trigger="comment",
+                        triggered_by={"user_id": str(user.id), "name": service.name_of(user)},
+                        note=body.text.strip(),
+                        silent=row.requester_bot_id is not None,
+                    )
+            except WorkTaskError:
+                pass  # 交不回去（例如没私聊过）：评论照样记下，页面仍提示怎么叫它开工。
+
+    return await _act(request, session, user, code, op)
 
 
 @router.post("/{code}/complete")

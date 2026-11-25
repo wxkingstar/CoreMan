@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
 from coreman.core.db.models import Bot, InboundEvent, User, UserIdentity, WorkTask
-from coreman.core.work_tasks import cards, execute
+from coreman.core.work_tasks import cards, execute, flow
 from coreman.core.work_tasks.service import WorkTaskError, current_line
 from coreman.runtime.worker.context import TaskContext
 
@@ -83,7 +83,7 @@ async def handle(
         )
         return "stale"
     await session.flush()
-    await cards.sync(
+    await flow.settle(
         session,
         row,
         before_ask=before_ask,

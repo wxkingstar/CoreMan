@@ -492,6 +492,7 @@ export default {
     assignee: '担当', requester: '依頼者', dispatcher: 'ディスパッチャー', created: '作成日時', updated: '更新日時',
     summary: 'ひとこと', related: '関連タスク', timeline: '経過', noEvents: 'まだ記録がありません',
     agentLayer: 'エージェント向けの詳細', agentLayerHint: '既定で折りたたまれています。AI 社員に渡した背景と各回の詳細で、誰でも展開できます。',
+    report: '完全な報告', artifacts: '成果物',
     brief: '背景と要件', digest: 'タスク記録', decision: '振り分けの根拠',
     probability: '判断確率', dispatchRaw: 'ディスパッチャーの出力', recentMessages: '当時のグループメッセージ', detail: '詳細',
     notFound: 'タスクが見つかりません', unassigned: '未割り当て', empty: 'タスクはまだありません',
@@ -510,8 +511,8 @@ export default {
     confirmAssign: '確定', principal: '代理元', reviewer: '検収者', noReview: '検収なし', parent: '親タスク', children: 'サブタスク',
     commentPlaceholder: 'コメント：全員が見られ、担当の AI 社員にも渡されます', comment: 'コメント',
     runs: 'AI 社員の実行記録（{n} 回）', fullEvents: 'すべてのイベントと詳細',
-    triggers: { dispatch: 'ディスパッチャーから引き継ぎ', chat: '会話で開始指示', cron: '定期タスクで受け取り', rerun: '差し戻して再実行', web: 'Web から開始', followup: '続きの依頼', api: 'API' },
-    runStatuses: { running: '実行中', done: '納品済み', confirm: '確認待ち', failed: '行き詰まり', cancelled: 'キャンセル' },
+    triggers: { subtask: '上位からのサブタスク', resume: 'サブタスクの結果で再開', comment: 'コメント後に再開', handoff: '他の社員から引き継ぎ', dispatch: 'ディスパッチャーから引き継ぎ', chat: '会話で開始指示', cron: '定期タスクで受け取り', rerun: '差し戻して再実行', web: 'Web から開始', followup: '続きの依頼', api: 'API' },
+    runStatuses: { running: '実行中', done: '納品済み', confirm: '確認待ち', failed: '行き詰まり', cancelled: 'キャンセル', waiting: 'サブタスク待ち' },
     deliverPrompt: '結果をひとことで（人向け、60 字以内）', cancelPrompt: 'キャンセルの理由は？', reopenPrompt: '再開の理由は？（任意）',
   },
   groupObserve: {
