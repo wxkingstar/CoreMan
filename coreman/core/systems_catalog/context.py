@@ -23,6 +23,12 @@ PROXY_TOKEN_AAD = "systems_catalog.proxy_token.v1"
 DIRECT_TOKEN_ENV = "SYSTEMS_TOKEN"
 # A cached proxy token this close to expiry is replaced before use.
 TOKEN_MARGIN_SECONDS = 30
+# A member's own agent (no task): its tokens live this long, cached in this process only.
+OWN_AGENT_TOKEN_TTL = 900
+# Per process, keyed by (OAuth grant id, system key): (issued token) and (until, codes or None).
+_own_tokens: dict[tuple[Any, str], IssuedToken] = {}
+_own_perms: dict[tuple[Any, str], tuple[float, list[str] | None]] = {}
+_OWN_CACHE_MAX = 10_000
 
 
 def carried(payload: dict[str, Any], *drop: str) -> dict[str, Any]:
@@ -41,6 +47,10 @@ class Context:
     `anonymous` is the read-only catalog with no member, task or tokens (`operator` is None): it
     serves stored catalogs only, never filters by permission, and the caller reaches the business
     system directly with its own credential.
+
+    `own_agent` is a member's own agent with a CoreMan OAuth token (`operator` has an OAuth grant
+    and no task): stored catalogs only, filtered by the member's permissions; proxied systems are
+    called as the member with tokens kept in this process, other systems directly.
     """
 
     session: AsyncSession
@@ -70,6 +80,20 @@ class Context:
     token_env: str = DIRECT_TOKEN_ENV
     # Large and file responses are kept in short-term object storage when set (see `spill`).
     settings: Settings | None = None
+    # Own agent only: the OAuth client's self-reported name, shown on confirmation cards.
+    client_name: str = ""
+
+    @property
+    def own_agent(self) -> bool:
+        return (
+            self.operator is not None
+            and self.operator.task_id is None
+            and self.operator.oauth_grant_id is not None
+        )
+
+    def direct(self, system: BusinessSystem) -> bool:
+        """The caller reaches this system itself, with its own credential."""
+        return self.anonymous or (self.own_agent and system.token_delivery != "proxy")
 
     def system(self, key: str) -> BusinessSystem | None:
         return next((s for s in self.systems if s.key == key), None)
@@ -90,6 +114,8 @@ async def proxy_token(ctx: Context, system: BusinessSystem) -> IssuedToken:
 
     Raises TokenProviderError when it cannot be issued.
     """
+    if ctx.own_agent:
+        return await _own_token(ctx, system)
     cipher = ctx.issuance.cipher
     cached = ctx.tokens.get(system.key)
     if (
@@ -123,10 +149,57 @@ async def proxy_token(ctx: Context, system: BusinessSystem) -> IssuedToken:
     return token
 
 
+def _prune(cache: dict[Any, Any]) -> None:
+    if len(cache) > _OWN_CACHE_MAX:
+        cache.clear()
+
+
+async def _own_token(ctx: Context, system: BusinessSystem) -> IssuedToken:
+    """A member's own agent has no task to keep tokens in: they stay in this process, short."""
+    key = (ctx.member.oauth_grant_id, system.key)
+    cached = _own_tokens.get(key)
+    if cached is not None and cached.expires_at - TOKEN_MARGIN_SECONDS > time.time():
+        return cached
+    token = await service.issue_short_token(
+        ctx.session,
+        ctx.issuance,
+        system,
+        ctx.member,
+        ttl_seconds=OWN_AGENT_TOKEN_TTL,
+        purpose="proxy",
+    )
+    await ctx.session.commit()
+    _prune(_own_tokens)
+    _own_tokens[key] = token
+    return token
+
+
+async def _own_held(
+    ctx: Context, system: BusinessSystem, loaded: service.Loaded
+) -> service.Held | None:
+    key = (ctx.member.oauth_grant_id, system.key)
+    cached = _own_perms.get(key)
+    if cached is not None and cached[0] > time.time():
+        return service.Held(cached[1]) if cached[1] is not None else None
+    codes: list[str] | None = None
+    try:
+        codes = await service.held_permissions(
+            loaded, system.base_url or "", await _own_token(ctx, system)
+        )
+    except TokenProviderError:
+        codes = None
+    until = time.time() + (OWN_AGENT_TOKEN_TTL if codes is not None else PERMISSIONS_RETRY_SECONDS)
+    _prune(_own_perms)
+    _own_perms[key] = (until, codes)
+    return service.Held(codes) if codes is not None else None
+
+
 async def held(ctx: Context, system: BusinessSystem, loaded: service.Loaded) -> service.Held | None:
     """The member's permission codes for this system, cached in the task; None = no filtering."""
     if ctx.anonymous or not isinstance(loaded.compiled.get("permissions"), dict):
         return None
+    if ctx.own_agent:
+        return await _own_held(ctx, system, loaded)
     cached = ctx.perms.get(system.key)
     if isinstance(cached, dict):
         if isinstance(cached.get("codes"), list):
@@ -160,8 +233,9 @@ def visible(op: dict[str, Any], codes: service.Held | None) -> bool:
 
 
 async def catalog(ctx: Context, system: BusinessSystem) -> service.Loaded | None:
-    # The anonymous catalog has nobody to fetch as: it serves what tasks and admins last fetched.
-    if not ctx.anonymous:
+    # The anonymous catalog has nobody to fetch as, and members' own agents do not fetch either:
+    # both serve what tasks and admins last fetched.
+    if not ctx.anonymous and not ctx.own_agent:
         await service.ensure_fresh(ctx.session, ctx.issuance, system, ctx.member)
     return await service.load(ctx.session, system.key)
 

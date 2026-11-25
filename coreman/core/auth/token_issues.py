@@ -36,6 +36,7 @@ async def record_issues(
     task_id: int | None = None,
     bot_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
+    oauth_grant_id: uuid.UUID | None = None,
 ) -> None:
     """在调用方事务里写签发记录，随调用方一起提交。写失败只记日志：追溯记录不能反过来弄挂任务。"""
     rows = [
@@ -44,6 +45,7 @@ async def record_issues(
             "task_id": task_id,
             "bot_id": bot_id,
             "user_id": user_id,
+            "oauth_grant_id": oauth_grant_id,
             "subject": subject,
             "system_key": r.system_key,
             "provider": r.provider,

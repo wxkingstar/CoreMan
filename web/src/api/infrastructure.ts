@@ -13,11 +13,14 @@ export interface BusinessSystem {
   /** 授权给 AI 员工时自动安装的技能，撤销授权时一并卸载。 */
   companion_skill_id?: string | null
   enabled: boolean; sort_order: number; default_for_all_bots: boolean; allowed_bot_ids: string[] | null; version: number
+  /** production：真实环境；test：测试环境。旧后端不返回，按真实环境处理。 */
+  environment?: SystemEnvironment
   /** 平台代理（token_delivery=proxy）的批量与调用上限；旧后端不返回。 */
   batch_write_max?: number; batch_destructive_max?: number; proxy_calls_per_turn?: number; batch_interval_ms?: number
   /** 只在保存的响应里出现：保存后立即拉取目录的结果，未配置 OpenAPI 地址或地址未改动时为 null。 */
   catalog?: SystemCatalog | CatalogSkipped | null
 }
+export type SystemEnvironment = 'production' | 'test'
 export type SystemInput = Omit<BusinessSystem, 'version' | 'catalog' | 'sitemap_url'>
 export interface CatalogFinding { rule: string; severity: 'error' | 'warn'; path: string; message: string }
 /** 操作目录状态：拉取并编译业务系统的 OpenAPI 描述后的结果。 */
@@ -39,7 +42,7 @@ export interface TokenProvider { id: string; max_token_ttl_seconds: number | nul
 export interface SystemGrantsOut { system_keys: string[]; write_keys: string[]; version: number }
 export const systems = {
   providers: () => call<TokenProvider[]>(http.get('/api/admin/token-providers')),
-  list: (page = 1) => call<Page<BusinessSystem>>(http.get('/api/admin/systems', { params: { page } })),
+  list: (page = 1, environment?: SystemEnvironment) => call<Page<BusinessSystem>>(http.get('/api/admin/systems', { params: { page, environment } })),
   create: (body: SystemInput) => call<BusinessSystem>(http.post('/api/admin/systems', body)),
   update: (row: BusinessSystem, body: Omit<SystemInput, 'key'>) => call<BusinessSystem>(http.put(`/api/admin/systems/${row.key}`, body, { headers: { 'If-Match': String(row.version) } })),
   remove: (row: BusinessSystem) => call<null>(http.delete(`/api/admin/systems/${row.key}`, { headers: { 'If-Match': String(row.version) } })),

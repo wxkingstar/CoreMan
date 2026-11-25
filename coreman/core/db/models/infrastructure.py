@@ -25,6 +25,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
 TOKEN_DELIVERIES = ("env", "proxy", "mcp")
+# production：真实环境；test：测试环境（连测试库、常免登录）。
+# 管理台和 AI 员工的系统权限默认只列真实环境。
+SYSTEM_ENVIRONMENTS = ("production", "test")
 # 平台代理的批量与调用上限：列名 → (默认, 最小, 最大)。管理员只能在这个范围内按系统调整。
 PROXY_LIMITS: dict[str, tuple[int, int, int]] = {
     "batch_write_max": (1000, 1, 50000),
@@ -46,6 +49,7 @@ class BusinessSystem(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("key ~ '^[a-z][a-z0-9_]{0,49}$'", name="key_format"),
         CheckConstraint(enum_check("token_delivery", TOKEN_DELIVERIES), name="token_delivery"),
+        CheckConstraint(enum_check("environment", SYSTEM_ENVIRONMENTS), name="environment"),
         *_limit_checks(),
     )
     key: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -68,6 +72,7 @@ class BusinessSystem(TimestampMixin, Base):
     token_audience: Mapped[str | None] = mapped_column(Text)
     access_test_url: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    environment: Mapped[str] = mapped_column(Text, server_default=text("'production'"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     default_for_all_bots: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     allowed_bot_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(Uuid))
@@ -222,6 +227,8 @@ class BusinessTokenIssue(Base):
     # JWT 的 jti；外部签发方返回不透明令牌时为空。
     token_id: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 为成员本机 Agent 签发（没有任务）：OAuth 授权 id。
+    oauth_grant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class SystemCall(Base):
@@ -235,6 +242,7 @@ class SystemCall(Base):
     __table_args__ = (
         Index("system_calls_task_idx", "task_id"),
         Index("system_calls_time_idx", "called_at"),
+        Index("system_calls_user_time_idx", "user_id", "called_at"),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     called_at: Mapped[datetime] = mapped_column(
@@ -254,6 +262,8 @@ class SystemCall(Base):
     token_id: Mapped[str | None] = mapped_column(Text)
     # 响应太大或是文件时转存到短期附件存储（stored_objects.id）；不加外键，附件过期删除后仍留记录。
     object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 成员本机 Agent 经目录 MCP 的调用（没有任务）：OAuth 授权 id。
+    oauth_grant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 BATCH_ITEM_STATUSES = (

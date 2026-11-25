@@ -8,7 +8,8 @@ CoreMan 是一个 AI 员工平台：在飞书和企业微信里运行 AI 员工�
 
 | 主题 | 给谁 | 一句话 |
 |---|---|---|
-| [本机接入业务系统目录](systems-catalog-mcp.md) | 用 Claude Code、Codex 等本机 Agent 的成员 | 把 CoreMan 的业务系统操作目录接成 MCP，Agent 查到接口后用你自己的令牌直连业务系统。 |
+| [本机接入业务系统目录](systems-catalog-mcp.md) | 用 Claude Code、Codex 等本机 Agent 的成员 | 把 CoreMan 的业务系统操作目录接成 MCP：登录后按你本人的权限查接口，平台代理的系统由 CoreMan 以你的身份代为调用，写操作在飞书里确认。 |
+| [命令行 coreman](coreman-cli.md) | 想在终端或脚本里管理 CoreMan 的成员，以及他们的本机 Agent | 在自己电脑上装 `coreman`，浏览器登录一次，之后以本人身份管理 AI 员工、定时任务等，权限与管理台一致。 |
 | [通过 API 驱动 AI 员工](api-tasks.md) | 脚本、外部系统、你自己的 Agent | 用个人 API 令牌给飞书 AI 员工下一件事，在飞书会话里进行，并拿回结果。 |
 | [业务系统代员工调用 AI 员工](business-system-tasks.md) | 业务系统的开发者 | 一个调用方签名，以员工身份给 AI 员工下任务（可带图片），结果发到员工的飞书私聊，写回前由员工确认。 |
 | [业务系统 OpenAPI 接入规范](business-system-contract.md) | 想让 AI 员工调用自己 API 的业务系统 | 按这份契约提供 OpenAPI 描述，AI 员工就能按需发现并调用你的操作。 |
@@ -24,6 +25,10 @@ CoreMan 是一个 AI 员工平台：在飞书和企业微信里运行 AI 员工�
 | `{{COREMAN_BASE_URL}}/docs/<页面>.md` | 单页 Markdown，例如 `{{COREMAN_BASE_URL}}/docs/api-tasks.md`。 |
 
 网页地址加 `?for=ai`，或请求头带 `Accept: text/markdown`，返回的也是这一页的 Markdown。文中的地址都已填成本 CoreMan 的地址，可以照抄。
+
+## 本机接入要先登录
+
+MCP 和命令行都以你本人的身份访问 CoreMan：第一次使用时在浏览器里登录 CoreMan、确认授权（登录方式和管理台一样）。登录过的本机应用都列在管理台「我的 API 令牌」页的「本机应用授权」里，随时可以撤销。
 
 ## 访问
 

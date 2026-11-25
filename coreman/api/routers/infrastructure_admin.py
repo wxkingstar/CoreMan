@@ -72,6 +72,8 @@ class SystemIn(BaseModel):
     token_audience: str | None = Field(default=None, max_length=2048)
     access_test_url: str | None = Field(default=None, max_length=2048)
     enabled: bool = True
+    # production：真实环境；test：测试环境。更新时不传沿用库里的值（旧管理台不认识这一项）。
+    environment: Literal["production", "test"] = "production"
     sort_order: int = 0
     default_for_all_bots: bool = False
     # 空列表 = 显式白名单且暂无机器人；null = 对全部机器人开放，必须由管理员明确选择。
@@ -204,6 +206,7 @@ def system_out(row: BusinessSystem) -> dict[str, Any]:
             "token_audience",
             "access_test_url",
             "enabled",
+            "environment",
             "sort_order",
             "default_for_all_bots",
             "allowed_bot_ids",
@@ -460,12 +463,13 @@ async def list_systems(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
     page: PageParams = Depends(),
+    environment: Literal["production", "test"] | None = None,
 ) -> dict[str, Any]:
-    data = await paginate(
-        session,
-        select(BusinessSystem).order_by(BusinessSystem.sort_order, BusinessSystem.key),
-        page,
-    )
+    """不带 environment 时列出全部（旧管理台和其他调用方照旧）。"""
+    query = select(BusinessSystem).order_by(BusinessSystem.sort_order, BusinessSystem.key)
+    if environment:
+        query = query.where(BusinessSystem.environment == environment)
+    data = await paginate(session, query, page)
     data["items"] = [system_out(row) for row in data["items"]]
     return {"code": 0, "data": data}
 
@@ -504,6 +508,7 @@ async def create_system(
                         "token_delivery",
                         "token_audience",
                         "access_test_url",
+                        "environment",
                     )
                 }
                 | delivery_audit(values)
@@ -549,17 +554,17 @@ async def update_system(
     values = body.row_values()
     catalog_source = (row.base_url, row.openapi_url)
     provider_fields = ("token_provider", "token_delivery", "token_audience", "access_test_url")
-    # 旧管理台不认识 MCP 两项和代理上限，不传时沿用库里的值。
-    for field in (*provider_fields, "mcp_url", "companion_skill_id", *PROXY_LIMITS):
+    # 旧管理台不认识 MCP 两项、环境和代理上限，不传时沿用库里的值。
+    for field in (*provider_fields, "mcp_url", "companion_skill_id", "environment", *PROXY_LIMITS):
         if field not in body.model_fields_set:
             values[field] = getattr(row, field)
     validate_provider_settings(request, values, row.token_provider)
     await validate_delivery(session, values)
     await validate_proxy(session, values, row)
     provider_diff = diff_dict(
-        {field: getattr(row, field) for field in (*provider_fields, *PROXY_LIMITS)}
+        {field: getattr(row, field) for field in (*provider_fields, "environment", *PROXY_LIMITS)}
         | delivery_audit({"mcp_url": row.mcp_url, "companion_skill_id": row.companion_skill_id}),
-        {field: values[field] for field in (*provider_fields, *PROXY_LIMITS)}
+        {field: values[field] for field in (*provider_fields, "environment", *PROXY_LIMITS)}
         | delivery_audit(values),
     )
     for field, value in values.items():

@@ -451,6 +451,7 @@ async def record(
             duration_ms=duration_ms,
             token_id=token_id,
             object_id=object_id,
+            oauth_grant_id=ctx.member.oauth_grant_id,
         )
     )
     await ctx.session.commit()
@@ -760,6 +761,10 @@ async def _preapproved_spent(ctx: Context) -> bool:
 
 
 async def call(ctx: Context, args: Call) -> dict[str, Any]:
+    if ctx.own_agent:
+        from coreman.core.systems_catalog import member_writes
+
+        return await member_writes.call(ctx, args)
     if args.batch is not None:
         from coreman.core.systems_catalog import batch
 

@@ -39,7 +39,10 @@ TTL = timedelta(minutes=60)
 KEEP = timedelta(hours=24)
 # The confirmation cards that share expiry, resending and purging. Each kind is also its card's
 # `event_key`; its outbox dedupe keys start with the kind spelled with dashes.
-CARD_KINDS = (KIND, "cloud_write", "assistant_write", "systems_batch")
+CARD_KINDS = (KIND, "cloud_write", "assistant_write", "systems_batch", "member_write")
+# A member's own agent's write (`member_writes`): sent to the member's private chat with the public
+# bot, never sent again once expired.
+MEMBER_KIND = "member_write"
 RESEND = "resend"
 SWEEP_BATCH = 50
 MAX_ITEMS = 50
@@ -383,12 +386,36 @@ def _bytes(body: dict[str, Any]) -> int:
     return len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
 
 
-def card(origin_task_id: int, state_id: uuid.UUID, items: list[dict[str, Any]]) -> dict[str, Any]:
+FOOTER = "改动说明由 AI 整理，以详情里的请求为准。只有发起人能确认，60 分钟内有效。"
+
+
+def card(
+    origin_task_id: int,
+    state_id: uuid.UUID,
+    items: list[dict[str, Any]],
+    *,
+    ref: str | None = None,
+    event: str = CARD_EVENT,
+    preface: str | None = None,
+    footer: str = FOOTER,
+) -> dict[str, Any]:
     """The confirmation card, shortened until it fits: first the request details lose their
-    bodies, then the summary keeps only each operation and its object."""
+    bodies, then the summary keeps only each operation and its object.
+
+    `ref` is the card's `task_id` (`personal:<origin task>` by default) and `event` its buttons'
+    event key; `preface` is a plain line above the summary."""
     body: dict[str, Any] = {}
     for full, brief in ((True, False), (False, False), (False, True)):
-        body = _card(origin_task_id, state_id, items, full=full, brief=brief)
+        body = _card(
+            ref or f"personal:{origin_task_id}",
+            state_id,
+            items,
+            full=full,
+            brief=brief,
+            event=event,
+            preface=preface,
+            footer=footer,
+        )
         if _bytes(body) <= CARD_BYTES_MAX:
             break
     return body
@@ -400,12 +427,15 @@ def fits(items: list[dict[str, Any]]) -> bool:
 
 
 def _card(
-    origin_task_id: int,
+    ref: str,
     state_id: uuid.UUID,
     items: list[dict[str, Any]],
     *,
     full: bool,
     brief: bool,
+    event: str,
+    preface: str | None,
+    footer: str,
 ) -> dict[str, Any]:
     def button(label: str, verb: str, kind: str) -> dict[str, Any]:
         return {
@@ -416,8 +446,8 @@ def _card(
                 {
                     "type": "callback",
                     "value": {
-                        "task_id": f"personal:{origin_task_id}",
-                        "event_key": CARD_EVENT,
+                        "task_id": ref,
+                        "event_key": event,
                         "level": f"{verb}:{state_id}",
                     },
                 }
@@ -427,9 +457,12 @@ def _card(
     destructive = any(item["risk"] in WARNINGS for item in items)
     heading = f"请确认：{title(items[0])}" if len(items) == 1 else f"请确认 {len(items)} 项操作"
     systems = "、".join(dict.fromkeys(str(item["system_name"]) for item in items))
+    summary = summary_text(items, brief=brief)
+    if preface:
+        summary = f"{preface}\n{summary}" if summary else preface
     return {
         "schema": "2.0",
-        "task_id": f"personal:{origin_task_id}",
+        "task_id": ref,
         "header": {
             "template": "red" if destructive else "orange",
             "title": {"tag": "plain_text", "content": heading},
@@ -440,7 +473,7 @@ def _card(
                 # Values come from the conversation: plain text, so no @mention or link fires.
                 {
                     "tag": "div",
-                    "text": {"tag": "plain_text", "content": summary_text(items, brief=brief)},
+                    "text": {"tag": "plain_text", "content": summary},
                 },
                 {
                     "tag": "collapsible_panel",
@@ -479,10 +512,7 @@ def _card(
                 },
                 {
                     "tag": "markdown",
-                    "content": (
-                        "<font color='grey'>改动说明由 AI 整理，以详情里的请求为准。"
-                        "只有发起人能确认，60 分钟内有效。</font>"
-                    ),
+                    "content": f"<font color='grey'>{footer}</font>",
                     "text_size": "notation",
                 },
             ]
@@ -669,9 +699,23 @@ async def send_card(
         platform="feishu",
         kind="send",
         dedupe_key=key,
-        target={"chat_id": staged["chat_id"]},
+        target=_target(staged),
         payload={"card": body},
     )
+
+
+def _target(staged: dict[str, Any]) -> dict[str, str]:
+    """Where a batch's messages go: its chat, or a member's private chat with the bot."""
+    if staged.get("chat_id"):
+        return {"chat_id": str(staged["chat_id"])}
+    return {"user_id": str(staged["platform_user_id"])}
+
+
+def card_ref(state: InteractionState) -> str:
+    """The `task_id` of a batch's cards."""
+    if state.state.get("card_ref"):
+        return str(state.state["card_ref"])
+    return f"personal:{int(state.state.get('origin_task_id') or state.scope_key)}"
 
 
 def keep_until(state: InteractionState) -> datetime | None:
@@ -697,16 +741,18 @@ def lapsed(state: InteractionState, now: datetime) -> bool:
 def resendable(state: InteractionState, now: datetime) -> bool:
     """An expired card can be sent again with the same staged content (within `KEEP`)."""
     until = keep_until(state)
-    return lapsed(state, now) and until is not None and now < until
+    return state.kind != MEMBER_KIND and lapsed(state, now) and until is not None and now < until
 
 
-def expired_card(origin_task_id: int, state: InteractionState, *, again: bool) -> dict[str, Any]:
+def expired_card(ref: str, state: InteractionState, *, again: bool) -> dict[str, Any]:
     """What an expired card turns into: with a resend button while the content is kept."""
     text = (
         "这张确认卡已过期（发出后 60 分钟内有效），没有执行。暂存的内容保留到第一次发卡后"
         " 24 小时，点「重新发起」用同一份内容发一张新卡，确认时平台照样先复查再执行。"
         "只有发起人本人能点。"
         if again
+        else "这张确认卡已过期，没有执行。如果还要做，请回到发起的地方重新提交。"
+        if state.kind == MEMBER_KIND
         else "这张确认卡已过期，没有执行。暂存的内容已经清理，不能再重新发起。"
     )
     elements: list[dict[str, Any]] = [
@@ -722,7 +768,7 @@ def expired_card(origin_task_id: int, state: InteractionState, *, again: bool) -
                     {
                         "type": "callback",
                         "value": {
-                            "task_id": f"personal:{origin_task_id}",
+                            "task_id": ref,
                             "event_key": state.kind,
                             "level": f"{RESEND}:{state.id}",
                         },
@@ -732,7 +778,7 @@ def expired_card(origin_task_id: int, state: InteractionState, *, again: bool) -
         )
     return {
         "schema": "2.0",
-        "task_id": f"personal:{origin_task_id}",
+        "task_id": ref,
         "header": {
             "template": "grey",
             "title": {"tag": "plain_text", "content": "确认卡已过期"},
@@ -770,7 +816,7 @@ async def update_card(
         )
         if not sent:
             return False
-        message_id, chat_id = str(sent), str(state.state.get("chat_id") or "")
+        message_id, chat_id = str(sent), str(state.state.get("chat_id") or "") or None
     await outbox.add(
         session,
         bot_id=state.bot_id,
@@ -795,11 +841,10 @@ async def expire(
     """A sent card ran out of time: show it as expired (with a resend button while the content is
     kept) and keep the batch until `KEEP` after its first card."""
     again = resendable(state, now)
-    origin = int(state.state.get("origin_task_id") or state.scope_key)
     await update_card(
         session,
         state,
-        expired_card(origin, state, again=again),
+        expired_card(card_ref(state), state, again=again),
         dedupe_key=dedupe_key,
         chat_id=chat_id,
         message_id=message_id,
@@ -876,7 +921,7 @@ UNDELIVERED = (
     "需要的话请再发一条消息，让 AI 员工重新整理后再提交确认。"
 )
 # Batches whose card text is readable here; a personal assistant's sealed batch has its own path.
-UNDELIVERED_KINDS = (KIND, "cloud_write", "systems_batch")
+UNDELIVERED_KINDS = (KIND, "cloud_write", "systems_batch", MEMBER_KIND)
 
 
 def _undelivered_reason(error: str) -> str:
@@ -919,8 +964,8 @@ async def undelivered(session: AsyncSession, now: datetime) -> int:
             continue
         staged = state.state
         count = staged.get("count") or len(staged.get("items") or [])
-        chat_id = str(staged.get("chat_id") or "")
-        if chat_id:
+        # 发给成员私聊的卡发不出去，再发一条多半也到不了：作废即可，本机 Agent 查结果时会知道。
+        if staged.get("chat_id"):
             text = UNDELIVERED.format(reason=_undelivered_reason(error or ""), count=count)
             await outbox.add(
                 session,
@@ -928,7 +973,7 @@ async def undelivered(session: AsyncSession, now: datetime) -> int:
                 platform="feishu",
                 kind="send",
                 dedupe_key=f"{staged['card_key']}:undelivered",
-                target={"chat_id": chat_id},
+                target=_target(staged),
                 payload={"card": notice_card("写操作没有执行", text)},
             )
         state.state = {**staged, "undelivered": True}
