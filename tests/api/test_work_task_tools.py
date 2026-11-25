@@ -187,3 +187,26 @@ async def test_get_task_only_reads_the_agents_own_tasks(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert json.loads(response.json()["result"]["content"][0]["text"])["error"] == "not_found"
+
+
+async def test_tools_refuse_a_cancelled_task(
+    client: httpx.AsyncClient, app, db_session: AsyncSession
+) -> None:
+    bot, alice, _, first, _ = await _setup(db_session)
+    work_turn = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=bot.id, kind="chat", user_id=alice.id, session_key=f"work:{first.code}"
+        ),
+    )
+    work_turn.status = "running"
+    row = await db_session.scalar(select(WorkTask).where(WorkTask.code == first.code))
+    row.status = "cancelled"
+    await db_session.commit()
+    token = tools.issue_capability(
+        app.state.cipher, task_id=work_turn.id, bot_id=bot.id, actor_id=alice.id, kind="chat"
+    )
+    response = await client.post(
+        URL, json=_call("wait_for", {}), headers={"Authorization": f"Bearer {token}"}
+    )
+    assert json.loads(response.json()["result"]["content"][0]["text"])["error"] == "not_in_task"

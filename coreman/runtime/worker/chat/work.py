@@ -455,8 +455,10 @@ async def final_transition(
     # 编号按要求写成了任务页链接：判断开头和记成一句话时都只看编号。
     first = _LINKED.sub(r"\1", first)
     now = datetime.now(UTC)
-    if flow.waiting_for_children(row):
+    if flow.waiting_for_children(row) or (row.waiting_on or {}).get("kind") == "queue":
         # 这一轮派出了子任务或问了人：任务在等结果，有结果时平台交回它接着做。
+        # 或者这一轮还没结束，平台已经排了下一轮（子任务都有结果了、被退回、有人补充）：
+        # 以下一轮为准，这一轮不改任务。
         if run is not None:
             run.status, run.outcome, run.ended_at = "waiting", first[:SUMMARY_LIMIT], now
         return

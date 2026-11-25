@@ -508,6 +508,16 @@ async def handoff_task(
 ) -> dict[str, Any]:
     reason = _text(args, "reason", LINE_MAX, "转交原因")
     handoff = _long(args, "handoff", "交接包")
+    from coreman.core.work_tasks.flow import settled
+
+    pending = await session.scalar(
+        select(WorkTask.id).where(WorkTask.parent_id == row.id, WorkTask.status != "shadow")
+    )
+    if pending and any(
+        not settled(c)
+        for c in await session.scalars(select(WorkTask).where(WorkTask.parent_id == row.id))
+    ):
+        raise WorkTaskError(409, "还有子任务或问题没结果，等它们有结果、汇总之后再转交")
     bot = await _target_bot(session, row, me, args.get("to_bot_id"), label="to_bot_id")
     row.assignee_bot_id, row.start_mode, row.claimed_at = bot.id, "auto", None
     row.status, row.ask, row.waiting_on = "todo", None, None
@@ -546,7 +556,7 @@ async def wait_for(session: AsyncSession, row: WorkTask, me: Bot) -> dict[str, A
     row.status, row.ask = "waiting", None
     row.waiting_on = {
         "kind": "task",
-        "codes": [c.code for c in children],
+        "codes": [c.code for c in pending],
         "human_text": clip(f"等 {'、'.join(c.code for c in pending)} 的结果", SUMMARY_MAX),
     }
     add_event(

@@ -237,3 +237,44 @@ async def test_a_turn_that_waits_on_subtasks_leaves_the_task_waiting(
         select(WorkTaskRun).where(WorkTaskRun.work_task_id == parent.id).order_by(WorkTaskRun.id)
     )
     assert run.status == "waiting"
+
+
+async def test_a_turn_ending_after_its_resume_is_queued_does_not_finish_the_task(db_session):
+    """wait_for 之后这一轮还没结束，子任务就有了结果、平台已排上接着做的一轮：这一轮不改任务。"""
+    from types import SimpleNamespace
+
+    from coreman.runtime.worker.chat import work
+    from coreman.runtime.worker.chat.models import Verdict
+
+    lead, _, alice, parent, turn = await _setup(db_session)
+    # 这一轮已经开工。
+    parent.status, parent.waiting_on = "in_progress", None
+    await db_session.flush()
+    asked = await agent_tools.invoke(
+        db_session,
+        parent,
+        lead,
+        "ask_human",
+        {"question": "发全员吗？", "options": ["是", "否"], "context": "周报"},
+        chat_task_id=turn.id,
+        base_url=BASE,
+    )
+    await agent_tools.invoke(
+        db_session, parent, lead, "wait_for", {}, chat_task_id=turn.id, base_url=BASE
+    )
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == asked["code"]))
+    await execute.answer(
+        db_session, child, alice, ask_id=child.ask["id"], option="o2", text="", channel="web"
+    )
+    await flow.settle(
+        db_session, child, before_ask=None, before_status="todo", actor_id=alice.id, base_url=BASE
+    )
+    await db_session.commit()
+    ctx = SimpleNamespace(task=SimpleNamespace(id=turn.id, payload={}), public_base_url=BASE)
+    intake = SimpleNamespace(session_key=f"work:{parent.code}", bot=lead)
+    verdict = Verdict("success", "succeeded", None, None, "已问 alice，等她回答")
+    await work.final_transition(db_session, ctx, intake, verdict, "")
+    await db_session.commit()
+    parent = await _fresh(db_session, parent)
+    assert parent.status == "waiting" and parent.waiting_on["kind"] == "queue"
+    assert parent.closed_at is None

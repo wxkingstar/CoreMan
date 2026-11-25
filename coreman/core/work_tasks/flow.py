@@ -55,8 +55,8 @@ async def settle(
 
 
 def _was_settled(before_status: str, row: WorkTask) -> bool:
-    # 之前就有结果（例如已完成的子任务又被评论）：不再重复交回上级。
-    return before_status in ("done", "cancelled") and before_status == row.status
+    # 之前就有结果（例如已完成或停下等人的子任务又被评论）：不再重复交回上级。
+    return before_status == row.status and before_status in ("done", "cancelled", "waiting")
 
 
 async def _child_result(session: AsyncSession, child: WorkTask) -> str:

@@ -305,7 +305,8 @@ class FinalizeStage(ChatStageBase):
                     response_content=verdict.final_text,
                     tools_used=out.tools,
                 )
-                if collaboration_silent
+                # 协作 helper 的回答只是交给平台解析的 JSON；子任务是完整的一轮，用量照常记。
+                if collaboration_silent and not ctx.task.payload.get("work_silent")
                 else log_entry(
                     ctx,
                     intake,
