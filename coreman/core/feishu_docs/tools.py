@@ -30,10 +30,21 @@ from coreman.core.feishu_personal.toolbase import (
 )
 from coreman.core.feishu_personal.tools import TOOLS
 from coreman.core.feishu_personal.toolsets import docs
+from coreman.core.feishu_personal.toolsets import files as file_tools
 
 Url = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 # 正文读出来按什么身份：应用身份只有纯文本接口确定支持，本人身份读 Markdown。
 Reader = Callable[[Call, str, str, bool], Awaitable[dict[str, Any]]]
+# 一次最多取几张图：每张都要以提问人身份下载、转存一份。
+MAX_MEDIA = 10
+_MEDIA_HINT = (
+    "图片和附件是 https://feishu.cn/file/<token> 链接，要登录飞书才能打开；"
+    "要看时用 feishu_doc_media，url 传这篇文档的链接，tokens 传链接里的 token。"
+)
+_APP_TEXT_HINT = (
+    "以应用身份只读到纯文本，图片和附件不在里面。确实需要看文档里的图时才用 feishu_doc_media"
+    "（会以提问人身份读，他可能要先授权）。"
+)
 
 
 class DocRead(TextPage):
@@ -53,6 +64,16 @@ class BaseRecords(Page):
     view_id: Identifier | None = Field(default=None, description="Defaults to the link's view")
 
 
+class DocMedia(Arguments):
+    url: Url = Field(description="The document link as posted in the chat")
+    tokens: list[Identifier] = Field(
+        default_factory=list,
+        max_length=MAX_MEDIA,
+        description="The <token> of https://feishu.cn/file/<token> links in the document;"
+        " omit to get its first images",
+    )
+
+
 class RequestAccess(Arguments):
     urls: list[Url] = Field(min_length=1, max_length=consent.MAX_LINKS)
 
@@ -69,6 +90,11 @@ _SPECS: dict[str, tuple[type[Arguments], str]] = {
     ),
     "feishu_doc_sheet_read": (SheetRead, "Read cell ranges of a spreadsheet link."),
     "feishu_doc_base_records": (BaseRecords, "List records of a Base (bitable) table link."),
+    "feishu_doc_media": (
+        DocMedia,
+        "Get short-lived download links for images or attachments in a document link, e.g. to"
+        " look at its screenshots. Always read as the asker.",
+    ),
     "feishu_doc_offer_share": (
         RequestAccess,
         "Optional, after a read with can_offer_share: post a button so the asker can share"
@@ -98,20 +124,33 @@ async def _resolve(call: Call, link: Link) -> tuple[str, str]:
 
 
 async def _read_any(
-    session: AsyncSession, cipher: Cipher, scope: DocsScope, link: Link, read: Reader
+    session: AsyncSession,
+    cipher: Cipher,
+    scope: DocsScope,
+    link: Link,
+    read: Reader,
+    *,
+    files: FileRelay | None = None,
+    as_app: bool = True,
+    also: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """先用应用身份读（本群看得到才行），不行就直接以提问人本人身份读（他发过的链接才行）。"""
-    client = access.app_client(cipher, scope)
-    try:
-        if await access.chat_can_see(client, link, scope.chat_id):
-            app = cast(Call, access.AppCall(client))
-            try:
-                kind, token = await _resolve(app, link)
-                return {**await read(app, kind, token, True), "read_as": "app"}
-            except PersonalError:
-                pass
-    finally:
-        await client.aclose()
+    """先用应用身份读（本群看得到才行），不行就直接以提问人本人身份读（他发过的链接才行）。
+
+    as_app 为假时只以提问人身份读（文件中转的下载链接要绑定他的授权）；also 是除读正文外
+    还要用到的接口。
+    """
+    if as_app:
+        client = access.app_client(cipher, scope)
+        try:
+            if await access.chat_can_see(client, link, scope.chat_id):
+                app = cast(Call, access.AppCall(client))
+                try:
+                    kind, token = await _resolve(app, link)
+                    return {**await read(app, kind, token, True), "read_as": "app"}
+                except PersonalError:
+                    pass
+        finally:
+            await client.aclose()
     if link.token not in await access.allowed_tokens(session, scope):
         return _no_access("link_not_from_chat")
     state = await access.asker_state(session, cipher, scope)
@@ -119,22 +158,24 @@ async def _read_any(
     if who is None and state.status == "unknown_speaker":
         return _no_access("unknown_speaker")
 
+    needed = access.READ_ENDPOINTS[link.kind] + also
+
     async def ask_authorization() -> dict[str, Any]:
         result = await inflow.request(
             session,
             cipher,
             access.group_scope(cipher, scope),
             purpose="读取群里的飞书文档",
-            endpoints_needed=access.READ_ENDPOINTS[link.kind],
+            endpoints_needed=needed,
         )
         if result.get("status") == "already_connected":
             # 刚判过不够，这里不该已够；真遇到了也不能当作授权成功。
             return _no_access("asker_cannot_open")
         return result
 
-    if who is None or not who.reaches(*access.READ_ENDPOINTS[link.kind]):
+    if who is None or not who.reaches(*needed):
         return await ask_authorization()
-    user = Call(session, cipher, who.scope)
+    user = Call(session, cipher, who.scope, files)
     try:
         kind, token = await _resolve(user, link)
         data = await read(user, kind, token, False)
@@ -188,7 +229,7 @@ async def _document(
     if kind == "base":
         data = await docs.base_tables.run(docs.BaseApp(app_token=token), call)
         return {**data, "hint": "用 feishu_doc_base_records 读记录。"}
-    return await docs.read_document.run(
+    data = await docs.read_document.run(
         docs.ReadDocument(
             document_id=token,
             format="text" if as_app else "markdown",
@@ -197,6 +238,45 @@ async def _document(
         ),
         call,
     )
+    if as_app:
+        return {**data, "media_hint": _APP_TEXT_HINT}
+    if "media_hint" in data:
+        # 个人工具的提示指向私聊里的下载工具，群里换成本组的。
+        return {**data, "media_hint": _MEDIA_HINT}
+    return data
+
+
+async def _media(call: Call, kind: str, token: str, wanted: list[str]) -> dict[str, Any]:
+    """文档里的图片和附件：只取这篇文档正文里出现的，逐个以提问人身份下载、给中转链接。"""
+    if kind != "docx":
+        raise PersonalError("unsupported_type")
+    content = (await docs.fetch_markdown(call, token)).get("content")
+    found = docs.media_tokens(content) if isinstance(content, str) else []
+    picked = list(dict.fromkeys(wanted)) or found[:MAX_MEDIA]
+    outside = [item for item in picked if item not in found]
+    if outside:
+        # 防止借这篇文档的放行去取提问人别处的文件。
+        return {
+            "error": "media_not_in_document",
+            "tokens": outside,
+            "hint": "只能取这篇文档正文里 https://feishu.cn/file/<token> 链接中的 token。",
+        }
+    items: list[dict[str, Any]] = []
+    for item in picked:
+        try:
+            got = await file_tools.download_doc_media.run(
+                file_tools.DocMedia(file_token=item), call
+            )
+        except PersonalError as exc:
+            if exc.code == "authorization_required":
+                raise
+            got = exc.payload()
+        items.append({"token": item, **{key: value for key, value in got.items() if key != "how"}})
+    result: dict[str, Any] = {"items": items, "total": len(found), "how": file_tools.HOW_DOWNLOAD}
+    rest = [item for item in found if item not in picked]
+    if rest and not wanted:
+        result["more_tokens"] = rest[:100]
+    return result
 
 
 async def dispatch(
@@ -226,15 +306,23 @@ async def dispatch(
     try:
         if isinstance(args, RequestAccess):
             return await _request(session, cipher, scope, args)
-        assert isinstance(args, (DocRead, SheetRead, BaseRecords))
+        assert isinstance(args, (DocRead, SheetRead, BaseRecords, DocMedia))
         link = links.parse(args.url)
     except LinkError as exc:
         return {"error": exc.code}
     data: dict[str, Any]
+    media = isinstance(args, DocMedia)
+    if media and link.kind not in ("docx", "wiki"):
+        return {"error": "unsupported_type"}
     if isinstance(args, DocRead):
 
         async def read(call: Call, kind: str, token: str, as_app: bool) -> dict[str, Any]:
             return await _document(call, kind, token, as_app, args)
+
+    elif isinstance(args, DocMedia):
+
+        async def read(call: Call, kind: str, token: str, as_app: bool) -> dict[str, Any]:
+            return await _media(call, kind, token, args.tokens)
 
     elif isinstance(args, SheetRead):
 
@@ -270,7 +358,17 @@ async def dispatch(
             return data
 
     try:
-        data = await _read_any(session, cipher, scope, link, read)
+        # 图片的下载链接要绑定提问人的授权，所以只以他的身份取。
+        data = await _read_any(
+            session,
+            cipher,
+            scope,
+            link,
+            read,
+            files=files,
+            as_app=not media,
+            also=("docs.media",) if media else (),
+        )
     except PersonalError as exc:
         data = exc.payload()
     return bounded({**data, "content_trust": "external_untrusted_data"})

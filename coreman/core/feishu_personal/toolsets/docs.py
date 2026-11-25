@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, JsonValue, StringConstraints, model_validator
@@ -350,6 +351,21 @@ _BLOCKS = {
 _FETCH_EXTRA = (
     '{"enable_user_cite_reference_map":true,"include_comments":true,"return_html5_block_data":true}'
 )
+# Markdown shows a document's images and attachments as these links. They need a Feishu login,
+# so the agent cannot open them; the media download API fetches them by the token instead.
+_MEDIA = re.compile(
+    r"https://(?:[A-Za-z0-9-]+\.)*(?:feishu\.cn|larksuite\.com)/file/([A-Za-z0-9_-]+)"
+)
+MEDIA_HINT = (
+    "Images and attachments appear as https://feishu.cn/file/<token> links, which need a login."
+    " To look at one, pass its token to feishu_download_doc_media; if that tool is not listed,"
+    " call feishu_authorize first."
+)
+
+
+def media_tokens(content: str) -> list[str]:
+    """Tokens of the images and attachments in a document's Markdown, in order, once each."""
+    return list(dict.fromkeys(_MEDIA.findall(content)))
 
 
 def _items(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -423,27 +439,36 @@ async def read_document(args: ReadDocument, call: Call) -> dict[str, Any]:
     elif args.format == "text":
         data = await call("docx.raw", path={"document_id": args.document_id})
     else:
-        fetched = await call(
-            "docs.fetch",
-            path={"document_id": args.document_id},
-            json={
-                "format": "markdown",
-                "extra_param": _FETCH_EXTRA,
-                "export_option": {
-                    "export_block_id": args.with_block_ids,
-                    "export_style_attrs": False,
-                    "export_cite_extra_data": False,
-                },
-            },
-        )
-        document = fetched.get("document")
-        rest = {key: value for key, value in fetched.items() if key != "document"}
-        data = {**rest, **(document if isinstance(document, dict) else {})}
+        data = await fetch_markdown(call, args.document_id, with_block_ids=args.with_block_ids)
     content = data.get("content")
     if isinstance(content, str):
         text, paging = text_page(content, args)
         data = {**data, "content": text, **paging}
+        if media_tokens(text):
+            data["media_hint"] = MEDIA_HINT
     return data
+
+
+async def fetch_markdown(
+    call: Call, document_id: str, *, with_block_ids: bool = False
+) -> dict[str, Any]:
+    """The whole docx (or wiki page) as Markdown, with the document's fields flattened in."""
+    fetched = await call(
+        "docs.fetch",
+        path={"document_id": document_id},
+        json={
+            "format": "markdown",
+            "extra_param": _FETCH_EXTRA,
+            "export_option": {
+                "export_block_id": with_block_ids,
+                "export_style_attrs": False,
+                "export_cite_extra_data": False,
+            },
+        },
+    )
+    document = fetched.get("document")
+    rest = {key: value for key, value in fetched.items() if key != "document"}
+    return {**rest, **(document if isinstance(document, dict) else {})}
 
 
 @tool(

@@ -1,4 +1,4 @@
-"""文件：下载邮件附件、消息里的文件和图片、云空间文件；上传后作为消息发送或存进云空间。
+"""文件：下载邮件附件、消息里的文件和图片、云空间文件、文档里的图片和附件；上传后作为消息发送或存进云空间。
 
 下载只返回链接，由智能体用 curl 取到临时目录；上传先要一个上传链接，curl 上传后拿到
 upload_id，再交给发送或保存的工具（发邮件的附件也用它）。
@@ -67,6 +67,12 @@ class MessageFile(Arguments):
 
 class DriveFile(Arguments):
     file_token: Identifier = Field(description="An uploaded file's token (not a doc or sheet)")
+
+
+class DocMedia(Arguments):
+    file_token: Identifier = Field(
+        description="The <token> of a https://feishu.cn/file/<token> link in a document"
+    )
 
 
 class PrepareUpload(Arguments):
@@ -176,6 +182,18 @@ async def download_drive_file(args: DriveFile, call: Call) -> dict[str, Any]:
 
 
 @tool(
+    "feishu_download_doc_media",
+    DocMedia,
+    "docs.media",
+    "Fetch an image or attachment inside a document and get a short-lived link to download it,"
+    " e.g. to look at a screenshot. Documents show them as https://feishu.cn/file/<token> links.",
+)
+async def download_doc_media(args: DocMedia, call: Call) -> dict[str, Any]:
+    download = await call.download("docs.media", path={"file_token": args.file_token})
+    return await _link(call, download, None)
+
+
+@tool(
     "feishu_prepare_upload",
     PrepareUpload,
     "drive.upload",
@@ -267,6 +285,7 @@ TOOLS = [
     download_mail_attachment,
     download_message_file,
     download_drive_file,
+    download_doc_media,
     prepare_upload,
     send_file,
     save_to_drive,

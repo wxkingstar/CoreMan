@@ -400,6 +400,15 @@ ENDPOINTS: dict[str, Endpoint] = {
         "drive:drive",
         "drive:drive:readonly",
     ),
+    # 文档里的图片和附件（素材）：drive.download 只管云空间里的文件，素材要走这个接口。
+    "docs.media": _e(
+        "GET",
+        "/drive/v1/medias/{file_token}/download",
+        "read",
+        "docs:document.media:download",
+        "drive:drive",
+        "drive:drive:readonly",
+    ),
     "drive.upload": _e(
         "POST", "/drive/v1/files/upload_all", "write", "drive:file:upload", "drive:drive"
     ),
