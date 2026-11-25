@@ -295,6 +295,13 @@ https://coreman.example.com/api/systems/mcp?token_env=SSO_TOKEN
 
 Codex 的 `--bearer-token-env-var` 这类认证参数不要配：端点不需要认证，令牌不应发给 CoreMan。
 
+## 环境
+
+迁移 `0133` 给 `systems` 加了 `environment`：`production`（真实环境，已有系统和新登记的默认值）或 `test`（测试环境，连测试数据，常常免登录）。同一个业务往往真实、测试各登记一个系统，测试环境的标识惯例为 `<真实环境标识>_test`，名称带「（测试环境）」。
+
+- 管理台：业务系统列表和 AI 员工的「系统权限」都分「真实环境 / 测试环境」两个标签，默认在真实环境；系统权限里的勾选跨标签保留、一起保存，标签上的数字是该环境已勾选的系统数。`GET /api/admin/systems?environment=production|test` 按环境筛选，不带时列全部（旧管理台照旧）；更新时不传 `environment` 沿用库里的值。
+- AI 员工：环境不影响授权和可访问的系统集合，测试环境的系统要像别的系统一样单独授权才会出现。L0 提示词里测试环境的系统标为 `(<key>，测试环境)`，本轮有这类系统时追加一句：只在发言者明确要求在测试环境操作时使用，没说时用真实环境的系统。`systems_browse` 不带参数时测试环境的系统带 `environment: "test"`。
+
 ## 管理台
 
 - 系统编辑页：「OpenAPI 地址」输入框，保存时地址有变化就以当前管理员身份拉取一次（失败不影响保存，结果随保存响应返回）；「刷新目录」按钮（`POST /api/admin/systems/{key}/catalog/refresh`，记审计 `system.catalog_refresh`）。目录状态由 `GET /api/admin/systems/{key}/catalog` 读取。

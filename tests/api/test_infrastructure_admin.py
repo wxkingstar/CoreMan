@@ -356,3 +356,50 @@ async def test_system_grants_if_match_is_checked_against_the_locked_version(
     )
     assert r.status_code == 409, r.text
     assert not list((await db_session.execute(select(BotSystemGrant))).scalars())
+
+
+async def test_system_environment_defaults_filters_kept_when_omitted_and_audited(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """环境：新登记默认真实环境；列表可按环境筛选，不带时列全部；旧客户端不传时沿用库里的值。"""
+    await login_as(client, db_session, role="ai_committee")
+    r = await client.post("/api/admin/systems", json={"key": "shop", "name": "Shop"})
+    assert r.status_code == 201 and r.json()["data"]["environment"] == "production"
+    r = await client.post(
+        "/api/admin/systems", json={"key": "shop_test", "name": "Shop", "environment": "test"}
+    )
+    assert r.status_code == 201 and r.json()["data"]["environment"] == "test"
+    test_row = r.json()["data"]
+    r = await client.post(
+        "/api/admin/systems", json={"key": "bad", "name": "Bad", "environment": "staging"}
+    )
+    assert r.status_code == 422
+
+    async def keys(**params: str) -> list[str]:
+        r = await client.get("/api/admin/systems", params=params)
+        assert r.status_code == 200, r.text
+        return [row["key"] for row in r.json()["data"]["items"]]
+
+    assert await keys() == ["shop", "shop_test"]
+    assert await keys(environment="production") == ["shop"]
+    assert await keys(environment="test") == ["shop_test"]
+    assert (await client.get("/api/admin/systems", params={"environment": "x"})).status_code == 422
+
+    path = "/api/admin/systems/shop_test"
+    r = await client.put(
+        path, json={"name": "Shop 2"}, headers={"If-Match": str(test_row["version"])}
+    )
+    assert r.status_code == 200 and r.json()["data"]["environment"] == "test"
+    r = await client.put(
+        path,
+        json={"name": "Shop 2", "environment": "production"},
+        headers={"If-Match": str(r.json()["data"]["version"])},
+    )
+    assert r.status_code == 200 and r.json()["data"]["environment"] == "production"
+    audit = await db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == "system.update", AuditLog.target_id == "shop_test")
+        .order_by(AuditLog.id.desc())
+        .limit(1)
+    )
+    assert audit is not None and audit.diff["environment"] == ["test", "production"]

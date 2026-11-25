@@ -4,7 +4,7 @@ import LoadState from '@/components/LoadState.vue'
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { systems, type BusinessSystem } from '@/api/infrastructure'
+import { systems, type BusinessSystem, type SystemEnvironment } from '@/api/infrastructure'
 import { allSkills } from '@/api/skills'
 const props = defineProps<{ botId: string }>()
 const emit = defineEmits<{ saved: [] }>()
@@ -15,6 +15,12 @@ const keys = ref<string[]>([]), saved = ref<string[]>([]), options = ref<Busines
 const writes = ref<string[]>([]), savedWrites = ref<string[]>([])
 const same = (a: string[], b: string[]) => a.length === b.length && a.every(k => b.includes(k))
 const dirty = computed(() => !same(keys.value, saved.value) || !same(writes.value.filter(k => keys.value.includes(k)), savedWrites.value))
+// 默认只列真实环境的系统，测试环境的在另一个标签里；勾选跨标签保留，一起保存。
+const ENVIRONMENTS: SystemEnvironment[] = ['production', 'test']
+const env = ref<SystemEnvironment>('production')
+const envOf = (s: BusinessSystem): SystemEnvironment => s.environment === 'test' ? 'test' : 'production'
+const shown = computed(() => options.value.filter(s => envOf(s) === env.value))
+const checkedIn = (e: SystemEnvironment) => options.value.filter(s => envOf(s) === e && keys.value.includes(s.key)).length
 function setWrite(key: string, on: boolean) { writes.value = on ? [...new Set([...writes.value, key])] : writes.value.filter(k => k !== key) }
 // 配套技能：保存后新授权的系统会自动安装，撤销的系统会卸掉随它装上的技能
 const skillNames = ref<Record<string, string>>({})
@@ -83,13 +89,24 @@ onMounted(load)
       :error="loadError"
       @retry="load"
     />
+    <el-tabs
+      v-model="env"
+      data-test="grants-environment-tabs"
+    >
+      <el-tab-pane
+        v-for="item in ENVIRONMENTS"
+        :key="item"
+        :name="item"
+        :label="`${t(`infra.environments.${item}`)}（${checkedIn(item)}）`"
+      />
+    </el-tabs>
     <el-checkbox-group
-      v-if="options.length"
+      v-if="shown.length"
       v-model="keys"
       class="grants-grid"
     >
       <div
-        v-for="system in options"
+        v-for="system in shown"
         :key="system.key"
         class="grant-cell"
         :class="{ 'is-checked': keys.includes(system.key) }"

@@ -305,6 +305,18 @@ UNPROMPTED_NOTE = (
 )
 
 
+# 本轮有测试环境的系统时追加：同一个业务往往真实、测试各登记一个，别在用户没说时用错。
+TEST_ENVIRONMENT_RULE = (
+    "标注「测试环境」的系统连的是测试数据，只在发言者明确要求在测试环境操作时使用；"
+    "没说时一律用真实环境的系统。"
+)
+
+
+def _system_label(system: BusinessSystem) -> str:
+    test = "，测试环境" if system.environment == "test" else ""
+    return f"{system.name} ({system.key}{test})"
+
+
 def systems_prompt(
     systems: list[BusinessSystem], *, mounted: bool, mcp_supported: bool = False
 ) -> str:
@@ -316,7 +328,7 @@ def systems_prompt(
     for system in systems:
         if system.token_delivery == "mcp":
             lines.append(
-                f"- {system.name} ({system.key})：MCP 服务 `{mcp_server_name(system.key)}`"
+                f"- {_system_label(system)}：MCP 服务 `{mcp_server_name(system.key)}`"
                 "（用它的工具调用，平台已按当前发言者鉴权，不需要也拿不到令牌）"
                 if mcp_supported
                 else f"- {system.name}: 无法调用。这个系统只通过 MCP 提供，当前运行环境不支持。"
@@ -326,7 +338,7 @@ def systems_prompt(
         catalog = "，可查操作目录" if mounted and system.openapi_url else ""
         if system.token_delivery == "proxy":
             lines.append(
-                f"- {system.name} ({system.key})：{system.base_url or ''}"
+                f"- {_system_label(system)}：{system.base_url or ''}"
                 "（平台代理：用 systems_call 调用）"
                 if mounted and system.openapi_url
                 else f"- {system.name}: 无法调用。这个系统只经平台代理调用，"
@@ -334,10 +346,12 @@ def systems_prompt(
             )
             continue
         lines.append(
-            f"- {system.name} ({system.key})：{system.base_url or ''}"
+            f"- {_system_label(system)}：{system.base_url or ''}"
             f"（env: {token_env_var(system.key)}；{auth_label(auth_mode(system))}{catalog}）"
         )
     prompt = "# 业务系统访问\n\n" + "\n".join(lines)
+    if any(system.environment == "test" for system in systems):
+        prompt += "\n\n" + TEST_ENVIRONMENT_RULE
     prompt += "\n\n完整配置见 `$COREMAN_SYSTEMS`（兼容 `$BOT_SYSTEMS_CONFIG`）。"
     if any(system.token_delivery == "env" for system in systems):
         prompt += (
