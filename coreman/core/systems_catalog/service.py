@@ -67,6 +67,8 @@ class Operator:
     subject: str
     task_id: int | None = None
     bot_id: Any = None
+    # A member's own agent through the catalog MCP (no task): the OAuth grant it acts under.
+    oauth_grant_id: Any = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,7 @@ async def issue_short_token(
         task_id=operator.task_id,
         bot_id=operator.bot_id,
         user_id=operator.user.id,
+        oauth_grant_id=operator.oauth_grant_id,
     )
     return token
 

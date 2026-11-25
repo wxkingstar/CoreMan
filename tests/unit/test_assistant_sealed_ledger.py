@@ -111,6 +111,7 @@ ENTITY_SELECTS = {
     "coreman/runtime/worker/personal_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/skill_install.py": 1,  # session.scalar
     "coreman/runtime/worker/systems_write_cards.py": 1,  # 交互状态，session.scalar
+    "coreman/runtime/worker/member_write_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/systems_batch_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/cloud_write_cards.py": 1,  # 交互状态，session.scalar
     "coreman/runtime/worker/assistant_write_cards.py": 1,  # 交互状态，session.scalar
@@ -145,6 +146,8 @@ COLUMN_REFERENCES = {
     "coreman/core/reminders.py": 1,  # 明文键 user_id
     # 确认卡过期时找到发出去的那张卡：只按下划线开头的明文键（消息编号）取值
     "coreman/core/systems_catalog/confirm.py": 1,
+    # 成员本机写操作待确认数：按明文键 user_id 计数（成员的确认单不属于个人助理）
+    "coreman/core/systems_catalog/member_writes.py": 1,
     # 明文键；后台阶段的排队（background_hold / background_offer）只给飞书普通员工
     "coreman/runtime/gateway_common/inbound.py": 11,
     "coreman/runtime/gateway_feishu/assistant_inbound.py": 1,  # 下划线开头的明文键
@@ -226,6 +229,8 @@ WRITE_STATEMENTS = {
     "coreman/core/feishu_docs/confirm.py": 1,  # 群聊写入确认：经 ORM 新建，flush 钩子封存
     # 业务系统写操作确认：经 ORM 新建与修改，flush 钩子封存（暂存的请求另以任务为 AAD 加密）
     "coreman/core/systems_catalog/confirm.py": 1,
+    # 成员本机写操作确认：经 ORM 新建，flush 钩子封存（暂存的请求另以确认单与成员为 AAD 加密）
+    "coreman/core/systems_catalog/member_writes.py": 1,
     # 批量写操作的批次：经 ORM 新建与修改（各项在自己的表里按批次和行号加密）；个人助理不开放
     "coreman/core/systems_catalog/batch.py": 1,
     "coreman/runtime/gateway_common/inbound.py": 1,  # 入站事件，载荷封存

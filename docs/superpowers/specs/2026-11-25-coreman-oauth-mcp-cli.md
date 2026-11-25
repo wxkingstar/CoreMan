@@ -52,7 +52,7 @@ CoreMan 签发自己的不透明令牌，登录沿用管理台已有的登录方
 
 同一地址 `/api/systems/mcp`：
 
-- 带 Bearer：按令牌认人（`mcp` scope），每个成员按调用次数限流；工具与匿名目录相同（只读、本机直连）。之后的迭代再加按本人权限过滤与平台代理调用。
+- 带 Bearer：按令牌认人（`mcp` scope），每个成员按调用次数限流；目录按本人权限过滤，平台代理的系统以本人身份代为调用（第 4 期，见 [2026-11-25-member-mcp-proxy.md](2026-11-25-member-mcp-proxy.md)）。
 - 不带 Bearer：部署开了 `SYSTEMS_CATALOG_PUBLIC` 时照旧匿名；没开时返回 401 和 `WWW-Authenticate: Bearer resource_metadata=…`，支持 MCP 授权规范的客户端会自动走第 1 节的登录流程。
 
 ### 4. 通用 OIDC 登录

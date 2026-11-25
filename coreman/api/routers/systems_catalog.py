@@ -1,5 +1,5 @@
-"""Business system operation catalog: the task-scoped MCP for AI employees, the anonymous
-read-only catalog MCP, and admin refresh."""
+"""Business system operation catalog: the task-scoped MCP for AI employees, the catalog MCP for
+members' own agents (and anonymous readers), and admin refresh."""
 
 from __future__ import annotations
 
@@ -39,8 +39,17 @@ from coreman.core.db.models import (
     Task,
     User,
 )
+from coreman.core.db.models.oauth import OAuthGrant
 from coreman.core.oauth import server as oauth
-from coreman.core.systems_catalog import context, policy, service, spill, tools, uploads
+from coreman.core.systems_catalog import (
+    context,
+    member_writes,
+    policy,
+    service,
+    spill,
+    tools,
+    uploads,
+)
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["systems-catalog"])
@@ -382,21 +391,25 @@ _member_limit = _RateLimit(MEMBER_CALLS_PER_MINUTE)
 
 @router.post(PUBLIC_PATH)
 async def public_mcp(request: Request, session: AsyncSession = Depends(get_session)) -> Response:
-    """Read-only catalog of every enabled system: browse, search and describe.
+    """The catalog for callers outside AI employees' tasks: browse, search and describe.
 
     With `Authorization: Bearer` (a CoreMan OAuth access token with the `mcp` scope) the caller is
-    a member: rate limited per member. Without it the catalog is anonymous, and only when the
+    a member's own agent, rate limited per member: lists are filtered by the member's permissions,
+    and platform-proxied systems are called as the member through `systems_call` (writes wait for
+    the member's click on a Feishu card, see `member_writes`). The member's CoreMan token never
+    reaches a business system: the platform issues the member a business token of its own.
+    Without a token the catalog is anonymous, read-only and unfiltered, and only when the
     deployment sets SYSTEMS_CATALOG_PUBLIC; otherwise the 401 points the client at the
-    authorization server. Nothing here issues a business token or reaches a business system;
-    lists are not filtered by permission, the caller calls the system with its own credential.
+    authorization server.
     """
     if "origin" in request.headers:
         raise ApiError(403, 403, "Browser origins are not supported")
     member: User | None = None
+    grant: OAuthGrant | None = None
     token = oauth.bearer(request.headers.get("Authorization"))
     if token is not None:
         try:
-            _, member = await oauth.authenticate(session, token, "mcp")
+            grant, member = await oauth.authenticate(session, token, "mcp")
         except oauth.Unauthenticated as exc:
             return _challenge(request, exc.error)
     elif "authorization" in request.headers:
@@ -406,26 +419,39 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
     token_env = request.query_params.get("token_env", context.DIRECT_TOKEN_ENV)
     if not TOKEN_ENV.fullmatch(token_env):
         raise ApiError(400, 400, "token_env must be an environment variable name")
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, PUBLIC_MAX_BODY))
+    # Members' writes carry their request body in the tool arguments.
+    limit = MAX_BODY if member is not None else PUBLIC_MAX_BODY
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, limit))
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
     if method == "initialize":
         return mcp_rpc.initialize(rid, params, "coreman-systems")
-    result: dict[str, Any]
-    if method in ("ping", "tools/list"):
-        if params:
-            return mcp_rpc.error(rid, -32602, "Invalid params")
-        result = {} if method == "ping" else {"tools": tools.tool_definitions(proxied=False)}
-    elif method == "tools/call":
-        if (
-            set(params) - {"name", "arguments"}
-            or not isinstance(params.get("name"), str)
-            or not isinstance(params.get("arguments", {}), dict)
-        ):
-            return mcp_rpc.error(rid, -32602, "Invalid params")
-        if member is not None and not _member_limit.allow(member.id):
-            return mcp_rpc.error(rid, -32000, "调用过于频繁，请稍后再试")
+    if method not in ("ping", "tools/list", "tools/call"):
+        return mcp_rpc.error(rid, -32601, "Method not found")
+    if method in ("ping", "tools/list") and params:
+        return mcp_rpc.error(rid, -32602, "Invalid params")
+    if method == "ping":
+        return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": {}})
+    if method == "tools/call" and (
+        set(params) - {"name", "arguments"}
+        or not isinstance(params.get("name"), str)
+        or not isinstance(params.get("arguments", {}), dict)
+    ):
+        return mcp_rpc.error(rid, -32602, "Invalid params")
+    if member is not None and method == "tools/call" and not _member_limit.allow(member.id):
+        return mcp_rpc.error(rid, -32000, "调用过于频繁，请稍后再试")
+    ctx: context.Context | None = None
+    unavailable: str | None = None
+    if member is not None and grant is not None:
+        try:
+            ctx = await member_writes.build_context(session, await issuance(request), member, grant)
+        except SubjectUnavailable as exc:
+            # 业务系统认不出这个人：目录照旧给（不过滤、直连），代理调用不行。
+            unavailable = exc.reason
+        if ctx is not None:
+            ctx.token_env = token_env
+    if ctx is None:
         ctx = context.Context(
             session=session,
             issuance=await issuance(request),
@@ -434,13 +460,26 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
             anonymous=True,
             token_env=token_env,
         )
-        value = await tools.dispatch(ctx, params["name"], params.get("arguments", {}))
+    result: dict[str, Any]
+    if method == "tools/list":
+        proxied = ctx.own_agent and any(s.token_delivery == "proxy" for s in ctx.systems)
+        result = {"tools": tools.tool_definitions(proxied=proxied, own_agent=ctx.own_agent)}
+    else:
+        name, arguments = params["name"], params.get("arguments", {})
+        if unavailable is not None and name in ("systems_call", "systems_call_result"):
+            value: dict[str, Any] = {
+                "error": "subject_unavailable",
+                "reason": unavailable,
+                "message": "平台算不出你在业务系统里的身份（缺少邮箱或邮箱前缀与他人重复），"
+                "不能代你调用。请联系管理员补全账号信息。",
+            }
+        else:
+            value = await tools.dispatch(ctx, name, arguments)
+        await session.commit()
         result = {
             "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
             "isError": "error" in value,
         }
-    else:
-        return mcp_rpc.error(rid, -32601, "Method not found")
     return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": result})
 
 

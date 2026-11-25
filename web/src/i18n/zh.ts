@@ -1068,7 +1068,7 @@ export default {
     states: { disconnected: '未连接', connecting: '连接中', subscribed: '已订阅', kicked: '已被顶替', auth_failed: '认证失败' },
   },
   settings: {
-    busyConfirmMinutes: '排队消息确认（分钟）', busyConfirmHint: '排队的消息等了这么久，开工前先发卡片问还要不要做；0 表示不问。', workTaskNotifier: '任务通知员工', workTaskNotifierPlaceholder: '选择一位飞书 AI 员工', workTaskNotifierHint: '任务和哪位 AI 员工都无关时（例如网页上派给同事），用这位员工的飞书应用给人发任务卡片。对方要在这个应用的可用范围内。不设置时，这类任务只在网页上提醒。',
+    busyConfirmMinutes: '排队消息确认（分钟）', busyConfirmHint: '排队的消息等了这么久，开工前先发卡片问还要不要做；0 表示不问。', workTaskNotifier: '公共机器人', workTaskNotifierPlaceholder: '选择一位飞书 AI 员工', workTaskNotifierHint: '代表平台说话的飞书 AI 员工，用在不该由某位 AI 员工出面的地方：和哪位 AI 员工都无关的任务卡片（例如网页上派给同事），以及成员本机 Agent 写业务系统时的确认卡。对方要在这个应用的可用范围内。不设置时，这类任务只在网页上提醒，成员本机 Agent 不能做写操作。',
     groupObserve: '群聊旁听', observeThreshold: '判断阈值', observeQuiet: '安静多久再判断（秒）', observeMaxWait: '最长等待（秒）', observeStreak: '机器人连续发言上限', groupObserveHint: '判断模型给出的概率高于阈值才插话，调低更主动；群里安静这么久才判断，一直有人说话时最长等这么久；最近一条人类消息之后机器人消息连续达到上限就暂停主动插话，防止机器人之间无限接话。',
     title: '设置',
     bootstrapEnabled: '引导登录',
