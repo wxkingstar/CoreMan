@@ -283,6 +283,41 @@ describe('Infrastructure management', () => {
     expect(systems.saveGrants).toHaveBeenLastCalledWith('bot1', ['erp'], 4, [])
     wrapper.unmount()
   })
+  it('lists production systems by default and switches to the test tab', async () => {
+    vi.mocked(systems.create).mockResolvedValue(erp)
+    const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    expect(systems.list).toHaveBeenLastCalledWith(1, 'production')
+    const tabs = wrapper.get('[data-test="environment-tabs"]').findAll('.el-tabs__item')
+    await tabs.find(tab => tab.text() === i18n.global.t('infra.environments.test'))!.trigger('click'); await flushPromises()
+    expect(systems.list).toHaveBeenLastCalledWith(1, 'test')
+    // 在测试环境标签里新建，环境默认是测试环境并随保存提交
+    await wrapper.get('[data-test="create-system"]').trigger('click'); await flushPromises()
+    const vm = wrapper.vm as unknown as { form: typeof erp & { environment: string } }
+    expect(vm.form.environment).toBe('test')
+    vm.form.key = 'erp_test'; vm.form.name = 'ERP test'
+    document.querySelector<HTMLButtonElement>('[data-test="save-system"]')!.click(); await flushPromises()
+    expect(systems.create).toHaveBeenCalledWith(expect.objectContaining({ key: 'erp_test', environment: 'test' }))
+    wrapper.unmount()
+  })
+  it('shows only production systems in grants until the test tab is opened, keeping ticks across tabs', async () => {
+    const test = { ...erp, key: 'erp_test', name: 'ERP test', environment: 'test' as const }
+    vi.mocked(systems.list).mockResolvedValue({ ...page, total: 2, items: [erp, test] })
+    vi.mocked(systems.grants).mockResolvedValue({ system_keys: ['erp', 'erp_test'], write_keys: [], version: 2 })
+    vi.mocked(systems.saveGrants).mockResolvedValue({ system_keys: ['erp_test'], write_keys: [], version: 3 })
+    const wrapper = mount(SystemGrants, { props: { botId: 'bot1' }, global: { plugins } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('ERP')
+    expect(wrapper.text()).not.toContain('ERP test')
+    const tabs = wrapper.get('[data-test="grants-environment-tabs"]').findAll('.el-tabs__item')
+    expect(tabs.map(tab => tab.text())).toEqual([`${i18n.global.t('infra.environments.production')}（1）`, `${i18n.global.t('infra.environments.test')}（1）`])
+    await tabs[1].trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('ERP test')
+    const vm = wrapper.vm as unknown as { keys: string[]; save: () => Promise<void> }
+    vm.keys = ['erp_test']; await vm.save(); await flushPromises()
+    expect(systems.saveGrants).toHaveBeenCalledWith('bot1', ['erp_test'], 2, [])
+    wrapper.unmount()
+  })
   it('shows batch writes in their own tab, loaded only when opened', async () => {
     const wrapper = mount(SystemsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()

@@ -395,6 +395,8 @@ async def browse_systems(ctx: Context) -> dict[str, Any]:
             "base_url": system.base_url or "",
             "call_mode": call_mode(ctx, system),
         }
+        if system.environment == "test":
+            item["environment"] = "test"
         loaded = await context.catalog(ctx, system) if system.openapi_url else None
         if loaded is None:
             item["catalog"] = "unavailable"

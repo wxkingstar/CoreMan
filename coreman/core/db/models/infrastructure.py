@@ -25,6 +25,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from coreman.core.db.base import Base, TimestampMixin, enum_check
 
 TOKEN_DELIVERIES = ("env", "proxy", "mcp")
+# production：真实环境；test：测试环境（连测试库、常免登录）。
+# 管理台和 AI 员工的系统权限默认只列真实环境。
+SYSTEM_ENVIRONMENTS = ("production", "test")
 # 平台代理的批量与调用上限：列名 → (默认, 最小, 最大)。管理员只能在这个范围内按系统调整。
 PROXY_LIMITS: dict[str, tuple[int, int, int]] = {
     "batch_write_max": (1000, 1, 50000),
@@ -46,6 +49,7 @@ class BusinessSystem(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("key ~ '^[a-z][a-z0-9_]{0,49}$'", name="key_format"),
         CheckConstraint(enum_check("token_delivery", TOKEN_DELIVERIES), name="token_delivery"),
+        CheckConstraint(enum_check("environment", SYSTEM_ENVIRONMENTS), name="environment"),
         *_limit_checks(),
     )
     key: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -68,6 +72,7 @@ class BusinessSystem(TimestampMixin, Base):
     token_audience: Mapped[str | None] = mapped_column(Text)
     access_test_url: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    environment: Mapped[str] = mapped_column(Text, server_default=text("'production'"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     default_for_all_bots: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     allowed_bot_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(Uuid))

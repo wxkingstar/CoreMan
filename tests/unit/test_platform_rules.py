@@ -43,6 +43,7 @@ SYSTEMS: list[Any] = [
         openapi_url="https://order.example.com/openapi.json",
         token_delivery=delivery,
         token_provider="builtin",
+        environment="production",
     )
     for delivery in ("env", "proxy")
 ]

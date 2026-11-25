@@ -299,10 +299,11 @@ coreman approvals reject 3f2c1ab0 --comment 原因
 管理系统本身与「开放给哪些 AI 员工」需要 AI 委员会或平台管理员角色；给某个员工授权用上文的 `bots system-grant`。
 
 ```bash
-coreman systems list
+coreman systems list [--environment production|test]
 coreman systems show crm
 coreman systems create crm --name CRM --base-url https://crm.example.com --openapi-url https://crm.example.com/openapi.json
 coreman systems set crm --delivery proxy --test-url https://crm.example.com/api/me
+coreman systems create crm_test --name 'CRM（测试环境）' --environment test --base-url https://crm.test.example.com
 coreman systems enable|disable crm
 coreman systems allow crm sales_bot support_bot
 coreman systems disallow crm support_bot   # 同时收回该员工的授权
@@ -313,7 +314,7 @@ coreman systems test crm                   # 以自己的身份签测试令牌�
 coreman systems delete crm --yes
 ```
 
-新登记的系统不开放给任何员工。`refresh` 与 `test` 以 `--as` 成员的身份签发业务令牌，这位成员需要在业务系统里有身份（邮箱前缀能唯一确定）。
+新登记的系统不开放给任何员工，环境默认为真实环境（`--environment production`），测试环境的系统登记时加 `--environment test`，标识惯例为 `<真实环境标识>_test`。`refresh` 与 `test` 以 `--as` 成员的身份签发业务令牌，这位成员需要在业务系统里有身份（邮箱前缀能唯一确定）。
 
 改为平台代理（`--delivery proxy`，新建时也一样）要求系统已填 OpenAPI 地址；已有系统从别的方式切过来时，操作目录当前不可用（`systems show` 里目录状态为 `error`）也会被拒绝，先让目录拉取成功再切。否则切过去之后 AI 员工只会被告知这个系统「无法调用」。改回 `env`、`mcp` 没有这些要求。
 
