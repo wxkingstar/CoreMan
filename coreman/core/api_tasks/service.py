@@ -525,8 +525,14 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
     who: dict[str, Any] = {"conversation": conversation}
     if row.client_key is not None:
         # 业务系统代员工发起的：回报是哪位员工，承接固定是他的私聊（独立会话）。
+        from coreman.core.api_tasks import writes
+
         user = await session.get(User, row.user_id)
-        who = {"user": (user.email or "").split("@", 1)[0].lower() if user else None}
+        who = {
+            "user": (user.email or "").split("@", 1)[0].lower() if user else None,
+            # 写操作要员工在私聊里点确认卡：任务结束不等于数据已经写进业务系统。
+            "writes": await writes.view(session, row),
+        }
     return {
         "id": str(row.id),
         "request_id": row.request_id,

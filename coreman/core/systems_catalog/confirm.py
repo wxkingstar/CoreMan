@@ -103,11 +103,14 @@ def _digest(args: Call) -> str:
 
 
 async def confirmable_origin(
-    session: AsyncSession, task_id: int, user_id: uuid.UUID
+    session: AsyncSession, task_id: int, user_id: uuid.UUID, *, api_tasks: bool = False
 ) -> tuple[str, str] | None:
     """(chat_id, chat_type) when the member typed this turn's message in a Feishu chat and can
     click a card there; None for turns nobody can confirm on the spot. Locks the task row so a
-    turn's proposals are staged one at a time."""
+    turn's proposals are staged one at a time.
+
+    With `api_tasks`, a turn a business system started for the member (and its follow-ups) counts
+    too: its card goes to the member's private chat with the AI employee, where its reply is."""
     from coreman.core.feishu_personal.policy import verified_origin_scope
     from coreman.core.personal_schedules import verified_group_origin
 
@@ -115,6 +118,10 @@ async def confirmable_origin(
     if task is None or task.kind != "chat" or task.inbound_event_id is None:
         return None
     payload = task.payload or {}
+    if api_tasks and payload.get("api_client"):
+        from coreman.core.api_tasks import writes
+
+        return await writes.confirm_origin(session, task, user_id)
     # Interjections, dispatch, alerts, API tasks and collaboration turns: no asker at the keyboard.
     if any(payload.get(key) for key in ("origin", "collaboration_id", "collaboration_phase")):
         return None
@@ -154,7 +161,7 @@ async def propose(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
     """Stage a checked write into this turn's batch."""
     session, member = ctx.session, ctx.member
     assert member.task_id is not None
-    origin = await confirmable_origin(session, member.task_id, member.user.id)
+    origin = await confirmable_origin(session, member.task_id, member.user.id, api_tasks=True)
     if origin is None:
         await session.commit()
         return {"error": "confirmation_unavailable", "message": UNAVAILABLE}

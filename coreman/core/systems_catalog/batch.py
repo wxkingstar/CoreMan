@@ -320,7 +320,9 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
         await proxy.record(ctx, system, args.operation_id, op, "denied")
         return unavailable
     assert member.task_id is not None
-    origin = await confirm.confirmable_origin(session, member.task_id, member.user.id)
+    origin = await confirm.confirmable_origin(
+        session, member.task_id, member.user.id, api_tasks=True
+    )
     if origin is None:
         await session.commit()
         return unavailable

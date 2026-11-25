@@ -32,6 +32,11 @@ async def _clicker(
     session: AsyncSession, origin: Task, inbound: InboundEvent, chat_type: str
 ) -> tuple[uuid.UUID, str] | None:
     """(user_id, chat_id) of a click made by the asker of `origin` in its chat."""
+    if (origin.payload or {}).get("api_client"):
+        # A business system started the turn for the member: the card is in their private chat.
+        from coreman.core.api_tasks import writes
+
+        return await writes.card_clicker(session, origin, inbound)
     try:
         if chat_type == "group":
             group = await group_card_scope(session, origin, inbound)

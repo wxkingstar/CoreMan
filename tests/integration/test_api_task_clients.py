@@ -162,3 +162,64 @@ async def test_client_disabled_before_run_is_refused_in_private_chat(db_engine, 
         select(OutboxItem).where(OutboxItem.dedupe_key == f"api-task:{row.id}:refused")
     )
     assert refused.target == {"chat_id": "p2p-alice"} and "业务系统" in refused.payload["markdown"]
+
+
+async def test_follow_up_after_a_confirmed_write_runs_in_the_same_session(db_engine, db_session):
+    _, _, client = await _setup(db_session)
+    row, _ = await _create(db_session, client)
+    await _trigger_sent(db_session, row)
+    first = await _claim(db_session)
+    await _run(db_engine, first)
+    # 确认卡点完后平台按原任务续接（同 confirm.resume）：同一会话、同一条入站事件。
+    follow = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=first.bot_id,
+            kind="chat",
+            user_id=first.user_id,
+            session_key=first.session_key,
+            inbound_event_id=first.inbound_event_id,
+            dedupe_key=f"systems-write:{row.id}:resume",
+            payload={
+                **first.payload,
+                "systems_write_result": "用户已确认：1. stock.createDraft：成功",
+            },
+        ),
+    )
+    await db_session.commit()
+    assert follow is not None
+    task = await _claim(db_session)
+    assert task.id == follow.id
+    fake = await _run(db_engine, task)
+    assert len(fake.requests) == 1
+    assert "stock.createDraft：成功" in turn_block(fake.requests[0])
+    done = await tasks.get(db_session, follow.id)
+    assert done.status == "succeeded"
+    stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == follow.id))
+    assert stream.reply_context["chat_id"] == "p2p-alice"
+
+
+async def test_a_foreign_task_naming_the_api_task_is_not_run(db_engine, db_session):
+    _, _, client = await _setup(db_session)
+    row, _ = await _create(db_session, client)
+    await _trigger_sent(db_session, row)
+    first = await _claim(db_session)
+    await _run(db_engine, first)
+    stray = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(
+            bot_id=first.bot_id,
+            kind="chat",
+            user_id=first.user_id,
+            session_key="p2p-alice",
+            inbound_event_id=first.inbound_event_id,
+            dedupe_key="stray",
+            payload=dict(first.payload),
+        ),
+    )
+    await db_session.commit()
+    assert stray is not None
+    task = await _claim(db_session)
+    fake = await _run(db_engine, task)
+    assert fake.requests == []
+    assert (await tasks.get(db_session, stray.id)).error_code == "api_inactive"
