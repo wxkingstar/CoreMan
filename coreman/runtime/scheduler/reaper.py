@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
+from coreman.core.api_tasks import uploads as api_task_uploads
 from coreman.core.assistants import access_log, platform_turns, sealed
 from coreman.core.assistants.kinds import BOT_HELP_KIND, SILENT_KINDS
 from coreman.core.bots.workspace_transfer import release_fence
@@ -593,6 +594,8 @@ async def run_cleanup(
         # 一次性交付的值正常由续接轮收尾时擦掉；处理器崩溃、任务没被认领就结束的，这里补擦。
         "credential_handoffs_wiped": await _run(factory, credential_requests.wipe_handoffs, now),
         "abandoned_turns": await _run(factory, close_abandoned_turns, now),
+        # 业务系统上传的图片：没被任务用上的 24 小时、被用上的 30 天后连同内容删掉。
+        "api_task_uploads_swept": await _run(factory, api_task_uploads.sweep, now),
     }
 
 

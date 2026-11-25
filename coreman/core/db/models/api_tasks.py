@@ -16,6 +16,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
     Uuid,
@@ -85,7 +87,34 @@ class ApiTask(Base):
     task_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("tasks.id", ondelete="SET NULL")
     )
+    # 业务系统随任务附带的图片（api_task_uploads.id，按顺序）；图片过期删掉后引用留着。
+    image_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(Uuid()), server_default=text("'{}'"))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+
+
+class ApiTaskUpload(Base):
+    """业务系统为某位员工上传的一张图片：任务里按 id 引用。内容直接存在库里，单张不超过 10MB。"""
+
+    __tablename__ = "api_task_uploads"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_key", "user_id", "sha256", name="uq_api_task_uploads_owner_sha256"
+        ),
+        Index("api_task_uploads_expires_idx", "expires_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")
+    )
+    client_key: Mapped[str] = mapped_column(
+        Text, ForeignKey("api_clients.app_key", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"))
+    sha256: Mapped[str] = mapped_column(Text)
+    size: Mapped[int] = mapped_column(Integer)
+    content_type: Mapped[str] = mapped_column(Text)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = _ts(server_default=text("now()"))
+    expires_at: Mapped[datetime] = _ts()
 
 
 class BotConversationAlias(Base):

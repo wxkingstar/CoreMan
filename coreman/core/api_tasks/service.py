@@ -35,7 +35,7 @@ from coreman.core.db.models import (
     UserReached,
 )
 from coreman.core.i18n.messages import MESSAGES
-from coreman.core.wecom.messages import InboundMessage, Sender, TextPart
+from coreman.core.wecom.messages import ImagePart, InboundMessage, Sender, TextPart
 
 PROMPT_MAX = 20000
 REQUEST_ID_MAX = 128
@@ -69,12 +69,13 @@ def trigger_text(user: User, token_name: str, prompt: str) -> str:
     return f"**{who}** 通过 API 发起（令牌：{token_name}）\n{quoted}"
 
 
-def client_trigger_text(user: User, client_name: str, prompt: str) -> str:
-    """业务系统代员工发起时私聊里的第一句：在哪个系统里发起、要做什么。"""
+def client_trigger_text(user: User, client_name: str, prompt: str, images: int = 0) -> str:
+    """业务系统代员工发起时私聊里的第一句：在哪个系统里发起、要做什么、附了几张图。"""
     body = prompt if len(prompt) <= PREVIEW else prompt[:PREVIEW] + f"…（共 {len(prompt)} 字）"
     quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in body.splitlines())
     who = user.display_name or user.login_name
-    return f"**{who}** 在「{client_name}」里发起\n{quoted}"
+    attached = f"（附 {images} 张图片）" if images else ""
+    return f"**{who}** 在「{client_name}」里发起{attached}\n{quoted}"
 
 
 async def _bot_for(
@@ -243,6 +244,7 @@ async def _start_turn(
     trigger: str,
     session_key: str,
     extra: dict[str, Any],
+    images: list[uuid.UUID] | None = None,
 ) -> ApiTask:
     """任务行已写入：写合成入站事件、在承接会话里发触发消息、入队 chat 任务。"""
     target, chat_id, prompt = row.target, row.chat_id, row.prompt
@@ -256,7 +258,14 @@ async def _start_turn(
         sender=Sender(platform_user_id=pid),
         message_id=f"{SYNTHETIC_PREFIX}{row.id}",
         mentions_bot=True,
-        parts=[TextPart(text=prompt)],
+        parts=[
+            TextPart(text=prompt),
+            # 图片从上传记录里取（`uploads.UploadFetcher`），ref 只认这个任务自己的合成消息。
+            *(
+                ImagePart(ref={"message_id": f"{SYNTHETIC_PREFIX}{row.id}", "file_key": str(i)})
+                for i in images or []
+            ),
+        ],
         reply_context={"chat_id": chat_id, "chat_type": chat_type},
     )
     event = await sealed.seal_values(
@@ -364,7 +373,7 @@ async def _client_replay(
     )
     if row is None:
         return None
-    if (row.user_id, row.bot_id, row.prompt) != fingerprint:
+    if (row.user_id, row.bot_id, row.prompt, list(row.image_ids or [])) != fingerprint:
         raise TokenError(409, "request_id 已用于内容不同的任务")
     return row
 
@@ -377,13 +386,15 @@ async def create_for_client(
     bot_key: str,
     prompt: str,
     request_id: str | None,
+    images: list[uuid.UUID] | None = None,
 ) -> tuple[ApiTask, bool]:
     """业务系统代员工发起一轮：独立会话，结果发在员工和 AI 员工的私聊里。调用方负责提交。"""
     if not prompt.strip() or len(prompt) > PROMPT_MAX:
         raise TokenError(422, f"prompt 须非空且不超过 {PROMPT_MAX} 个字符")
     user = await resolve_member(session, subject)
     bot = await _bot_for(session, client.bot_ids, user, bot_key, "调用方没有授权驱动该 AI 员工")
-    fingerprint = (user.id, bot.id, prompt)
+    wanted = list(dict.fromkeys(images or []))
+    fingerprint = (user.id, bot.id, prompt, wanted)
     if request_id is not None:
         replay = await _client_replay(session, client, request_id, fingerprint)
         if replay is not None:
@@ -415,9 +426,13 @@ async def create_for_client(
     )
     if (open_count or 0) >= MAX_OPEN_PER_CLIENT_USER:
         raise TokenError(429, f"这位员工已有 {MAX_OPEN_PER_CLIENT_USER} 个任务未结束，请稍后再发起")
+    from coreman.core.api_tasks import uploads
+
+    image_ids = await uploads.claim(session, client_key=client.app_key, user_id=user.id, ids=wanted)
     row = ApiTask(
         id=uuid.uuid4(),
         client_key=client.app_key,
+        image_ids=image_ids,
         user_id=user.id,
         bot_id=bot.id,
         request_id=request_id,
@@ -433,9 +448,10 @@ async def create_for_client(
         bot=bot,
         user=user,
         pid=pid,
-        trigger=client_trigger_text(user, client.name, prompt),
+        trigger=client_trigger_text(user, client.name, prompt, len(image_ids)),
         session_key=client_session_key(row.id),
         extra={"api_client": client.app_key},
+        images=image_ids,
     ), True
 
 

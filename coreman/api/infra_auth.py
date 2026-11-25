@@ -32,8 +32,26 @@ INFRA_SCOPES = {
 RETIRED_INFRA_SCOPES = {"cron"}
 
 
+# 带文件的签名请求（业务系统上传图片）：正文上限放宽到能装下一张图。
+UPLOAD_BODY_MAX = 11 * 1024 * 1024
+
+
 async def signed_client(
     request: Request, session: AsyncSession = Depends(get_session)
+) -> ApiClient:
+    return await _signed(request, session, body_max=1024 * 1024, files=False)
+
+
+async def signed_upload_client(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> ApiClient:
+    """multipart 上传：签名只覆盖查询参数和表单里的文字字段，文件本身由签过名的
+    `sha256` 字段绑定（端点负责核对）。"""
+    return await _signed(request, session, body_max=UPLOAD_BODY_MAX, files=True)
+
+
+async def _signed(
+    request: Request, session: AsyncSession, *, body_max: int, files: bool
 ) -> ApiClient:
     denied = ApiError(401, 401, "接口签名无效或已过期")
     app_key, timestamp, signature = (
@@ -53,7 +71,7 @@ async def signed_client(
         raise denied
     params: dict[str, Any] = dict(request.query_params)
     if request.method not in ("GET", "HEAD"):
-        if len(await request.body()) > 1024 * 1024:
+        if len(await request.body()) > body_max:
             raise ApiError(413, 413, "请求体过大")
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
@@ -68,7 +86,10 @@ async def signed_client(
             "application/x-www-form-urlencoded" in content_type
             or "multipart/form-data" in content_type
         ):
-            params.update(dict(await request.form()))
+            form = dict(await request.form())
+            if files:
+                form = {key: value for key, value in form.items() if isinstance(value, str)}
+            params.update(form)
     secret = request.app.state.cipher.decrypt(client.secret_enc, "api_clients.secret_enc")
     try:
         expected = sign_request(
@@ -82,12 +103,15 @@ async def signed_client(
     return client
 
 
-def require_scope(scope: str) -> Callable[..., Coroutine[Any, Any, ApiClient]]:
+def require_scope(
+    scope: str, *, upload: bool = False
+) -> Callable[..., Coroutine[Any, Any, ApiClient]]:
     if scope not in INFRA_SCOPES:
         raise ValueError("unknown infra scope")
+    signed = signed_upload_client if upload else signed_client
 
     async def dependency(
-        client: ApiClient = Depends(signed_client), session: AsyncSession = Depends(get_session)
+        client: ApiClient = Depends(signed), session: AsyncSession = Depends(get_session)
     ) -> ApiClient:
         if scope not in client.scopes:
             raise ApiError(403, 403, "调用方未获授权访问该接口组")
