@@ -21,7 +21,7 @@ PAGES_DIR = Path(__file__).parent / "pages"
 SITE_TITLE = "CoreMan 文档"
 SITE_SUMMARY = (
     "CoreMan AI 员工平台的使用与接入说明："
-    "本机接入业务系统目录、通过 API 驱动 AI 员工、业务系统接入规范。"
+    "本机接入业务系统目录、命令行 coreman、通过 API 驱动 AI 员工、业务系统接入规范。"
 )
 
 
@@ -38,6 +38,12 @@ PAGES: tuple[Page, ...] = (
         "systems-catalog-mcp",
         "本机接入业务系统目录",
         "把业务系统操作目录接成本机 Claude Code、Codex 的 MCP，用自己的令牌直连业务系统。",
+    ),
+    Page(
+        "coreman-cli",
+        "命令行 coreman",
+        "在自己电脑上装 coreman，登录一次后以本人身份在终端里管理 AI 员工、定时任务等，"
+        "也可交给本机 Agent。",
     ),
     Page(
         "api-tasks",
