@@ -93,6 +93,11 @@ ENTITY_SELECTS = {
     "coreman/core/reminders.py": 1,  # 交互状态，session.scalar
     # 写操作确认批次，session.scalar；过期与保留期满的清理取整行后显式还原
     "coreman/core/systems_catalog/confirm.py": 2,
+    # 成员本机写操作走 Tower：决定是 session.scalar；改发飞书取整行（公共机器人不是个人助理，
+    # 没有封存的行）
+    "coreman/core/systems_catalog/member_tower.py": 2,
+    # 成员本机写操作 Tower 批准后执行：session.scalar（自动还原）
+    "coreman/runtime/worker/member_write_tower.py": 1,
     "coreman/runtime/gateway_common/inbound.py": 1,  # session.scalar
     # 都是 session.scalar（置灰回复按钮、建议追问到期置灰）
     "coreman/runtime/gateway_feishu/reply_buttons.py": 5,
@@ -152,6 +157,8 @@ COLUMN_REFERENCES = {
     "coreman/core/systems_catalog/confirm.py": 1,
     # 成员本机写操作待确认数：按明文键 user_id 计数（成员的确认单不属于个人助理）
     "coreman/core/systems_catalog/member_writes.py": 1,
+    # 成员本机写操作改发飞书：按明文键 route、fallback_refused 筛选（成员的确认单不属于个人助理）
+    "coreman/core/systems_catalog/member_tower.py": 2,
     # 明文键；后台阶段的排队（background_hold / background_offer）只给飞书普通员工
     "coreman/runtime/gateway_common/inbound.py": 11,
     "coreman/runtime/gateway_feishu/assistant_inbound.py": 1,  # 下划线开头的明文键

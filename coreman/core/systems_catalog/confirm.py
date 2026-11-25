@@ -721,8 +721,13 @@ def card_ref(state: InteractionState) -> str:
 
 
 def keep_until(state: InteractionState) -> datetime | None:
-    """Until when the staged content of a sent batch may be sent again; None if never sent."""
+    """Until when the staged content of a sent batch may be sent again; None if never sent.
+
+    A member write sent to Tower instead of a card (`member_tower`) is kept as long, counted
+    from when its Tower request expires."""
     first = state.state.get("first_sent_at") if state.state.get("sent") else None
+    if first is None and state.kind == MEMBER_KIND:
+        first = state.state.get("tower_until")
     if not isinstance(first, str):
         return None
     try:

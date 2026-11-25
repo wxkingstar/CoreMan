@@ -9,6 +9,7 @@ staged, as the member. The outcome is kept for `systems_call_result` and shown o
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -152,18 +153,63 @@ async def handle(
     state.status = "submitted"
     state.state = {**state.state, "sending_at": now.isoformat()}
     await session.commit()
+    checked = await check(session, ctx, state)
+    if isinstance(checked, Done):
+        await _settle_done(session, bot, inbound, state, checked)
+        return checked.code
+    done = await send(session, checked, refresh=(state, bot, inbound))
+    await _settle_done(session, bot, inbound, state, done)
+    return done.code
+
+
+async def _settle_done(
+    session: AsyncSession, bot: Bot, inbound: InboundEvent, state: InteractionState, done: Done
+) -> None:
+    await _settle(
+        session,
+        bot,
+        inbound,
+        state,
+        done.outcome,
+        done.card_text,
+        title=done.title,
+        template=done.template,
+    )
+
+
+@dataclass(frozen=True)
+class Done:
+    """How a confirmed write ended: for `systems_call_result`, the card and the task result."""
+
+    code: str
+    outcome: dict[str, Any]
+    card_text: str
+    title: str = "没有执行"
+    template: str = "grey"
+
+    @property
+    def status(self) -> str:
+        return str(self.outcome.get("status") or "")
+
+
+@dataclass(frozen=True)
+class Checked:
+    pctx: Context
+    prepared: proxy.Prepared
+    item: dict[str, Any]
+
+
+async def check(session: AsyncSession, ctx: TaskContext, state: InteractionState) -> Checked | Done:
+    """Check a confirmed write again (member, OAuth grant, system, operation definition and
+    visibility) before it runs. Shared by the card and the Tower path."""
     [item] = member_writes.unseal(ctx.cipher, state)
     pctx = await _context(session, ctx, state)
     if pctx is None:
-        await _settle(
-            session,
-            bot,
-            inbound,
-            state,
+        return Done(
+            "member_write_unavailable",
             {"status": "refused", "message": "确认时已无法以你的身份调用业务系统，没有执行。"},
             "确认时已无法以你的身份调用业务系统（账号停用、本机授权已撤销或身份不全），没有执行。",
         )
-        return "member_write_unavailable"
     p = await proxy.prepare(
         pctx,
         proxy.Call(
@@ -182,24 +228,29 @@ async def handle(
     else:
         reason = None
     if isinstance(p, dict) or reason is not None:
-        await _settle(
-            session,
-            bot,
-            inbound,
-            state,
+        return Done(
+            "member_write_refused",
             {
                 "status": "refused",
                 "message": f"确认时已不能执行：{reason}。没有执行，不要自行重试。",
             },
             f"确认时已不能执行（{reason}），没有执行。",
         )
-        return "member_write_refused"
+    return Checked(pctx, p, item)
+
+
+async def send(session: AsyncSession, checked: Checked, *, refresh: tuple[Any, ...]) -> Done:
+    """Run the checked write once, exactly as staged, as the member. `refresh` are the rows the
+    caller still uses afterwards: a platform error rolls the session back."""
+    item = checked.item
     try:
-        result = await proxy.send(pctx, p, key=item["key"], prefix="confirmed_")
+        result = await proxy.send(
+            checked.pctx, checked.prepared, key=item["key"], prefix="confirmed_"
+        )
     except Exception as exc:  # noqa: BLE001 平台自己出错：请求可能已经发出
         await session.rollback()
         # 回滚让已加载的行都过期：重新取，后面记结果、改卡片还要用。
-        for row in (state, bot, inbound):
+        for row in refresh:
             await session.refresh(row)
         result = {
             "error": "platform_error",
@@ -216,11 +267,8 @@ async def handle(
         if status == "unknown"
         else "\n没有成功，本机的 Agent 会接着说明原因。"
     )
-    await _settle(
-        session,
-        bot,
-        inbound,
-        state,
+    return Done(
+        f"member_write_{status}",
         {
             "status": status,
             "response": member_writes.brief(result),
@@ -234,4 +282,3 @@ async def handle(
         title="已完成" if status == "ok" else "没有成功" if status == "failed" else "结果未知",
         template="green" if status == "ok" else "red" if status == "failed" else "orange",
     )
-    return f"member_write_{status}"

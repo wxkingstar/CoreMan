@@ -44,6 +44,9 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "assistant_eligibility": {"mode": "all", "department_ids": [], "user_ids": []},
     # 开通个人助理时可选的 AI，按顺序挑第一个助理池里有可用节点的。
     "assistant_backends": ["claude", "codex"],
+    # 成员本机 Agent 的写操作发到 Tower 后，这么多分钟没被批准或拒绝就撤回 Tower 的单、改发飞书
+    # 确认卡（卡片的有效期从改发时算起）。
+    "member_write_tower_wait_minutes": 360,
     # 任务平台发卡片用的飞书员工（编号）：任务和哪位 AI 员工都无关时（网页上人派给人）用它发。
     "work_task_notifier_bot_id": "",
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
@@ -108,6 +111,8 @@ class SettingsPatch(BaseModel):
     group_observe_max_wait_seconds: int | None = Field(default=None, ge=1, le=3600)
     group_observe_bot_streak_limit: int | None = Field(default=None, ge=1, le=100)
     busy_confirm_minutes: int | None = Field(default=None, ge=0, le=1440)
+    # 至多 3 天：Tower 的单最长 7 天，提交时按「等待 + 1 小时」定到期。
+    member_write_tower_wait_minutes: int | None = Field(default=None, ge=1, le=4320)
     assistant_node_concurrency: int | None = Field(default=None, ge=1, le=32)
     assistant_daily_turn_budget: int | None = Field(default=None, ge=10, le=20000)
     assistant_eligibility: AssistantEligibility | None = None

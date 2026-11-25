@@ -130,8 +130,11 @@ def request_url(cfg: Config, external_id: str) -> str:
     return f"{cfg.public_base_url}/api/assistant/approvals/{external_id}/execute"
 
 
-def request_hash(cfg: Config, external_id: str, body: bytes, caller: str) -> str:
-    path = urllib.parse.urlsplit(request_url(cfg, external_id)).path
+def request_hash(
+    cfg: Config, external_id: str, body: bytes, caller: str, *, url: str | None = None
+) -> str:
+    """`url` 是这张单的名义地址；不给用个人助理的（`request_url`）。"""
+    path = urllib.parse.urlsplit(url or request_url(cfg, external_id)).path
     return str(tower_gate.request_hash_parts("POST", cfg.target, path, "", body, caller))
 
 
@@ -168,6 +171,7 @@ async def submit(
     content: str,
     body: bytes,
     expires_at: datetime,
+    url: str | None = None,
 ) -> Submitted:
     """提交一张单；`external_id` 已有待批的单时 Tower 原地替换内容与请求、作废旧令牌并重新通知。
 
@@ -188,7 +192,7 @@ async def submit(
                 "caller": caller,
                 "requester": requester,
                 "method": "POST",
-                "url": request_url(cfg, external_id),
+                "url": url or request_url(cfg, external_id),
                 "body_b64": base64.b64encode(body).decode("ascii"),
                 "summary": abstract,
             },
@@ -204,6 +208,33 @@ async def submit(
     if not decisions.APPROVAL_ID.fullmatch(approval_id):
         raise TowerError("tower_unavailable", 503)
     return Submitted(approval_id, bool(data.get("updated")))
+
+
+async def last_active(cfg: Config, username: str, *, wait_seconds: float) -> datetime | None:
+    """这个账号最后一次在 Tower 里操作的时刻（`GET /v1/users/{username}/last-active`）。
+
+    没用过、账号不存在（404）、接口还没上线、不可用、超时或应答不成形，一律返回 None：
+    调用方按「不活跃」处理，不因此报错。
+    """
+    path = "/v1/users/" + urllib.parse.quote(username, safe="") + "/last-active"
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, follow_redirects=False, trust_env=False, timeout=wait_seconds
+        ) as http:
+            resp = await http.get(cfg.url + path, headers={"X-API-Key": cfg.sender_key})
+        data = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("lastActiveAt")
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
 
 
 async def token(cfg: Config, approval_id: str) -> str:
