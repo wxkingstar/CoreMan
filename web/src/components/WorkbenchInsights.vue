@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { runtime } from '@/api/admin'
 import { skills, type Approval } from '@/api/skills'
-import type { Statistics } from '@/api/statistics'
+import { totalTokens, type Statistics } from '@/api/statistics'
 import { useAuthStore } from '@/stores/auth'
 import LoadState from './LoadState.vue'
 const props = defineProps<{ usage: Statistics | null }>()
@@ -12,8 +12,8 @@ const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.
 const operator = computed(() => ['team_lead', 'ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
 const approvals = ref<Approval[]>([]), failedMessages = ref<number | null>(null)
 const approvalError = ref(''), runtimeError = ref(''), loading = ref(false)
-const daily = computed(() => props.usage?.daily ?? [])
-const peak = computed(() => Math.max(1, ...daily.value.map(row => row.messages)))
+const daily = computed(() => (props.usage?.daily ?? []).map(row => ({ day: row.day, tokens: totalTokens(row) })))
+const peak = computed(() => Math.max(1, ...daily.value.map(row => row.tokens)))
 async function reload() {
   if (loading.value) return
   loading.value = true; approvalError.value = ''; runtimeError.value = ''
@@ -39,7 +39,7 @@ defineExpose({ reload })
         v-if="usage"
         class="usage-summary"
       >
-        <span
+        <span>{{ t('statistics.tokens') }} <strong>{{ totalTokens(usage.total).toLocaleString() }}</strong></span><span
           v-for="key in ['messages', 'users', 'bots'] as const"
           :key="key"
         >{{ t(`statistics.${key}`) }} <strong>{{ usage.total[key]?.toLocaleString() ?? '—' }}</strong></span>
@@ -55,11 +55,11 @@ defineExpose({ reload })
         :key="row.day"
       ><rect
         :x="(index + 0.5) * 600 / daily.length - Math.min(36, Math.max(2, 600 / daily.length - 8)) / 2"
-        :y="130 - row.messages / peak * 115"
+        :y="130 - row.tokens / peak * 115"
         :width="Math.min(36, Math.max(2, 600 / daily.length - 8))"
-        :height="row.messages / peak * 115"
+        :height="row.tokens / peak * 115"
         fill="var(--el-color-primary)"
-      ><title>{{ row.day }}: {{ row.messages }}</title></rect><text
+      ><title>{{ row.day }}: {{ row.tokens.toLocaleString() }}</title></rect><text
         v-if="index % Math.max(1, Math.ceil(daily.length / 6)) === 0"
         :x="index * 600 / daily.length + 4"
         y="153"

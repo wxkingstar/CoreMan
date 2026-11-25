@@ -6,15 +6,15 @@ import { useListQuery } from '@/composables/useListQuery'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { statistics, tokenKeys, type Statistics, type ModelPrice } from '@/api/statistics'
+import { statistics, tokenKeys, totalTokens, type Statistics, type ModelPrice } from '@/api/statistics'
 import { useAuthStore } from '@/stores/auth'
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const auth = useAuthStore()
 const manager = computed(() => ['ai_committee', 'platform_admin'].includes(auth.user?.role ?? ''))
 const data = ref<Statistics | null>(null), prices = ref<ModelPrice[]>([])
 const busy = ref(false), editing = ref(false), saving = ref(false)
 const range = ref<string[]>([]), timezone = ref<string>(displayZone.value)
-const metric = ref<'messages' | 'users' | 'bots'>('messages')
+const metric = ref<'tokens' | 'messages' | 'users' | 'bots'>('tokens')
 const ranking = ref('users')
 const today = () => new Date().toISOString().slice(0, 10)
 const emptyPrice = (): ModelPrice => ({ provider: 'claude', model: '', effective_from: today(), input_usd: '', output_usd: '', cache_read_usd: '', cache_write_usd: '', version: 0, source: 'custom' })
@@ -27,7 +27,7 @@ const fail = (e: unknown) => ElMessage.error(errorMessage(e))
 const chart = computed(() => {
   if (!data.value) return []
   const first = Date.parse(data.value.start), last = Date.parse(data.value.end)
-  const values = new Map(data.value.daily.map(row => [row.day, row[metric.value]]))
+  const values = new Map(data.value.daily.map(row => [row.day, metric.value === 'tokens' ? totalTokens(row) : row[metric.value]]))
   return Array.from({ length: Math.round((last - first) / 86400000) + 1 }, (_, index) => { const day = new Date(first + index * 86400000).toISOString().slice(0, 10); return { day, value: values.get(day) ?? 0 } })
 })
 const peak = computed(() => Math.max(1, ...chart.value.map(row => row.value)))
@@ -46,7 +46,13 @@ const plotWidth = computed(() => chartWidth.value - 64)
 const barStep = computed(() => plotWidth.value / Math.max(1, chart.value.length))
 const barWidth = computed(() => Math.min(32, Math.max(1, barStep.value * 0.64)))
 const labelEvery = computed(() => Math.max(1, Math.ceil(chart.value.length / Math.max(2, Math.floor(plotWidth.value / 85)))))
-const axisMax = computed(() => Math.max(4, Math.ceil(peak.value / 4) * 4))
+// 刻度取 1/2/2.5/5×10^n，Token 量级上亿时纵轴也是整数。
+const axisMax = computed(() => {
+  const raw = peak.value / 4, magnitude = 10 ** Math.floor(Math.log10(Math.max(1, raw)))
+  const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(v => v >= raw && Number.isInteger(v)) ?? 10 * magnitude
+  return step * 4
+})
+const axisLabel = (value: number) => new Intl.NumberFormat(locale.value, { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 const loadError = ref('')
 const { persist } = useListQuery({ range, timezone, metric }, () => { void load() })
 async function load() { persist(); loadError.value = ''; if (busy.value) return; busy.value = true; try { data.value = await statistics.get({ start: range.value?.[0], end: range.value?.[1], timezone: timezone.value }); range.value = [data.value.start, data.value.end] } catch (e) { loadError.value = errorMessage(e); data.value = null; fail(e) } finally { busy.value = false } }
@@ -130,7 +136,9 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
             v-model="metric"
             size="small"
           >
-            <el-radio-button value="messages">
+            <el-radio-button value="tokens">
+              {{ t('statistics.tokens') }}
+            </el-radio-button><el-radio-button value="messages">
               {{ t('statistics.messages') }}
             </el-radio-button><el-radio-button value="users">
               {{ t('statistics.users') }}
@@ -164,7 +172,7 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
                 :y="222 - tick * 48"
                 text-anchor="end"
                 class="axis-label"
-              >{{ (axisMax * tick / 4).toLocaleString() }}</text>
+              >{{ axisLabel(axisMax * tick / 4) }}</text>
             </g>
             <g
               v-for="(row, index) in chart"
