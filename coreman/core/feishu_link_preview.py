@@ -36,15 +36,13 @@ _SESSION = re.compile(
 )
 _TASK = re.compile(r"/work-tasks/([A-Za-z0-9_-]{1,40})/?\Z")
 _STATUS = {
-    "shadow": "未开始",
-    "pending": "待处理",
-    "queued": "排队中",
-    "running": "进行中",
-    "awaiting_confirmation": "待确认",
+    "shadow": "试运行",
+    "todo": "待开始",
+    "in_progress": "进行中",
+    "waiting": "等待中",
+    "review": "待验收",
     "done": "已完成",
-    "unfinished": "未完成",
     "cancelled": "已取消",
-    "needs_human": "需要人处理",
 }
 
 

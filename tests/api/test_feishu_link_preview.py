@@ -125,7 +125,7 @@ async def test_task_link_shows_title_to_members(
     client: httpx.AsyncClient, configured: None, db_session: AsyncSession
 ) -> None:
     await people(db_session)
-    task = WorkTask(title="整理上周退款", status="running", platform="feishu", chat_id="oc1")
+    task = WorkTask(title="整理上周退款", status="in_progress", platform="feishu", chat_id="oc1")
     db_session.add(task)
     await db_session.commit()
     await db_session.refresh(task)

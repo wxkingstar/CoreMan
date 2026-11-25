@@ -307,9 +307,13 @@ from coreman.core.db.models.personal_credentials import (
     PersonalCredential,
 )
 from coreman.core.db.models.work_tasks import (
+    WORK_TASK_OPEN,
+    WORK_TASK_PRIORITIES,
     WORK_TASK_STATUSES,
     WorkTask,
     WorkTaskEvent,
+    WorkTaskRun,
+    WorkTaskWatcher,
 )
 
 __all__ += [
@@ -320,7 +324,15 @@ __all__ += [
     "HumanCollaboration",
 ]
 
-__all__ += ["WORK_TASK_STATUSES", "WorkTask", "WorkTaskEvent"]
+__all__ += [
+    "WORK_TASK_OPEN",
+    "WORK_TASK_PRIORITIES",
+    "WORK_TASK_STATUSES",
+    "WorkTask",
+    "WorkTaskEvent",
+    "WorkTaskRun",
+    "WorkTaskWatcher",
+]
 
 __all__ += [
     "CREDENTIAL_ORIGINS",

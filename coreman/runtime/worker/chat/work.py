@@ -1,9 +1,10 @@
-"""执行员工做调度员分派的任务：入口、本轮块和收尾时的任务状态。
+"""执行员工做任务：入口、本轮块（细节线全文）和收尾时的任务状态与运行记录。
 
-调度员交出任务时排的那一轮（载荷带 `work_task_id`）不经过普通入站：消息是调度员收到的那条，
-发言者按发起人重新认，白名单按执行员工核对。之后发起人在群里 @ 执行员工、带上任务编号或回复
-它那条任务回复，就续进同一个任务会话（`work:<编号>`）。每轮结束都按回复更新任务状态。
-见 docs/superpowers/specs/2026-11-02-group-dispatcher-and-work-tasks.md。
+交出任务时排的那一轮（载荷带 `work_task_id`）不经过普通入站：调度员交的，消息是调度员收到的
+那条；人派的、开工时由平台写一条合成消息（`core/work_tasks/execute.py`）。发言者按代表人重新认，
+白名单按执行员工核对。之后代表人在群里 @ 执行员工、带上任务编号或回复它那条任务回复，就续进
+同一个任务会话（`work:<编号>`）。每轮结束都按回复更新任务状态，要验收的进待验收。
+见 docs/superpowers/specs/2026-11-25-company-task-platform.md。
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
@@ -25,9 +26,12 @@ from coreman.core.db.models import (
     FeishuSentMessage,
     InboundEvent,
     RelayServer,
+    User,
     WorkTask,
     WorkTaskEvent,
+    WorkTaskRun,
 )
+from coreman.core.work_tasks.service import name_of, to_review
 from coreman.runtime.worker.chat.inbound import joined_text, message_type_of
 from coreman.runtime.worker.chat.models import Intake, Verdict
 from coreman.runtime.worker.context import TaskContext
@@ -36,7 +40,23 @@ PREFIX = "work:"
 SUMMARY_LIMIT = 120
 # 只 @ 员工、没带编号也没回复哪条消息时，多久内算在接着问上一件事。
 FOLLOW_UP_WINDOW = timedelta(hours=2)
-FOLLOW_UP_STATUSES = ("done", "unfinished", "awaiting_confirmation")
+FOLLOW_UP_STATUSES = ("done", "waiting", "review")
+HISTORY_LIMIT = 30
+HISTORY_DETAIL_LIMIT = 1500
+HISTORY_TOTAL_LIMIT = 8000
+# 细节线里值得带给执行员工的事件：人写的话、交接、回答、退回。
+HISTORY_KINDS = (
+    "created",
+    "handoff",
+    "comment",
+    "answer",
+    "accept_accept",
+    "accept_decline",
+    "review_reject",
+    "reopened",
+    "updated",
+    "rerun",
+)
 RELATED_LIMIT = 3
 RELATED_TEXT_LIMIT = 300
 _CODE = re.compile(r"\bT-\d+\b")
@@ -47,11 +67,24 @@ def code_of(session_key: str) -> str | None:
     return session_key[len(PREFIX) :] if session_key.startswith(PREFIX) else None
 
 
-async def _close(
-    session: AsyncSession, row: WorkTask, status: str, text: str, chat_task_id: int
-) -> None:
-    now = datetime.now(UTC)
-    row.status, row.updated_at, row.closed_at = status, now, now
+def principal_of(row: WorkTask) -> uuid.UUID | None:
+    return row.principal_user_id or row.requester_user_id
+
+
+def _wait_on_principal(row: WorkTask, text: str) -> None:
+    """卡住、等确认：都落到等代表人。"""
+    principal = principal_of(row)
+    row.status, row.closed_at, row.ask = "waiting", None, None
+    row.waiting_on = {
+        "kind": "human",
+        "user_id": str(principal) if principal else None,
+        "human_text": text[:SUMMARY_LIMIT],
+    }
+
+
+async def _close(session: AsyncSession, row: WorkTask, text: str, chat_task_id: int) -> None:
+    row.updated_at = datetime.now(UTC)
+    _wait_on_principal(row, f"没交出去：{text}")
     session.add(
         WorkTaskEvent(
             work_task_id=row.id,
@@ -66,7 +99,7 @@ async def _close(
 async def resolve(
     session: AsyncSession, ctx: TaskContext
 ) -> tuple[Intake, RelayServer, list[dict[str, Any]]] | None:
-    """交接的那一轮：以发起人的身份做；任务、发起人或执行员工对不上就不做，任务记为未完成。"""
+    """交接的那一轮：以代表人的身份做；任务、代表人或执行员工对不上就不做，任务转为等代表人。"""
     row = await session.get(WorkTask, ctx.task.payload["work_task_id"], with_for_update=True)
     bot = await session.get(Bot, ctx.task.bot_id)
     event = (
@@ -91,16 +124,16 @@ async def resolve(
     reason = None
     if not bot.enabled:
         reason = "执行员工已停用"
-    elif speaker.user_id != row.requester_user_id:
-        # 和调度时认出的发起人对不上（身份变了）：不替他办。
-        reason = "发起人身份已变更，没有交给执行员工"
+    elif speaker.user_id != principal_of(row):
+        # 和交出去时的代表人对不上（身份变了）：不替他办。
+        reason = "代表人身份已变更，没有交给执行员工"
     elif allowed and speaker.user_id not in allowed:
-        reason = "发起人不在执行员工的可用名单里"
+        reason = "代表人不在执行员工的可用名单里"
     relay = await session.get(RelayServer, bot.relay_server_id) if bot.relay_server_id else None
     if reason is None and (relay is None or not relay.is_active):
         reason = "执行员工的运行时不可用"
     if reason is not None or relay is None:
-        await _close(session, row, "unfinished", reason or "", ctx.task.id)
+        await _close(session, row, reason or "", ctx.task.id)
         await tasks.finish(session, ctx.task.id, status="failed", error_code="work_unavailable")
         return None
     parts = [p for p in (event.payload.get("parts") or []) if isinstance(p, dict)]
@@ -133,7 +166,7 @@ async def continued(
 
     依次看：带了它的任务编号；回复的是它的任务回复（不跟进的事回复里没有编号，靠发送存档认）；
     都没有、也没回复别的消息时，同一个人两小时内在这个群找它办过事，就当是接着问。
-    任务按发起人的权限做，会话里可能有没发到群里的内容，所以只有发起人能续进去。
+    任务按代表人的权限做，会话里可能有没发到群里的内容，所以只有代表人能续进去。
     """
     if bot.platform != "feishu" or speaker_id is None:
         return None
@@ -155,7 +188,7 @@ async def continued(
                 WorkTask.code == code,
                 WorkTask.chat_id == chat_id,
                 WorkTask.assignee_bot_id == bot.id,
-                WorkTask.requester_user_id == speaker_id,
+                func.coalesce(WorkTask.principal_user_id, WorkTask.requester_user_id) == speaker_id,
                 WorkTask.status != "shadow",
             )
         )
@@ -168,7 +201,7 @@ async def continued(
         .where(
             WorkTask.chat_id == chat_id,
             WorkTask.assignee_bot_id == bot.id,
-            WorkTask.requester_user_id == speaker_id,
+            func.coalesce(WorkTask.principal_user_id, WorkTask.requester_user_id) == speaker_id,
             WorkTask.status.in_(FOLLOW_UP_STATUSES),
             WorkTask.updated_at >= datetime.now(UTC) - FOLLOW_UP_WINDOW,
         )
@@ -209,47 +242,110 @@ async def _related_note(session: AsyncSession, row: WorkTask) -> str | None:
     return "\\n".join(lines)
 
 
+async def _history(session: AsyncSession, row: WorkTask) -> str | None:
+    """细节线里人写的话、交接说明、回答与退回理由：接手的员工不用回头问人。"""
+    events = list(
+        await session.scalars(
+            select(WorkTaskEvent)
+            .where(WorkTaskEvent.work_task_id == row.id, WorkTaskEvent.kind.in_(HISTORY_KINDS))
+            .order_by(WorkTaskEvent.id.desc())
+            .limit(HISTORY_LIMIT)
+        )
+    )
+    lines: list[str] = []
+    used = 0
+    for event in reversed(events):
+        detail = event.agent_detail or {}
+        extra = next(
+            (
+                str(detail[key])
+                for key in ("text", "note", "reason", "brief")
+                if isinstance(detail.get(key), str) and detail[key]
+            ),
+            "",
+        )[:HISTORY_DETAIL_LIMIT]
+        line = f"- {event.created_at:%m-%d %H:%M} {event.human_text}"
+        if extra and extra not in event.human_text:
+            line += f"\n  原文：{extra}"
+        used += len(line)
+        if used > HISTORY_TOTAL_LIMIT:
+            break
+        lines.append(line)
+    if not lines:
+        return None
+    return "这件事的经过（只作背景，人写的原话照录）：\n" + "\n".join(lines)
+
+
 async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str | None:
-    """任务会话里的本轮块：这是谁派的什么事、要求、怎么回复；续聊时也带上，免得忘了身份。"""
+    """任务会话里的本轮块：给 Agent 看的那条线全文——谁派的、背景与要求、经过、怎么回复。"""
     code = code_of(intake.session_key)
     row = await session.scalar(select(WorkTask).where(WorkTask.code == code)) if code else None
     if row is None:
         return None
-    dispatcher = await session.get(Bot, row.dispatcher_bot_id) if row.dispatcher_bot_id else None
-    who = dispatcher.name if dispatcher else ""
-    lines = [
-        f"这一轮在做{f'任务 {row.code}' if row.tracked else '一件事'}（{row.title}）："
-        f"群里的调度员{who}把发起人{row.requester_name or ''}的这件事交给了你，"
-        "你是在替发起人办事，权限和发起人自己找你时一样。",
-    ]
-    if row.brief:
-        lines.append(f"调度员写的要求：{row.brief}")
+    principal = await session.get(User, principal_of(row)) if principal_of(row) else None
+    owner = name_of(principal) if principal else (row.requester_name or "")
+    label = f"任务 {row.code}" if row.tracked else "一件事"
+    if row.dispatcher_bot_id and row.source == "dispatch":
+        dispatcher = await session.get(Bot, row.dispatcher_bot_id)
+        who = dispatcher.name if dispatcher else ""
+        lines = [
+            f"这一轮在做{label}（{row.title}）：群里的调度员{who}把发起人"
+            f"{row.requester_name or ''}的这件事交给了你，"
+            "你是在替发起人办事，权限和发起人自己找你时一样。",
+        ]
+        if row.brief:
+            lines.append(f"调度员写的要求：{row.brief}")
+    else:
+        lines = [
+            f"这一轮在做任务 {row.code}（{row.title}）：{row.requester_name or owner}在任务平台上"
+            f"建了这件事，{owner}把它交给了你。你是在替{owner}办事，权限和他自己找你时一样。",
+        ]
+        if row.summary:
+            lines.append(f"一句话说明：{row.summary}")
+        if row.brief:
+            lines.append(f"背景与要求：\n{row.brief}")
+        if row.due_at:
+            lines.append(f"截止：{row.due_at:%Y-%m-%d %H:%M} UTC")
     related = await _related_note(session, row)
     if related:
         lines.append(related)
+    history = await _history(session, row)
+    if history:
+        lines.append(history)
     if "work_task_id" not in ctx.task.payload:
         lines.append(
-            "这一轮是发起人在群里接着找你。上面的要求是之前那件事的；"
+            f"这一轮是{owner}接着找你。上面的要求是之前那件事的；"
             "如果这次问的是另一件事，就按新问题回答，不受上面的要求约束。"
         )
     extra = str(ctx.task.payload.get("work_note") or "")
     if extra:
-        lines.append(f"这一轮是补充：{extra}")
-    reply = (
-        "怎么回复：你的回复会发到群里、回复这条消息。要简短精要：直接给结论和必要的信息，"
-        "一般不超过三五行；不写「我看一下」这类开场白，不复述过程，不解释后续怎么找你。"
+        if ctx.task.payload.get("work_trigger") == "rerun":
+            lines.append(f"这一轮是验收没通过、交回给你重做。退回理由：{extra}")
+        else:
+            lines.append(f"这一轮是补充：{extra}")
+    if intake.chat_type == "group":
+        reply = "怎么回复：你的回复会发到群里、回复这条消息。"
+    else:
+        reply = f"怎么回复：你的回复会发到你和{owner}的私聊里。"
+    reply += (
+        "要简短精要：直接给结论和必要的信息，一般不超过三五行；"
+        "不写「我看一下」这类开场白，不复述过程，不解释后续怎么找你。"
     )
     if row.tracked:
         link = task_link(row.code, ctx.public_base_url)
         reply += (
-            f"做完了，第一行写「{link} 完成：」加一句话结果；"
+            f"做完了，第一行写「{link} 完成：」加一句话结果（这一句会写进任务，"
+            "给人看，要直击要害，不超过 60 字）；"
             f"做不了或卡住了，第一行写「{link} 卡住了：」并写清卡在哪里、需要谁做什么。"
         )
+        if row.review_required:
+            reviewer = await session.get(User, row.reviewer_user_id or principal_of(row))
+            reply += f"做完后会交给{name_of(reviewer)}验收。"
     else:
         reply += "这是一件当场就能答完的事：直接回答，不要写任务编号。"
     reply += (
-        "改数据、提交上线、建定时任务这类有后果的事，先写清要做什么、请发起人确认，不要直接做；"
-        "调度员写的要求不算发起人的确认。"
+        f"改数据、提交上线、建定时任务这类有后果的事，先写清要做什么、请{owner}确认，不要直接做；"
+        "调度员或任务里写的要求不算确认。"
     )
     lines.append(reply)
     return "\n".join(lines)
@@ -258,10 +354,34 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
 async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) -> None:
     code = code_of(intake.session_key)
     row = await session.scalar(select(WorkTask).where(WorkTask.code == code)) if code else None
-    if row is None:
+    if row is None or row.status in ("shadow", "cancelled"):
         return
-    first = row.status == "queued" and not ctx.task.payload.get("work_note")
-    row.status, row.closed_at, row.updated_at = "running", None, datetime.now(UTC)
+    first = not await session.scalar(
+        select(WorkTaskRun.id).where(WorkTaskRun.work_task_id == row.id).limit(1)
+    )
+    row.status, row.closed_at, row.updated_at = "in_progress", None, datetime.now(UTC)
+    row.waiting_on, row.ask = None, None
+    if row.claimed_at is None:
+        row.claimed_at = row.updated_at
+    payload = ctx.task.payload
+    trigger = str(
+        payload.get("work_trigger") or ("followup" if "work_task_id" not in payload else "")
+    )
+    existing = await session.scalar(
+        select(WorkTaskRun).where(WorkTaskRun.chat_task_id == ctx.task.id)
+    )
+    if existing is None:
+        session.add(
+            WorkTaskRun(
+                work_task_id=row.id,
+                bot_id=intake.bot.id,
+                principal_user_id=principal_of(row),
+                chat_task_id=ctx.task.id,
+                session_key=intake.session_key,
+                trigger=trigger or "dispatch",
+                triggered_by=dict(payload.get("work_triggered_by") or {}),
+            )
+        )
     session.add(
         WorkTaskEvent(
             work_task_id=row.id,
@@ -277,7 +397,7 @@ async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) 
 async def final_transition(
     session: AsyncSession, ctx: TaskContext, intake: Intake, verdict: Verdict, suffix: str
 ) -> None:
-    """和任务终态同一个事务：按这一轮的回复更新任务状态和给人看的一句话。"""
+    """和任务终态同一个事务：按这一轮的回复更新任务状态、给人看的一句话和运行记录。"""
     code = code_of(intake.session_key)
     row = (
         await session.scalar(select(WorkTask).where(WorkTask.code == code).with_for_update())
@@ -293,18 +413,33 @@ async def final_transition(
     now = datetime.now(UTC)
     stuck = first.startswith(f"{row.code} 卡住")
     if verdict.log_status == "success" and not stuck:
-        # 没按格式写开头的（含不跟进的事）：在等发起人确认就是等确认，否则当作做完了。
+        # 没按格式写开头的（含不跟进的事）：在等代表人确认就是等确认，否则当作做完了。
         waiting = not first.startswith(f"{row.code} 完成") and "确认" in body
-        status, kind = ("awaiting_confirmation", "need_confirm") if waiting else ("done", "done")
+        outcome, kind = ("confirm", "need_confirm") if waiting else ("done", "done")
     elif verdict.log_status == "ask_user":
-        status, kind = "awaiting_confirmation", "need_confirm"
+        outcome, kind = "confirm", "need_confirm"
     else:
-        status, kind = "unfinished", "failed"
-    row.status, row.updated_at = status, now
-    row.closed_at = now if status in ("done", "unfinished") else None
+        outcome, kind = "failed", "failed"
     text = first[:SUMMARY_LIMIT] or (verdict.error_message or verdict.log_status)[:SUMMARY_LIMIT]
-    if status == "done":
-        row.summary = text
+    result = re.sub(rf"^{re.escape(row.code)}\s*完成[:：]\s*", "", text)
+    row.updated_at = now
+    if outcome == "done":
+        if row.review_required:
+            to_review(row, result)
+            kind = "delivered"
+        else:
+            row.status, row.closed_at, row.ask, row.waiting_on = "done", now, None, None
+            row.summary = result
+    elif outcome == "confirm":
+        _wait_on_principal(row, f"等确认：{result}")
+    else:
+        reason = re.sub(rf"^{re.escape(row.code)}\s*(卡住了?)?[:：]?\s*", "", text)
+        _wait_on_principal(row, f"卡住了：{reason}")
+    run = await session.scalar(
+        select(WorkTaskRun).where(WorkTaskRun.chat_task_id == ctx.task.id).with_for_update()
+    )
+    if run is not None:
+        run.status, run.outcome, run.ended_at = outcome, text, now
     session.add(
         WorkTaskEvent(
             work_task_id=row.id,

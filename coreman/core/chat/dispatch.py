@@ -361,12 +361,14 @@ async def record(
             row = WorkTask(
                 title=item["title"],
                 summary=item["summary"],
-                status="queued" if live else "shadow",
+                status="waiting" if live else "shadow",
+                waiting_on={"kind": "queue", "human_text": "排队中"} if live else None,
                 platform="feishu",
                 chat_id=chat_id,
                 origin_event_id=event_id,
                 requester_user_id=requester_id,
                 requester_name=requester_name,
+                principal_user_id=requester_id,
                 assignee_bot_id=who.bot_id,
                 dispatcher_bot_id=dispatcher.id,
                 decision_id=decision_id,
@@ -379,6 +381,7 @@ async def record(
         await session.flush()
         siblings = [r.code for r in created]
         for row, item in zip(created, plan.tasks, strict=True):
+            row.root_id = row.id
             if len(created) > 1:
                 row.related_codes = [*row.related_codes, *(c for c in siblings if c != row.code)]
             name = by_key[item["assignee"]].name
@@ -459,7 +462,11 @@ async def hand_off(
     bot = await session.get(Bot, row.assignee_bot_id)
     if bot is None:
         return
-    row.status, row.closed_at, row.updated_at = "queued", None, datetime.now(UTC)
+    row.status, row.closed_at, row.updated_at = "waiting", None, datetime.now(UTC)
+    row.ask = None
+    row.waiting_on = {"kind": "queue", "human_text": f"排队等{bot.name}开始"}
+    if row.claimed_at is None:
+        row.claimed_at = row.updated_at
     await bus.enqueue(
         session,
         bus.NewTask(
@@ -472,6 +479,7 @@ async def hand_off(
             payload={
                 "work_task_id": row.id,
                 "work_note": note,
+                "work_trigger": "dispatch",
                 "bot_key": bot.bot_key,
                 "platform_user_id": requester_pid,
                 # 同一个任务的补充排在上一轮之后，不替代正在做的那一轮。
