@@ -24,6 +24,7 @@ from coreman.runtime.worker.credential_resume import CredentialResumeHandler
 from coreman.runtime.worker.cron_handler import CronRunHandler
 from coreman.runtime.worker.escalation_media import EscalationMediaHandler
 from coreman.runtime.worker.group_observe import GroupObserveHandler
+from coreman.runtime.worker.member_write_tower import MemberWriteExecuteHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
 from coreman.runtime.worker.service import WorkerService
 from coreman.runtime.worker.skill_install import SkillInstallHandler
@@ -51,6 +52,7 @@ asyncio.run(
             "relay_switch": RelaySwitchHandler(),
             "group_observe": GroupObserveHandler(),
             "systems_batch_run": SystemsBatchRunHandler(),
+            "member_write_execute": MemberWriteExecuteHandler(),
             "background_watch": BackgroundWatchHandler(),
             "background_control": BackgroundControlHandler(),
         }

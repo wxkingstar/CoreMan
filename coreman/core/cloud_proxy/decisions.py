@@ -36,6 +36,19 @@ async def apply(
     decided_at: datetime | None,
 ) -> Applied:
     """调用方须先校验 status 属于 RESUME_STATUSES、approval_id 合乎 APPROVAL_ID，并负责提交。"""
+    from coreman.core.systems_catalog import member_tower  # 依赖面广，延迟导入
+
+    if external_id.startswith(member_tower.EXTERNAL_PREFIX):
+        # 成员本机 Agent 的写操作：审批单记在待确认记录上。
+        known, queued = await member_tower.decide(
+            session,
+            approval_id=approval_id,
+            external_id=external_id,
+            status=status,
+            reason=reason,
+            decided_at=decided_at,
+        )
+        return Applied(known=known, resumed=queued)
     if external_id.startswith(assistant_approvals.EXTERNAL_PREFIX):
         # 个人助理的审批单：另一张表、另一套状态，回调与对账的入口共用。
         found = await assistant_approvals.decide(

@@ -223,3 +223,31 @@ async def test_redeem_uses_the_target_key_and_maps_gate_errors(
     with pytest.raises(tower.TowerError) as caught:
         await tower.redeem(CFG, "twa_1", "hash", "bot")
     assert caught.value.code == "request_mismatch" and not caught.value.unavailable
+
+
+async def test_last_active_reads_the_lookup_and_treats_every_failure_as_never(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replies: list[Any] = [
+        httpx.Response(200, json={"username": "zhang.san", "lastActiveAt": "2026-11-20T08:30:00Z"}),
+        httpx.Response(200, json={"username": "zhang.san", "lastActiveAt": None}),
+        httpx.Response(404, json={"error": "user_not_found"}),
+        httpx.Response(404, text="Not Found"),
+        httpx.Response(503, json={"error": "down"}),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json={"username": "zhang.san", "lastActiveAt": "yesterday"}),
+        httpx.Response(200, json={"username": "zhang.san", "lastActiveAt": "2026-11-20T08:30:00"}),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not replies:
+            raise httpx.ConnectTimeout("slow")
+        return replies.pop(0)
+
+    seen = _serve(monkeypatch, handler)
+    found = [await tower.last_active(CFG, "zhang.san", wait_seconds=1) for _ in range(9)]
+    assert found == [datetime(2026, 11, 20, 8, 30, tzinfo=UTC)] + [None] * 8
+    first = seen[0]
+    assert first.method == "GET"
+    assert str(first.url) == "https://tower.example.com/v1/users/zhang.san/last-active"
+    assert first.headers["X-API-Key"] == "sender-key"

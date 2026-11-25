@@ -29,6 +29,7 @@ def test_patch_partial_and_bounds() -> None:
         "group_observe_max_wait_seconds",
         "group_observe_bot_streak_limit",
         "busy_confirm_minutes",
+        "member_write_tower_wait_minutes",
         "assistant_node_concurrency",
         "assistant_daily_turn_budget",
         "assistant_eligibility",

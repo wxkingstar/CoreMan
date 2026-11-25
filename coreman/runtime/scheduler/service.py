@@ -258,6 +258,16 @@ class SchedulerService(Service):
                         await session.commit()
                 except Exception as exc:  # noqa: BLE001 审批闸门一直出错，也不能挡住后面的清理
                     self._log.warning("assistant_approval_tick_failed", error=type(exc).__name__)
+                from coreman.core.systems_catalog import member_tower
+
+                try:
+                    async with self._factory() as session:
+                        counts["member_writes_moved_to_feishu"] = await member_tower.fall_back(
+                            session, now, self._cipher, await member_tower.wait_of(session)
+                        )
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001 Tower 一直出错，也不能挡住后面的清理
+                    self._log.warning("member_write_fallback_failed", error=type(exc).__name__)
                 from coreman.core.chat import background_runs
 
                 try:

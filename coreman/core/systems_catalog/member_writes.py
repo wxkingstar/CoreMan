@@ -5,8 +5,9 @@ run at once as the member. A `write`, `destructive` or `financial` call is only 
 card: the public bot (the
 system setting `work_task_notifier_bot_id`) sends the member a confirmation card in its private
 chat, the same card AI employees' writes get, and only a click there by the member runs exactly
-what was staged. The agent learns the outcome from `systems_call_result`. Nothing the agent holds
-can confirm: there is no API for it.
+what was staged. A member who uses Tower approves it there instead, with the card only as the
+fallback (`member_tower`). The agent learns the outcome from `systems_call_result`. Nothing the
+agent holds can confirm: there is no API for it.
 
 Calls are not tied to a task: the OAuth grant takes the task's place in `system_calls` and the
 token issue records, and each member may make `systems.proxy_calls_per_turn` proxied calls to a
@@ -30,7 +31,7 @@ from coreman.core.auth.system_access import catalog_systems, token_subject
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BusinessSystem, InteractionState, Setting, SystemCall, User
 from coreman.core.db.models.oauth import OAuthClient, OAuthGrant
-from coreman.core.systems_catalog import confirm, proxy, service
+from coreman.core.systems_catalog import confirm, member_tower, proxy, service
 from coreman.core.systems_catalog.context import OWN_AGENT_TOKEN_TTL, Context
 from coreman.core.timeutils import aware_utc, utcnow
 
@@ -50,22 +51,28 @@ BUDGET_WINDOW = timedelta(hours=1)
 DESCRIPTION = (
     "Call an operation of a system marked as platform-proxied (call_mode proxy), as you, the "
     "member. Check it with systems_describe first. Reads run directly. Writes (write, "
-    "destructive, financial) do not run now: the platform sends you a confirmation card in "
-    "Feishu and runs the request only after you click confirm there; then call "
+    "destructive, financial) do not run now: the platform asks you to approve it, in Tower if "
+    "you use it, otherwise on a confirmation card in Feishu, and runs the request only after you "
+    "approve there; then call "
     "systems_call_result with the confirmation_id to get the outcome. File uploads and batch "
     "are not available here."
 )
 RESULT_DESCRIPTION = (
     "The outcome of a write staged by systems_call: waits up to 20 seconds for the member to "
-    "confirm or cancel it on the Feishu card. status pending means not answered yet: tell the "
-    "member to check the card, then call again. ok / failed / unknown come with the business "
-    "system's response (unknown: it may have taken effect, read it back before anything else); "
-    "refused, cancelled and expired mean nothing ran."
+    "approve it, in Tower or on the Feishu card (`via` says where). status pending means not "
+    "answered yet: tell the member to check it, then call again. ok / failed / unknown come with "
+    "the business system's response (unknown: it may have taken effect, read it back before "
+    "anything else); refused, rejected, cancelled and expired mean nothing ran."
 )
 PENDING = (
     "没有执行。已通过飞书给你本人发了一张确认卡，在卡片上点「确认」后平台才会执行。告诉用户去飞书"
     "确认，然后用 systems_call_result 传 confirmation_id 等结果；不要说已经完成，也不要换别的方式"
     "做同一件事。"
+)
+TOWER_PENDING = (
+    "没有执行。你最近用过 Tower，已在 Tower 给你本人提交了审批单，批准后平台才会执行。告诉用户去 "
+    "Tower 审批，然后用 systems_call_result 传 confirmation_id 等结果；超时没处理会撤回 Tower "
+    "的单、改发飞书确认卡。不要说已经完成，也不要换别的方式做同一件事。"
 )
 UNAVAILABLE = (
     "没有执行。平台没法给你发飞书确认卡（管理员没有设置「公共机器人」、它不是启用的飞书 AI 员工，"
@@ -257,6 +264,7 @@ async def propose(ctx: Context, p: proxy.Prepared, args: proxy.Call) -> dict[str
         }
     state_id = uuid.uuid4()
     client = ctx.client_name or "本机客户端"
+    now = utcnow()
     state = InteractionState(
         id=state_id,
         bot_id=bot.id,
@@ -274,25 +282,46 @@ async def propose(ctx: Context, p: proxy.Prepared, args: proxy.Call) -> dict[str
         },
     )
     session.add(state)
-    body = confirm.card(
-        0,
-        state_id,
-        [item],
-        ref=card_ref(state_id),
-        event=CARD_EVENT,
-        preface=f"来自你本机的 {confirm._plain(client, 40)}（客户端自报名称）",
-        footer=FOOTER,
+    via_tower = await member_tower.submit(
+        state,
+        item,
+        username=member.user.login_name or "",
+        caller=bot.bot_key,
+        client=client,
+        now=now,
+        wait=await member_tower.wait_of(session),
     )
-    await confirm.send_card(session, state, body, now=utcnow())
+    if not via_tower:
+        await confirm.send_card(session, state, card_body(state, item), now=now)
     await proxy.record(ctx, p.system, p.operation_id, p.op, "proposed")
     return {
         "status": "pending_confirmation",
+        "via": "tower" if via_tower else "feishu",
         "system": p.system.key,
         "operation_id": p.operation_id,
         "confirmation_id": str(state_id),
         "expires_in": int(confirm.TTL.total_seconds()),
-        "message": PENDING,
+        "message": TOWER_PENDING if via_tower else PENDING,
     }
+
+
+def card_body(state: InteractionState, item: dict[str, Any]) -> dict[str, Any]:
+    """The Feishu confirmation card of a staged write."""
+    client = str(state.state.get("client") or "本机客户端")
+    return confirm.card(
+        0,
+        state.id,
+        [item],
+        ref=card_ref(state.id),
+        event=CARD_EVENT,
+        preface=f"来自你本机的 {confirm._plain(client, 40)}（客户端自报名称）",
+        footer=FOOTER,
+    )
+
+
+def via(state: InteractionState) -> str:
+    """Where the member approves this write: `tower` or `feishu`."""
+    return "tower" if state.state.get("route") == "tower" else "feishu"
 
 
 def _outcome(state: InteractionState, now: datetime) -> dict[str, Any] | None:
@@ -309,7 +338,8 @@ def _outcome(state: InteractionState, now: datetime) -> dict[str, Any] | None:
         and state.expires_at is not None
         and aware_utc(state.expires_at) <= now
     ):
-        return {"status": "expired", "message": "确认卡已过期，没有执行。需要的话重新提交。"}
+        what = "Tower 审批单" if via(state) == "tower" else "确认卡"
+        return {"status": "expired", "message": f"{what}已过期，没有执行。需要的话重新提交。"}
     if state.status == "submitted":
         started = staged.get("sending_at")
         if isinstance(started, str) and now - aware_utc(datetime.fromisoformat(started)) > RUN_LOST:
@@ -349,16 +379,21 @@ async def result(ctx: Context, args: Result) -> dict[str, Any]:
             }
         outcome = _outcome(state, utcnow())
         running = state.status == "submitted"
+        route = via(state)
         # Release the snapshot: the click is committed by another process.
         await ctx.session.rollback()
         if outcome is not None:
-            return {"confirmation_id": str(state_id), **outcome}
+            return {"confirmation_id": str(state_id), "via": route, **outcome}
         if time.monotonic() >= deadline:
             return {
                 "confirmation_id": str(state_id),
+                "via": route,
                 "status": "pending",
-                "message": "已确认，正在执行，稍后再查。"
+                "message": "已批准，正在执行，稍后再查。"
                 if running
+                else "用户还没在 Tower 审批。提醒用户去 Tower 处理（一段时间没处理会改发飞书确认"
+                "卡），然后再调用一次。"
+                if route == "tower"
                 else "用户还没在飞书卡片上确认。提醒用户去确认，然后再调用一次。",
             }
         await asyncio.sleep(POLL_SECONDS)
