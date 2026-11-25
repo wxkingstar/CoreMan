@@ -1,17 +1,34 @@
 <script setup lang="ts">
+/**
+ * 任务平台：「我的任务」四栏 + 详情。详情顶部一行「现在」写清在谁手上、等什么，下面是给人看的
+ * 时间线；给 Agent 看的细节默认折叠，所有人都能展开（展开状态按浏览器记住）。
+ */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import LoadState from '@/components/LoadState.vue'
-import { workTasks, type WorkTask, type WorkTaskDetail } from '@/api/workTasks'
+import AssigneePicker from '@/components/workTasks/AssigneePicker.vue'
+import WorkTaskAsk from '@/components/workTasks/WorkTaskAsk.vue'
+import WorkTaskCreateDialog from '@/components/workTasks/WorkTaskCreateDialog.vue'
+import {
+  workTasks, type AssigneeIn, type WorkTask, type WorkTaskDetail, type WorkTaskView,
+} from '@/api/workTasks'
+import { useAuthStore } from '@/stores/auth'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
 
 const { t, te } = useI18n()
 const route = useRoute(), router = useRouter()
+const auth = useAuthStore()
 const PAGE = 50
+const VIEWS: WorkTaskView[] = ['needs_me', 'created', 'watching', 'all']
+const STATUSES = ['todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled', 'shadow']
+const AGENT_OPEN_KEY = 'coreman.workTasks.agentOpen'
 const rows = ref<(WorkTask & { id: number })[]>([])
 const counts = ref<Record<string, number>>({})
+const needsMe = ref(0)
+const view = ref<WorkTaskView>('needs_me')
 const status = ref('')
 const query = ref('')
 const loading = ref(false)
@@ -20,21 +37,41 @@ const more = ref(false)
 const detail = ref<WorkTaskDetail | null>(null)
 const detailError = ref('')
 const detailLoading = ref(false)
+const creating = ref(false)
+const assigning = ref<'any' | 'bot' | null>(null)
+const assignee = ref<AssigneeIn | null>(null)
+const assignNote = ref('')
+const commentText = ref('')
+const busy = ref(false)
 const code = computed(() => (route.params.code as string | undefined) ?? '')
-const STATUSES = ['shadow', 'pending', 'queued', 'running', 'awaiting_confirmation', 'done', 'unfinished', 'cancelled', 'needs_human']
+const agentOpen = ref<string[]>(readAgentOpen())
+
+function readAgentOpen(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(AGENT_OPEN_KEY) ?? '[]') as string[]
+  } catch {
+    return []
+  }
+}
+watch(agentOpen, value => {
+  try { localStorage.setItem(AGENT_OPEN_KEY, JSON.stringify(value)) } catch { /* 无痕模式等：不记 */ }
+})
 
 async function load(append = false): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
     const data = await workTasks.list({
+      view: view.value,
       status: status.value || undefined,
       q: query.value.trim() || undefined,
+      include_shadow: status.value === 'shadow',
       before_id: append ? rows.value[rows.value.length - 1]?.id : undefined,
       limit: PAGE,
     })
     rows.value = append ? [...rows.value, ...data.items] : data.items
     counts.value = data.counts
+    needsMe.value = data.needs_me
     more.value = data.items.length === PAGE
   } catch (e) {
     loadError.value = errorMessage(e)
@@ -58,7 +95,7 @@ async function open(value: string): Promise<void> {
 }
 
 onMounted(() => { void load(); void open(code.value) })
-watch(status, () => { void load() })
+watch([view, status], () => { void load() })
 watch(code, value => { void open(value) })
 
 function statusLabel(value: string): string {
@@ -71,14 +108,107 @@ function outcomeLabel(value: string): string {
 }
 function statusType(value: string): 'info' | 'warning' | 'success' | 'danger' | 'primary' {
   if (value === 'done') return 'success'
-  if (value === 'unfinished' || value === 'needs_human') return 'danger'
-  if (value === 'running' || value === 'awaiting_confirmation') return 'warning'
-  if (value === 'shadow') return 'info'
+  if (value === 'review' || value === 'waiting') return 'warning'
+  if (value === 'shadow' || value === 'cancelled') return 'info'
   return 'primary'
+}
+/** 开工方式：人一眼看出要不要自己去叫 AI 员工开工。 */
+function startTag(row: WorkTask): { text: string; type: 'warning' | 'info' | 'success' } | null {
+  if (row.assignee?.type !== 'bot' || ['done', 'cancelled', 'shadow'].includes(row.status)) return null
+  if (row.needs_drive) return { text: t('workTasks.needsDrive'), type: 'warning' }
+  if (row.start_mode === 'auto') return { text: t('workTasks.autoStart'), type: 'info' }
+  return { text: t('workTasks.claimed'), type: 'success' }
 }
 function show(row: WorkTask): void { void router.push({ name: 'work-task', params: { code: row.code } }) }
 function close(): void { void router.push({ name: 'work-tasks' }) }
 function pretty(value: unknown): string { return JSON.stringify(value, null, 2) }
+function actorLabel(actor: { type: string; name: string } | null): string {
+  if (!actor) return t('workTasks.unassigned')
+  return actor.type === 'bot' ? `${actor.name}（AI）` : actor.name
+}
+
+function updated(next: WorkTaskDetail): void {
+  detail.value = next
+  void load()
+}
+
+async function act(run: () => Promise<WorkTaskDetail>, done?: string): Promise<void> {
+  busy.value = true
+  try {
+    updated(await run())
+    if (done) ElMessage.success(done)
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    busy.value = false
+  }
+}
+
+async function prompt(title: string, required = true): Promise<string | null> {
+  try {
+    const { value } = await ElMessageBox.prompt(title, {
+      inputType: 'textarea',
+      inputValidator: (v: string) => !required || !!v?.trim() || t('workTasks.reasonRequired'),
+    })
+    return (value ?? '').trim()
+  } catch {
+    return null
+  }
+}
+
+async function copyDrive(): Promise<void> {
+  if (!detail.value) return
+  try {
+    await navigator.clipboard.writeText(t('workTasks.driveCommand', { code: detail.value.code }))
+    ElMessage.success(t('workTasks.copied'))
+  } catch {
+    ElMessage.info(t('workTasks.driveCommand', { code: detail.value.code }))
+  }
+}
+
+function startAssign(kind: 'any' | 'bot'): void {
+  assignee.value = null
+  assignNote.value = ''
+  assigning.value = kind
+}
+
+async function submitAssign(): Promise<void> {
+  const d = detail.value
+  if (!d || !assignee.value) return
+  const target = assignee.value
+  await act(() => workTasks.assign(d.code, { assignee: target, note: assignNote.value.trim() }))
+  assigning.value = null
+}
+
+async function complete(): Promise<void> {
+  const d = detail.value
+  if (!d) return
+  const text = await prompt(t('workTasks.deliverPrompt'))
+  if (text !== null) await act(() => workTasks.complete(d.code, text))
+}
+async function cancelTask(): Promise<void> {
+  const d = detail.value
+  if (!d) return
+  const text = await prompt(t('workTasks.cancelPrompt'))
+  if (text !== null) await act(() => workTasks.cancel(d.code, text))
+}
+async function reopen(): Promise<void> {
+  const d = detail.value
+  if (!d) return
+  const text = await prompt(t('workTasks.reopenPrompt'), false)
+  if (text !== null) await act(() => workTasks.reopen(d.code, text))
+}
+async function comment(): Promise<void> {
+  const d = detail.value
+  if (!d || !commentText.value.trim()) return
+  const text = commentText.value.trim()
+  await act(() => workTasks.comment(d.code, text))
+  commentText.value = ''
+}
+
+const mine = computed(() => !!detail.value && detail.value.assignee?.type === 'human' && detail.value.assignee.id === auth.user?.id)
+const closed = computed(() => !!detail.value && ['done', 'cancelled', 'shadow'].includes(detail.value.status))
+const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.human_text))
 </script>
 
 <template>
@@ -87,11 +217,28 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
       {{ t('workTasks.hint') }}
     </p>
     <div class="tasks-toolbar">
+      <el-radio-group
+        v-model="view"
+        data-test="work-task-views"
+      >
+        <el-radio-button
+          v-for="item in VIEWS"
+          :key="item"
+          :value="item"
+        >
+          {{ t(`workTasks.views.${item}`) }}
+          <el-badge
+            v-if="item === 'needs_me' && needsMe"
+            :value="needsMe"
+            class="view-badge"
+          />
+        </el-radio-button>
+      </el-radio-group>
       <el-select
         v-model="status"
         clearable
         :placeholder="t('workTasks.allStatuses')"
-        style="width: 200px"
+        style="width: 160px"
       >
         <el-option
           v-for="value in STATUSES"
@@ -104,12 +251,19 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
         v-model="query"
         clearable
         :placeholder="t('workTasks.search')"
-        style="width: 260px"
+        style="width: 220px"
         @keyup.enter="load()"
         @clear="load()"
       />
       <el-button @click="load()">
         {{ t('common.refresh') }}
+      </el-button>
+      <el-button
+        type="primary"
+        data-test="work-task-new"
+        @click="creating = true"
+      >
+        {{ t('workTasks.create') }}
       </el-button>
     </div>
     <LoadState
@@ -126,24 +280,48 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
     >
       <el-table-column
         :label="t('workTasks.code')"
-        width="100"
+        width="90"
         prop="code"
       />
       <el-table-column
         :label="t('workTasks.taskTitle')"
-        min-width="220"
-        show-overflow-tooltip
+        min-width="300"
       >
         <template #default="{ row }">
-          <strong>{{ row.title }}</strong>
-          <div class="muted">
-            {{ row.summary }}
+          <div class="title-line">
+            <strong>{{ row.title }}</strong>
+            <el-tag
+              v-if="startTag(row)"
+              size="small"
+              :type="startTag(row)?.type"
+              effect="plain"
+            >
+              {{ startTag(row)?.text }}
+            </el-tag>
+            <el-tag
+              v-if="row.priority !== 'normal'"
+              size="small"
+              type="danger"
+              effect="plain"
+            >
+              {{ t(`workTasks.priorities.${row.priority}`) }}
+            </el-tag>
           </div>
+          <div class="muted now-line">
+            {{ row.now }}
+          </div>
+          <WorkTaskAsk
+            v-if="row.ask?.mine"
+            :code="row.code"
+            :ask="row.ask"
+            compact
+            @answered="load()"
+          />
         </template>
       </el-table-column>
       <el-table-column
         :label="t('workTasks.status')"
-        width="120"
+        width="100"
       >
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)">
@@ -156,20 +334,23 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
         width="140"
       >
         <template #default="{ row }">
-          {{ row.assignee?.name ?? t('workTasks.unassigned') }}
+          {{ actorLabel(row.assignee) }}
         </template>
       </el-table-column>
       <el-table-column
         :label="t('workTasks.requester')"
-        width="120"
-        prop="requester_name"
-      />
-      <el-table-column
-        :label="t('workTasks.created')"
-        width="170"
+        width="110"
       >
         <template #default="{ row }">
-          {{ formatDateTime(row.created_at) }}
+          {{ row.requester?.name ?? row.requester_name }}
+        </template>
+      </el-table-column>
+      <el-table-column
+        :label="t('workTasks.due')"
+        width="150"
+      >
+        <template #default="{ row }">
+          {{ row.due_at ? formatDateTime(row.due_at) : '—' }}
         </template>
       </el-table-column>
     </el-table>
@@ -185,9 +366,14 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
       </el-button>
     </div>
 
+    <WorkTaskCreateDialog
+      v-model="creating"
+      @created="d => { updated(d); show(d) }"
+    />
+
     <el-drawer
       :model-value="!!code"
-      size="min(720px, 100%)"
+      size="min(760px, 100%)"
       :title="detail ? `${detail.code} · ${detail.title}` : code"
       data-test="work-task-detail"
       @close="close"
@@ -198,42 +384,188 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
       />
       <div
         v-if="detail"
-        v-loading="detailLoading"
+        v-loading="detailLoading || busy"
         class="task-detail"
       >
+        <el-alert
+          :type="detail.needs_drive ? 'warning' : 'info'"
+          :closable="false"
+          class="now"
+          data-test="work-task-now"
+        >
+          <template #title>
+            <strong>{{ t('workTasks.now') }}</strong>{{ detail.now }}
+          </template>
+          <el-button
+            v-if="detail.needs_drive"
+            size="small"
+            data-test="copy-drive"
+            @click="copyDrive"
+          >
+            {{ t('workTasks.copyDrive') }}
+          </el-button>
+        </el-alert>
+
+        <WorkTaskAsk
+          v-if="detail.ask && (detail.ask.mine || detail.can_manage)"
+          :code="detail.code"
+          :ask="detail.ask"
+          :on-behalf="!detail.ask.mine"
+          @answered="updated"
+        />
+
+        <div class="task-actions">
+          <template v-if="!closed && detail.can_manage">
+            <el-button
+              size="small"
+              data-test="assign"
+              @click="startAssign('any')"
+            >
+              {{ detail.assignee ? t('workTasks.handoff') : t('workTasks.assign') }}
+            </el-button>
+            <el-button
+              v-if="detail.assignee?.type !== 'bot'"
+              size="small"
+              data-test="to-ai"
+              @click="startAssign('bot')"
+            >
+              {{ t('workTasks.toAi') }}
+            </el-button>
+          </template>
+          <el-button
+            v-if="mine && ['todo', 'in_progress', 'waiting'].includes(detail.status) && !detail.ask"
+            size="small"
+            type="primary"
+            data-test="deliver"
+            @click="complete"
+          >
+            {{ t('workTasks.deliver') }}
+          </el-button>
+          <el-button
+            v-if="!closed && detail.can_manage"
+            size="small"
+            @click="cancelTask"
+          >
+            {{ t('workTasks.cancel') }}
+          </el-button>
+          <el-button
+            v-if="['done', 'cancelled'].includes(detail.status) && detail.can_manage"
+            size="small"
+            @click="reopen"
+          >
+            {{ t('workTasks.reopen') }}
+          </el-button>
+          <el-button
+            size="small"
+            @click="act(() => workTasks.watch(detail!.code, !detail!.watching))"
+          >
+            {{ detail.watching ? t('workTasks.unwatch') : t('workTasks.watch') }}
+          </el-button>
+        </div>
+
+        <div
+          v-if="assigning"
+          class="assign-box"
+          data-test="assign-box"
+        >
+          <AssigneePicker
+            v-model="assignee"
+            :kind="assigning === 'bot' ? 'bot' : 'human'"
+            :lock-kind="assigning === 'bot'"
+          />
+          <el-input
+            v-model="assignNote"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 8 }"
+            :placeholder="t('workTasks.handoffNote')"
+          />
+          <p
+            v-if="assignee?.type === 'bot'"
+            class="muted"
+          >
+            {{ t('workTasks.manualStartHint') }}
+          </p>
+          <div class="assign-actions">
+            <el-button
+              size="small"
+              @click="assigning = null"
+            >
+              {{ t('common.cancel') }}
+            </el-button>
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="!assignee"
+              data-test="assign-submit"
+              @click="submitAssign"
+            >
+              {{ t('workTasks.confirmAssign') }}
+            </el-button>
+          </div>
+        </div>
+
         <el-descriptions
           :column="2"
           border
+          size="small"
         >
           <el-descriptions-item :label="t('workTasks.status')">
             <el-tag :type="statusType(detail.status)">
               {{ statusLabel(detail.status) }}
             </el-tag>
+            <el-tag
+              v-if="startTag(detail)"
+              size="small"
+              :type="startTag(detail)?.type"
+              effect="plain"
+              class="inline-tag"
+            >
+              {{ startTag(detail)?.text }}
+            </el-tag>
           </el-descriptions-item>
           <el-descriptions-item :label="t('workTasks.assignee')">
-            {{ detail.assignee?.name ?? t('workTasks.unassigned') }}
+            {{ actorLabel(detail.assignee) }}
           </el-descriptions-item>
           <el-descriptions-item :label="t('workTasks.requester')">
-            {{ detail.requester_name || '—' }}
+            {{ detail.requester?.name ?? (detail.requester_name || '—') }}
           </el-descriptions-item>
-          <el-descriptions-item :label="t('workTasks.dispatcher')">
-            {{ detail.dispatcher?.name ?? '—' }}
+          <el-descriptions-item :label="t('workTasks.principal')">
+            {{ detail.principal?.name ?? '—' }}
+          </el-descriptions-item>
+          <el-descriptions-item :label="t('workTasks.reviewer')">
+            {{ detail.review_required ? (detail.reviewer?.name ?? detail.principal?.name ?? '—') : t('workTasks.noReview') }}
+          </el-descriptions-item>
+          <el-descriptions-item :label="t('workTasks.due')">
+            {{ detail.due_at ? formatDateTime(detail.due_at) : '—' }}
+          </el-descriptions-item>
+          <el-descriptions-item
+            v-if="detail.dispatcher"
+            :label="t('workTasks.dispatcher')"
+          >
+            {{ detail.dispatcher.name }}
           </el-descriptions-item>
           <el-descriptions-item :label="t('workTasks.created')">
             {{ formatDateTime(detail.created_at) }}
           </el-descriptions-item>
-          <el-descriptions-item :label="t('workTasks.related')">
-            <template v-if="detail.related_codes.length">
-              <router-link
-                v-for="item in detail.related_codes"
-                :key="item"
-                :to="{ name: 'work-task', params: { code: item } }"
-                class="related"
-              >
-                {{ item }}
-              </router-link>
-            </template>
-            <span v-else>—</span>
+          <el-descriptions-item
+            v-if="detail.parent || detail.related_codes.length"
+            :label="t('workTasks.related')"
+          >
+            <router-link
+              v-if="detail.parent"
+              :to="{ name: 'work-task', params: { code: detail.parent.code } }"
+              class="related"
+            >
+              {{ t('workTasks.parent') }} {{ detail.parent.code }}
+            </router-link>
+            <router-link
+              v-for="item in detail.related_codes"
+              :key="item"
+              :to="{ name: 'work-task', params: { code: item } }"
+              class="related"
+            >
+              {{ item }}
+            </router-link>
           </el-descriptions-item>
           <el-descriptions-item
             :label="t('workTasks.summary')"
@@ -243,15 +575,30 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
           </el-descriptions-item>
         </el-descriptions>
 
+        <template v-if="detail.children.length">
+          <h4>{{ t('workTasks.children') }}</h4>
+          <ul class="children">
+            <li
+              v-for="child in detail.children"
+              :key="child.code"
+            >
+              <router-link :to="{ name: 'work-task', params: { code: child.code } }">
+                {{ child.code }} {{ child.title }}
+              </router-link>
+              <span class="muted"> · {{ child.now }}</span>
+            </li>
+          </ul>
+        </template>
+
         <h4>{{ t('workTasks.timeline') }}</h4>
-        <el-timeline v-if="detail.events.length">
+        <el-timeline v-if="humanEvents.length">
           <el-timeline-item
-            v-for="event in detail.events"
+            v-for="event in humanEvents"
             :key="event.id"
             :timestamp="formatDateTime(event.created_at)"
           >
             <div>
-              <strong v-if="event.actor_name">{{ event.actor_name }}：</strong>{{ event.human_text }}
+              <strong v-if="event.actor_type === 'bot' && event.actor_name">{{ event.actor_name }}：</strong>{{ event.human_text }}
             </div>
             <el-collapse
               v-if="Object.keys(event.agent_detail).length"
@@ -267,9 +614,33 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
           v-else
           :description="t('workTasks.noEvents')"
         />
+        <div class="comment-box">
+          <el-input
+            v-model="commentText"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 6 }"
+            maxlength="4000"
+            :placeholder="t('workTasks.commentPlaceholder')"
+            data-test="comment-input"
+          />
+          <el-button
+            size="small"
+            :disabled="!commentText.trim()"
+            data-test="comment-submit"
+            @click="comment"
+          >
+            {{ t('workTasks.comment') }}
+          </el-button>
+        </div>
 
         <h4>{{ t('workTasks.agentLayer') }}</h4>
-        <el-collapse data-test="agent-layer">
+        <p class="muted">
+          {{ t('workTasks.agentLayerHint') }}
+        </p>
+        <el-collapse
+          v-model="agentOpen"
+          data-test="agent-layer"
+        >
           <el-collapse-item
             v-if="detail.agent.brief"
             :title="t('workTasks.brief')"
@@ -283,6 +654,49 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
             name="digest"
           >
             <pre>{{ detail.agent.digest }}</pre>
+          </el-collapse-item>
+          <el-collapse-item
+            v-if="detail.agent.runs.length"
+            :title="t('workTasks.runs', { n: detail.agent.runs.length })"
+            name="runs"
+          >
+            <ol class="runs">
+              <li
+                v-for="run in detail.agent.runs"
+                :key="run.id"
+              >
+                {{ formatDateTime(run.started_at) }} · {{ run.bot?.name }} ·
+                {{ t(`workTasks.triggers.${run.trigger}`, run.trigger) }} ·
+                {{ t(`workTasks.runStatuses.${run.status}`, run.status) }}
+                <div
+                  v-if="run.outcome"
+                  class="muted"
+                >
+                  {{ run.outcome }}
+                </div>
+                <div class="muted">
+                  {{ run.session_key }} · #{{ run.chat_task_id }}
+                </div>
+              </li>
+            </ol>
+          </el-collapse-item>
+          <el-collapse-item
+            :title="t('workTasks.fullEvents')"
+            name="events"
+          >
+            <div
+              v-for="event in detail.events"
+              :key="event.id"
+              class="raw-event"
+            >
+              <div class="muted">
+                {{ formatDateTime(event.created_at) }} · {{ event.kind }}
+              </div>
+              <div v-if="event.human_text">
+                {{ event.human_text }}
+              </div>
+              <pre v-if="Object.keys(event.agent_detail).length">{{ pretty(event.agent_detail) }}</pre>
+            </div>
           </el-collapse-item>
           <el-collapse-item
             v-if="detail.agent.decision"
@@ -313,13 +727,26 @@ function pretty(value: unknown): string { return JSON.stringify(value, null, 2) 
 </template>
 
 <style scoped>
-.tasks-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.tasks-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
+.view-badge { margin-left: 4px; vertical-align: middle; }
+.view-badge :deep(.el-badge__content) { position: static; transform: none; }
 .tasks-table :deep(.el-table__row) { cursor: pointer; }
 .tasks-more { display: flex; justify-content: center; margin-top: 12px; }
-.task-detail h4 { margin: 20px 0 8px; }
+.title-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.now-line { margin-top: 2px; }
+.task-detail { display: flex; flex-direction: column; gap: 12px; }
+.task-detail h4 { margin: 8px 0 0; }
 .task-detail pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
-.task-messages { padding-left: 20px; margin: 4px 0 12px; }
+.now :deep(.el-alert__content) { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.task-actions .el-button + .el-button { margin-left: 0; }
+.assign-box { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--el-border-color); border-radius: 6px; }
+.assign-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.comment-box { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.task-messages, .runs, .children { padding-left: 20px; margin: 4px 0; }
+.raw-event { padding: 6px 0; border-bottom: 1px dashed var(--el-border-color-lighter); }
 .agent-detail { margin-top: 4px; }
 .related { margin-right: 8px; }
+.inline-tag { margin-left: 6px; }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
 </style>
