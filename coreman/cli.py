@@ -349,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
     pv.add_argument("--stream", action="store_true", help="第一张卡按线上流程流式发送")
     pv.add_argument("--apply", action="store_true", help="真正发送；不加只做飞书校验")
     args = parser.parse_args(argv)
+    if getattr(args, "local", None):
+        return int(args.local(args))
     if getattr(args, "admin", None):
         return admin_cli.run(args)
     if args.command == "feishu-cards" and args.operation == "preview":

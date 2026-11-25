@@ -9,8 +9,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from typing import Any
+
+import httpx
 
 from coreman.admin_cli import (
     approvals,
@@ -18,6 +21,7 @@ from coreman.admin_cli import (
     org,
     output,
     platform,
+    remote,
     runtimes,
     schedules,
     skills,
@@ -38,6 +42,21 @@ def register(sub: Any) -> None:
     schedules.register(sub)
     runtimes.register(sub)
     platform.register(sub)
+    p = sub.add_parser(
+        "login",
+        help="在自己电脑上登录远程 CoreMan，之后的管理命令以你本人的身份执行",
+        description="浏览器里登录并确认授权，令牌存在本机配置目录（权限 0600）。",
+    )
+    p.add_argument(
+        "--server",
+        default=os.environ.get(remote.SERVER_ENV),
+        help="CoreMan 地址，如 https://coreman.example.com",
+    )
+    p.add_argument("--no-browser", action="store_true", help="不自动打开浏览器，只打印地址")
+    p.set_defaults(local=_login)
+    p = sub.add_parser("logout", help="吊销本机的登录并删掉保存的令牌")
+    p.set_defaults(local=_logout)
+    leaf(sub, "whoami", "当前以谁的身份操作", whoami)
     ops = group(sub, "api", "直接调用管理 API（覆盖其余管理后台操作）")
     for method in ("get", "post", "put", "patch", "delete"):
         p = leaf(ops, method, f"{method.upper()} 请求，输出返回的 data", raw)
@@ -49,6 +68,37 @@ def register(sub: Any) -> None:
 
 def register_skills(ops: Any) -> None:
     skills.register(ops)
+
+
+def _login(args: argparse.Namespace) -> int:
+    if not args.server:
+        print(
+            f"请用 --server 指定 CoreMan 地址（或设置环境变量 {remote.SERVER_ENV}）",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        me = asyncio.run(remote.login(args.server, open_browser=not args.no_browser))
+    except (remote.RemoteError, httpx.HTTPError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    who = f"{me.get('display_name')}（{me.get('login_name')}）"
+    print(f"已登录为 {who}，令牌保存在 {remote.config_path()}")
+    return 0
+
+
+def _logout(_args: argparse.Namespace) -> int:
+    print("已退出登录" if asyncio.run(remote.logout()) else "本机没有登录过")
+    return 0
+
+
+async def whoami(c: AdminClient, args: argparse.Namespace) -> int:
+    me = await c.get("/api/admin/auth/me")
+    if args.json:
+        output.dump(me)
+    else:
+        output.fields(me, [("登录名", "login_name"), ("姓名", "display_name"), ("角色", "role")])
+    return 0
 
 
 async def raw(c: AdminClient, args: argparse.Namespace) -> int:
