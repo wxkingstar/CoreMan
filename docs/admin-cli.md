@@ -24,6 +24,25 @@ kubectl exec deploy/<api 部署名> -- /app/.venv/bin/coreman bots list --as ali
 
 能在 API 容器里执行命令的人本来就能读数据库和密钥，`--as` 可以填任何在职成员，不构成额外的权限。
 
+## 在自己电脑上使用
+
+成员也可以在自己电脑上用同一套命令，以本人身份操作远程 CoreMan，权限与审计和在管理台里一样：
+
+```bash
+uv tool install git+https://github.com/wxkingstar/CoreMan
+coreman login --server https://coreman.example.com   # 浏览器里登录并确认授权
+coreman whoami
+coreman bots list --mine
+coreman logout                                        # 吊销授权并删掉本机令牌
+```
+
+- 登录走 CoreMan 的 OAuth 授权码流程（PKCE，回调到本机 `127.0.0.1` 的临时端口），scope 为 `api`。令牌保存在 `~/.config/coreman/credentials.json`（权限 0600，可用 `COREMAN_CONFIG_DIR` 改目录），访问令牌过期前自动续期。
+- 不写 `--as`、也没设 `COREMAN_CLI_USER` 时走远程模式；写了就是上文在服务器上运行的方式。
+- 远程模式算「本人不在场」：只对管理台登录开放的操作（建 API 令牌、个人凭证、个人助理的加密内容等）不能用。
+- 管理台「我的 API 令牌」页的「本机应用授权」里能看到并撤销这次登录。
+
+在服务器上以 `--as` 运行时，管理台会话的 User-Agent 记下执行命令的系统账号与主机（`coreman-cli (账号@主机)`），审计可以据此追到真正操作的人。
+
 ## 通用约定
 
 - AI 员工可以写标识（`bot_key`）、名称或 id；成员可以写登录名、邮箱、姓名或 id；团队可以写 slug、中文名或 id；技能写名称或 id；业务系统写标识；审批写 id，写开头几位就够。名称有重名时命令会列出候选，请改用标识。
