@@ -129,12 +129,7 @@ def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -
         "start_mode": row.start_mode,
         "claimed_at": row.claimed_at,
         # 人派给 AI 员工、还没被领取：页面上提示人去叫它开工。
-        "needs_drive": bool(
-            row.assignee_bot_id
-            and row.start_mode == "manual"
-            and row.claimed_at is None
-            and row.status == "todo"
-        ),
+        "needs_drive": service.needs_drive(row),
         "now": service.current_line(row, names),
         "ask": (
             {
@@ -147,6 +142,7 @@ def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -
                 "other": bool(ask.get("other")),
                 "needs_text": sorted(service.NEEDS_TEXT),
                 "mine": viewer is not None and str(viewer.id) == ask.get("to_user_id"),
+                "can_answer": viewer is not None and service.can_answer(row, viewer),
             }
             if ask
             else None

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks.service import allowed_to_use
@@ -218,6 +219,13 @@ def ask_review(row: WorkTask, to_user_id: uuid.UUID, result: str) -> dict[str, A
     )
 
 
+def can_answer(row: WorkTask, user: User) -> bool:
+    """被问的人自己，或代表人、平台管理员代答。"""
+    return bool(row.ask) and (
+        user.id == ask_to(row) or user.id == row.principal_user_id or user.role == MANAGER_ROLE
+    )
+
+
 def ask_to(row: WorkTask) -> uuid.UUID | None:
     raw = (row.ask or {}).get("to_user_id")
     return uuid.UUID(raw) if raw else None
@@ -369,9 +377,8 @@ async def answer(
     ask = row.ask
     if not ask or ask.get("id") != ask_id:
         raise WorkTaskError(409, "这个问题已经回答过了或已经变了，请刷新")
-    to = ask_to(row)
-    on_behalf = user.id != to
-    if on_behalf and not (user.role == MANAGER_ROLE or user.id == row.principal_user_id):
+    on_behalf = user.id != ask_to(row)
+    if not can_answer(row, user):
         raise WorkTaskError(403, "只有被问的人能回答（代表人和平台管理员可以代答）")
     keys = {o["key"] for o in ask.get("options", [])} | ({OTHER} if ask.get("other") else set())
     if option not in keys:
@@ -399,7 +406,7 @@ async def answer(
         if option == "accept":
             row.status, row.ask = "in_progress", None
         else:
-            row.assignee_user_id, row.ask, row.status = None, None, "todo"
+            row.assignee_user_id, row.ask, row.status = None, None, "waiting"
             back = row.principal_user_id or row.requester_user_id
             row.waiting_on = {
                 "kind": "human",
@@ -502,6 +509,11 @@ async def update(
         if reviewer is not None:
             await active_user(session, reviewer)
         row.reviewer_user_id = reviewer
+        if row.status == "review" and (row.ask or {}).get("kind") == "review":
+            # 验收中换人：问题改问新验收人（没指定时问代表人）。
+            to = reviewer or row.principal_user_id
+            if to is not None:
+                row.ask = ask_review(row, to, row.summary)
         changes.append("验收人")
     if "review_required" in fields:
         row.review_required = bool(fields["review_required"])
@@ -518,11 +530,18 @@ async def update(
 
 
 async def watch(session: AsyncSession, row: WorkTask, user: User, on: bool) -> None:
-    existing = await session.get(WorkTaskWatcher, (row.id, user.id))
-    if on and existing is None:
-        session.add(WorkTaskWatcher(work_task_id=row.id, user_id=user.id))
-    elif not on and existing is not None:
-        await session.delete(existing)
+    if on:
+        await session.execute(
+            pg_insert(WorkTaskWatcher)
+            .values(work_task_id=row.id, user_id=user.id)
+            .on_conflict_do_nothing()
+        )
+    else:
+        await session.execute(
+            delete(WorkTaskWatcher).where(
+                WorkTaskWatcher.work_task_id == row.id, WorkTaskWatcher.user_id == user.id
+            )
+        )
 
 
 # ---- 查询 ----------------------------------------------------------------------------------
@@ -561,6 +580,27 @@ def watched_by(user_id: uuid.UUID) -> Any:
     )
 
 
+def restartable(row: WorkTask) -> bool:
+    """人派给 AI 员工的任务这一轮停下来等代表人（卡住、等确认、没交出去）：叫它再做一次。"""
+    return (
+        row.assignee_bot_id is not None
+        and row.start_mode == "manual"
+        and row.status == "waiting"
+        and (row.waiting_on or {}).get("kind") == "human"
+    )
+
+
+def needs_drive(row: WorkTask) -> bool:
+    """要人去叫 AI 员工开工：还没被领取的，或停下来等代表人的。"""
+    unclaimed = (
+        row.assignee_bot_id is not None
+        and row.start_mode == "manual"
+        and row.claimed_at is None
+        and row.status == "todo"
+    )
+    return unclaimed or restartable(row)
+
+
 def drive_hint(row: WorkTask, bot_name: str) -> str:
     """人派给 AI 员工、还没被领取：告诉人怎么叫它开工（spec §5.1）。"""
     return f"{bot_name}还没开工。在飞书里对它说「做 {row.code}」，或给它配定时领取。"
@@ -581,7 +621,10 @@ def current_line(row: WorkTask, names: dict[str, str]) -> str:
     if row.status == "review":
         return f"等{names.get(str(row.reviewer_user_id), '')}验收"
     if row.status == "waiting":
-        return str((row.waiting_on or {}).get("human_text") or "等待中")
+        text = str((row.waiting_on or {}).get("human_text") or "等待中")
+        if restartable(row):
+            text += f"。处理好后在飞书里对{who}说「做 {row.code}」让它接着做"
+        return text
     if row.status == "todo":
         if row.assignee_bot_id and row.start_mode == "manual" and row.claimed_at is None:
             return drive_hint(row, who)

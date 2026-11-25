@@ -14,7 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
@@ -41,7 +41,6 @@ PREFIX = "work:"
 SUMMARY_LIMIT = 120
 # 只 @ 员工、没带编号也没回复哪条消息时，多久内算在接着问上一件事。
 FOLLOW_UP_WINDOW = timedelta(hours=2)
-FOLLOW_UP_STATUSES = ("done", "waiting", "review")
 HISTORY_LIMIT = 30
 HISTORY_DETAIL_LIMIT = 1500
 HISTORY_TOTAL_LIMIT = 8000
@@ -203,7 +202,11 @@ async def continued(
             WorkTask.chat_id == chat_id,
             WorkTask.assignee_bot_id == bot.id,
             func.coalesce(WorkTask.principal_user_id, WorkTask.requester_user_id) == speaker_id,
-            WorkTask.status.in_(FOLLOW_UP_STATUSES),
+            # 做完的，或停下来等他的（等确认、卡住了）。
+            or_(
+                WorkTask.status == "done",
+                and_(WorkTask.status == "waiting", WorkTask.waiting_on["kind"].astext == "human"),
+            ),
             WorkTask.updated_at >= datetime.now(UTC) - FOLLOW_UP_WINDOW,
         )
         .order_by(WorkTask.updated_at.desc())
@@ -355,8 +358,10 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
 async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) -> None:
     code = code_of(intake.session_key)
     row = await session.scalar(select(WorkTask).where(WorkTask.code == code)) if code else None
-    if row is None or row.status in ("shadow", "cancelled"):
+    # 任务已经转给别人（人或别的员工）：这一轮照常回答，但不动任务。
+    if row is None or row.status in ("shadow", "cancelled") or row.assignee_bot_id != intake.bot.id:
         return
+    before_ask = row.ask
     first = not await session.scalar(
         select(WorkTaskRun.id).where(WorkTaskRun.work_task_id == row.id).limit(1)
     )
@@ -393,6 +398,17 @@ async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) 
             chat_task_id=ctx.task.id,
         )
     )
+    if before_ask:
+        # 例如验收中又接着做：原来的问题作废，卡片改成结果。
+        await session.flush()
+        await cards.sync(
+            session,
+            row,
+            before_ask=before_ask,
+            before_status=row.status,
+            actor_id=None,
+            base_url=ctx.public_base_url,
+        )
 
 
 async def final_transition(
@@ -405,7 +421,12 @@ async def final_transition(
         if code
         else None
     )
-    if row is None or row.status in ("shadow", "cancelled"):
+    run = await session.scalar(
+        select(WorkTaskRun).where(WorkTaskRun.chat_task_id == ctx.task.id).with_for_update()
+    )
+    if row is None or row.status in ("shadow", "cancelled") or row.assignee_bot_id != intake.bot.id:
+        if run is not None and run.ended_at is None:
+            run.status, run.ended_at = "cancelled", datetime.now(UTC)
         return
     before_ask, before_status = row.ask, row.status
     body = verdict.final_text.removesuffix(suffix).strip()
@@ -437,9 +458,6 @@ async def final_transition(
     else:
         reason = re.sub(rf"^{re.escape(row.code)}\s*(卡住了?)?[:：]?\s*", "", text)
         _wait_on_principal(row, f"卡住了：{reason}")
-    run = await session.scalar(
-        select(WorkTaskRun).where(WorkTaskRun.chat_task_id == ctx.task.id).with_for_update()
-    )
     if run is not None:
         run.status, run.outcome, run.ended_at = outcome, text, now
     session.add(

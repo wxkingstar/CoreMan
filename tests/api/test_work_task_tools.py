@@ -127,3 +127,62 @@ async def test_capability_dies_with_the_turn(
         URL, json=_call("list_my_tasks", {}), headers={"Authorization": f"Bearer {token}"}
     )
     assert response.status_code == 403
+
+
+async def test_only_people_who_can_manage_the_task_can_start_it_and_reads_stay_own(
+    client: httpx.AsyncClient, app, db_session: AsyncSession
+) -> None:
+    bot, alice, turn, first, _ = await _setup(db_session)
+    carol = User(login_name="carol", display_name="carol", email="carol@example.test")
+    db_session.add(carol)
+    db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_a"))
+    db_session.add(UserReached(bot_id=bot.id, user_id=alice.id, platform_chat_id="oc_dm"))
+    await db_session.commit()
+    token = tools.issue_capability(
+        app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=carol.id, kind="chat"
+    )
+    auth = {"Authorization": f"Bearer {token}"}
+    response = await client.post(
+        URL, json=_call("start_task", {"codes": [first.code]}), headers=auth
+    )
+    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+    assert result["started"] is False and "代表人" in result["reason"]
+
+    # 卡住了停下来等代表人：代表人叫它接着做，带上补充的话。
+    token = tools.issue_capability(
+        app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=alice.id, kind="chat"
+    )
+    auth = {"Authorization": f"Bearer {token}"}
+    row = await db_session.scalar(select(WorkTask).where(WorkTask.code == first.code))
+    row.status, row.claimed_at = "waiting", row.created_at
+    row.waiting_on = {"kind": "human", "user_id": str(alice.id), "human_text": "卡住了：没权限"}
+    await db_session.commit()
+    listed = await client.post(URL, json=_call("list_my_tasks", {}), headers=auth)
+    items = json.loads(listed.json()["result"]["content"][0]["text"])["tasks"]
+    assert any(i["code"] == first.code and i["stopped_waiting_for_principal"] for i in items)
+    response = await client.post(
+        URL,
+        json=_call("start_task", {"codes": [first.code], "note": "权限开好了"}),
+        headers=auth,
+    )
+    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+    assert result["started"] is True
+    queued = await db_session.scalar(select(Task).where(Task.session_key == f"work:{first.code}"))
+    assert queued.payload["work_note"] == "权限开好了"
+
+
+async def test_get_task_only_reads_the_agents_own_tasks(
+    client: httpx.AsyncClient, app, db_session: AsyncSession
+) -> None:
+    bot, alice, turn, _, _ = await _setup(db_session)
+    mine = await service.create(db_session, alice, title="别人的事")
+    await db_session.commit()
+    token = tools.issue_capability(
+        app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=alice.id, kind="chat"
+    )
+    response = await client.post(
+        URL,
+        json=_call("get_task", {"code": mine.code}),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert json.loads(response.json()["result"]["content"][0]["text"])["error"] == "not_found"

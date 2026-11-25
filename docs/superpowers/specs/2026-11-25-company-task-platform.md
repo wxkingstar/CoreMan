@@ -112,7 +112,7 @@
 | `cancelled` | 取消，或执行人做不了且没人接手 | 已取消：原因 |
 | `shadow` | 调度试运行的记录（沿用现有） | 不在默认列表显示 |
 
-旧状态迁移：`pending`、`queued` 迁为 `todo`；`running` 迁为 `in_progress`；`awaiting_confirmation` 迁为 `waiting`（等发起人）；`unfinished`、`needs_human` 迁为 `waiting`（等发起人决定）；其余不变。
+旧状态迁移（迁移 `0129`；发布期间上一版本还会写旧状态，这一版检查约束两套都允许，下一版去掉旧的）：`pending` 迁为 `todo`，`queued` 迁为 `waiting`（排队）；`running` 迁为 `in_progress`；`awaiting_confirmation` 迁为 `waiting`（等发起人）；`unfinished`、`needs_human` 迁为 `waiting`（等发起人决定）；其余不变。
 
 **Agent 运行记录**放进新表 `work_task_runs`：每跑一轮记一条（执行员工、代表人、队列任务 id、会话键、开始和结束时间、结果、耗时、费用）。人话线只显示「运行中 3 分钟」，详情放在细节线。
 

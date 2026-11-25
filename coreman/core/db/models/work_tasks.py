@@ -50,8 +50,10 @@ WORK_TASK_RUN_STATUSES = ("running", "done", "confirm", "failed", "cancelled")
 class WorkTask(Base):
     __tablename__ = "work_tasks"
     __table_args__ = (
+        # 旧状态只为发布期间上一版本的 worker 保留，新代码不写；下一版迁移去掉。
         CheckConstraint(
-            "status IN ('shadow','todo','in_progress','waiting','review','done','cancelled')",
+            "status IN ('shadow','todo','in_progress','waiting','review','done','cancelled',"
+            "'pending','queued','running','awaiting_confirmation','unfinished','needs_human')",
             name="status",
         ),
         CheckConstraint(

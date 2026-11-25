@@ -9,6 +9,8 @@ export interface WorkTaskOption { key: string; label: string }
 export interface WorkTaskAsk {
   id: string; kind: string; to: WorkTaskActor | null; question: string; why: string
   options: WorkTaskOption[]; other: boolean; needs_text: string[]; mine: boolean
+  /** 被问的人自己，或代表人、平台管理员代答。 */
+  can_answer: boolean
 }
 /** 给人看的那一层。 */
 export interface WorkTask {

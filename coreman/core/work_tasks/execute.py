@@ -48,7 +48,7 @@ async def start(
     if trigger == "rerun":
         if row.status in ("shadow", "done", "cancelled"):
             raise WorkTaskError(409, f"{row.code} 已结束")
-    elif row.status != "todo" or row.claimed_at is not None:
+    elif not ((row.status == "todo" and row.claimed_at is None) or service.restartable(row)):
         raise WorkTaskError(409, f"{row.code} 已经开工或已结束，不用再领取")
     if row.principal_user_id is None:
         raise WorkTaskError(409, f"{row.code} 没有代表人，没法以谁的身份去做")
@@ -180,12 +180,27 @@ async def answer(
     )
     if result.rerun_note is not None and row.assignee_bot_id:
         bot = await session.get(Bot, row.assignee_bot_id)
-        if bot is not None:
-            await start(
+        if bot is None:
+            return
+        try:
+            async with session.begin_nested():
+                await start(
+                    session,
+                    row,
+                    bot=bot,
+                    trigger="rerun",
+                    triggered_by={"user_id": str(user.id), "name": name_of(user)},
+                    note=result.rerun_note,
+                )
+        except WorkTaskError as exc:
+            # 交不回去（例如代表人没私聊过它）：退回照样生效，改成等人叫它开工。
+            row.status, row.claimed_at, row.start_mode = "todo", None, "manual"
+            add_event(
                 session,
                 row,
-                bot=bot,
-                trigger="rerun",
-                triggered_by={"user_id": str(user.id), "name": name_of(user)},
-                note=result.rerun_note,
+                kind="rerun_failed",
+                actor_type="system",
+                actor_id=None,
+                human_text=f"没能自动交回{bot.name}重做：{exc.message}",
+                detail={"reason": exc.message, "note": result.rerun_note},
             )

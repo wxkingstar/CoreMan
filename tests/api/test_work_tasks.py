@@ -222,3 +222,52 @@ async def test_only_participants_change_a_task_but_anyone_can_comment(
     assert watched.json()["data"]["watching"] is True
     listed = (await client.get("/api/admin/work-tasks", params={"view": "watching"})).json()
     assert [i["code"] for i in listed["data"]["items"]] == [code]
+
+
+async def test_reject_still_counts_when_the_agent_cannot_take_it_back(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """代表人没私聊过这位员工：退回照样生效，改成等人叫它开工。"""
+    bot = await _feishu_bot(db_session)
+    await login_as(client, db_session, display_name="alice")
+    code = (
+        await client.post(
+            "/api/admin/work-tasks",
+            json={"title": "查上周退货率", "assignee": {"type": "bot", "id": str(bot.id)}},
+        )
+    ).json()["data"]["code"]
+    row = await db_session.scalar(select(WorkTask).where(WorkTask.code == code))
+    service.to_review(row, "4.2%")
+    row.claimed_at = row.created_at
+    await db_session.commit()
+    ask = (await client.get(f"/api/admin/work-tasks/{code}")).json()["data"]["ask"]
+    assert ask["can_answer"] is True
+    rejected = await client.post(
+        f"/api/admin/work-tasks/{code}/answer",
+        json={"ask_id": ask["id"], "option": "reject", "text": "按渠道拆开"},
+    )
+    data = rejected.json()["data"]
+    assert rejected.status_code == 200 and data["status"] == "todo" and data["needs_drive"] is True
+    assert any("没能自动交回" in e["human_text"] for e in data["events"])
+
+
+async def test_changing_the_reviewer_moves_the_question(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bob = await _member(db_session, "bob")
+    await login_as(client, db_session, display_name="alice")
+    code = (
+        await client.post(
+            "/api/admin/work-tasks",
+            json={"title": "写周报", "assignee": {"type": "human", "id": str(bob.id)}},
+        )
+    ).json()["data"]["code"]
+    row = await db_session.scalar(select(WorkTask).where(WorkTask.code == code))
+    service.to_review(row, "写好了")
+    await db_session.commit()
+    carol = await _member(db_session, "carol")
+    await db_session.commit()
+    moved = await client.patch(
+        f"/api/admin/work-tasks/{code}", json={"reviewer_user_id": str(carol.id)}
+    )
+    assert moved.json()["data"]["ask"]["to"]["id"] == str(carol.id)

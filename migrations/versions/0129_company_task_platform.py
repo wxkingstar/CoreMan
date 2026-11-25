@@ -13,6 +13,8 @@ branch_labels = None
 depends_on = None
 
 NEW_STATUSES = "'shadow','todo','in_progress','waiting','review','done','cancelled'"
+# 发布期间上一版本的 worker 还会写旧状态：这一版两套都允许，旧的在下一版迁移里去掉。
+LEGACY_STATUSES = "'pending','queued','running','awaiting_confirmation','unfinished','needs_human'"
 OLD_STATUSES = (
     "'shadow','pending','queued','running','awaiting_confirmation',"
     "'done','unfinished','cancelled','needs_human'"
@@ -94,7 +96,9 @@ def upgrade() -> None:
         "waiting_on = jsonb_build_object('kind', 'human', 'user_id', requester_user_id::text, "
         "'human_text', '没做完，等发起人决定') WHERE status IN ('unfinished', 'needs_human')"
     )
-    op.create_check_constraint("status", "work_tasks", f"status IN ({NEW_STATUSES})")
+    op.create_check_constraint(
+        "status", "work_tasks", f"status IN ({NEW_STATUSES},{LEGACY_STATUSES})"
+    )
 
     op.create_index("work_tasks_assignee_user_idx", "work_tasks", ["assignee_user_id", "status"])
     op.create_index("work_tasks_assignee_bot_idx", "work_tasks", ["assignee_bot_id", "status"])

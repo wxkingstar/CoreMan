@@ -407,7 +407,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
         </el-alert>
 
         <WorkTaskAsk
-          v-if="detail.ask && (detail.ask.mine || detail.can_manage)"
+          v-if="detail.ask?.can_answer"
           :code="detail.code"
           :ask="detail.ask"
           :on-behalf="!detail.ask.mine"

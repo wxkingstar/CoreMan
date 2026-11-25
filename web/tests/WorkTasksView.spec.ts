@@ -27,7 +27,7 @@ const asked = vi.hoisted(() => ({
     id: 'a1', kind: 'accept', to: { type: 'human', id: 'u2', name: '韩梅梅' },
     question: '李雷把「订团建场地」交给你，接不接？', why: '',
     options: [{ key: 'accept', label: '接受' }, { key: 'decline', label: '拒绝' }],
-    other: true, needs_text: ['decline', 'other', 'reject'], mine: true,
+    other: true, needs_text: ['decline', 'other', 'reject'], mine: true, can_answer: true,
   },
   can_manage: true, related_codes: [],
   created_at: '2026-11-02T00:00:00Z', updated_at: '2026-11-02T00:00:00Z', closed_at: null,
