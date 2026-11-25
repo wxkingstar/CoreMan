@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +30,7 @@ from coreman.core.db.models import (
     WorkTaskRun,
     WorkTaskWatcher,
 )
-from coreman.core.work_tasks import execute, service
+from coreman.core.work_tasks import cards, execute, service
 from coreman.core.work_tasks.service import Assignee, WorkTaskError
 
 router = APIRouter(
@@ -382,9 +383,36 @@ async def _done(session: AsyncSession, row: WorkTask, user: User) -> dict[str, A
     return {"code": 0, "data": await _detail(session, row, user)}
 
 
+async def _act(
+    request: Request,
+    session: AsyncSession,
+    user: User,
+    code: str,
+    op: Callable[[WorkTask], Awaitable[Any]],
+) -> dict[str, Any]:
+    """改一个任务：锁行、执行、同步飞书卡片（问题变了收旧发新，完成取消通知相关的人）。"""
+    _active(user)
+    row = await _load(session, code, lock=True)
+    before_ask, before_status = row.ask, row.status
+    try:
+        await op(row)
+    except WorkTaskError as exc:
+        raise _fail(exc) from exc
+    await cards.sync(
+        session,
+        row,
+        before_ask=before_ask,
+        before_status=before_status,
+        actor_id=user.id,
+        base_url=request.app.state.settings.public_base_url,
+    )
+    return await _done(session, row, user)
+
+
 @router.post("")
 async def create_work_task(
     body: CreateIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
@@ -404,6 +432,14 @@ async def create_work_task(
         )
     except WorkTaskError as exc:
         raise _fail(exc) from exc
+    await cards.sync(
+        session,
+        row,
+        before_ask=None,
+        before_status="",
+        actor_id=user.id,
+        base_url=request.app.state.settings.public_base_url,
+    )
     return await _done(session, row, user)
 
 
@@ -411,63 +447,40 @@ async def create_work_task(
 async def assign_work_task(
     code: str,
     body: AssignIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await service.assign(
+    return await _act(
+        request,
+        session,
+        user,
+        code,
+        lambda row: service.assign(
             session,
             row,
             user,
             body.assignee.value(),
             note=body.note,
             review_required=body.review_required,
-        )
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
-
-
-async def answer_and_follow(
-    session: AsyncSession,
-    row: WorkTask,
-    user: User,
-    *,
-    ask_id: str,
-    option: str,
-    text: str,
-    channel: Literal["web", "feishu"],
-) -> None:
-    """网页和飞书卡片共用：回答，验收退回给 AI 员工的立刻排一轮重做。"""
-    result = await service.answer(
-        session, row, user, ask_id=ask_id, option=option, text=text, channel=channel
+        ),
     )
-    if result.rerun_note is not None and row.assignee_bot_id:
-        bot = await session.get(Bot, row.assignee_bot_id)
-        if bot is not None:
-            await execute.start(
-                session,
-                row,
-                bot=bot,
-                trigger="rerun",
-                triggered_by={"user_id": str(user.id), "name": service.name_of(user)},
-                note=result.rerun_note,
-            )
 
 
 @router.post("/{code}/answer")
 async def answer_work_task(
     code: str,
     body: AnswerIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await answer_and_follow(
+    return await _act(
+        request,
+        session,
+        user,
+        code,
+        lambda row: execute.answer(
             session,
             row,
             user,
@@ -475,90 +488,77 @@ async def answer_work_task(
             option=body.option,
             text=body.text,
             channel="web",
-        )
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
+        ),
+    )
 
 
 @router.post("/{code}/comment")
 async def comment_work_task(
     code: str,
     body: TextIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await service.comment(session, row, user, body.text)
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
+    return await _act(
+        request, session, user, code, lambda row: service.comment(session, row, user, body.text)
+    )
 
 
 @router.post("/{code}/complete")
 async def complete_work_task(
     code: str,
     body: TextIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await service.complete(session, row, user, body.text)
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
+    return await _act(
+        request, session, user, code, lambda row: service.complete(session, row, user, body.text)
+    )
 
 
 @router.post("/{code}/cancel")
 async def cancel_work_task(
     code: str,
     body: TextIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await service.cancel(session, row, user, body.text)
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
+    return await _act(
+        request, session, user, code, lambda row: service.cancel(session, row, user, body.text)
+    )
 
 
 @router.post("/{code}/reopen")
 async def reopen_work_task(
     code: str,
     body: TextIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await service.reopen(session, row, user, body.text)
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
+    return await _act(
+        request, session, user, code, lambda row: service.reopen(session, row, user, body.text)
+    )
 
 
 @router.patch("/{code}")
 async def update_work_task(
     code: str,
     body: UpdateIn,
+    request: Request,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    _active(user)
-    row = await _load(session, code, lock=True)
-    try:
-        await service.update(session, row, user, fields=body.model_dump(exclude_unset=True))
-    except WorkTaskError as exc:
-        raise _fail(exc) from exc
-    return await _done(session, row, user)
+    return await _act(
+        request,
+        session,
+        user,
+        code,
+        lambda row: service.update(session, row, user, fields=body.model_dump(exclude_unset=True)),
+    )
 
 
 @router.post("/{code}/watch")

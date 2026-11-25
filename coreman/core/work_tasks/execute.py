@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -27,6 +27,7 @@ from coreman.core.db.models import (
     WorkTaskRun,
 )
 from coreman.core.wecom.messages import InboundMessage, Sender, TextPart
+from coreman.core.work_tasks import service
 from coreman.core.work_tasks.service import WorkTaskError, add_event, clip, name_of, now, usable_bot
 
 TRIGGERS = ("chat", "cron", "rerun", "web")
@@ -161,3 +162,30 @@ async def start(
             },
         ),
     )
+
+
+async def answer(
+    session: AsyncSession,
+    row: WorkTask,
+    user: User,
+    *,
+    ask_id: str,
+    option: str,
+    text: str,
+    channel: Literal["web", "feishu"],
+) -> None:
+    """网页和飞书卡片共用：回答，验收退回给 AI 员工的立刻排一轮重做。"""
+    result = await service.answer(
+        session, row, user, ask_id=ask_id, option=option, text=text, channel=channel
+    )
+    if result.rerun_note is not None and row.assignee_bot_id:
+        bot = await session.get(Bot, row.assignee_bot_id)
+        if bot is not None:
+            await start(
+                session,
+                row,
+                bot=bot,
+                trigger="rerun",
+                triggered_by={"user_id": str(user.id), "name": name_of(user)},
+                note=result.rerun_note,
+            )

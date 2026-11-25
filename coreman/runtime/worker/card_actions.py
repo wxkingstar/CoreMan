@@ -154,6 +154,7 @@ class CardActionHandler:
                 from coreman.core.feishu_docs import confirm
                 from coreman.core.systems_catalog import batch as systems_batch
                 from coreman.core.systems_catalog import confirm as systems_confirm
+                from coreman.core.work_tasks import cards as work_task_cards_core
                 from coreman.runtime.worker import (
                     assistant_range,
                     assistant_scope,
@@ -164,6 +165,7 @@ class CardActionHandler:
                     gap_request_cards,
                     systems_batch_cards,
                     systems_write_cards,
+                    work_task_cards,
                 )
                 from coreman.runtime.worker.group_write_cards import handle as handle_group_write
                 from coreman.runtime.worker.personal_cards import handle_schedule, handle_selection
@@ -181,6 +183,7 @@ class CardActionHandler:
                     assistant_range.EVENT_KEY: assistant_range.handle,
                     cold_start.EVENT_KEY: cold_start_cards.handle,
                     request_cards.EVENT_KEY: gap_request_cards.handle,
+                    work_task_cards_core.EVENT_KEY: work_task_cards.handle,
                 }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(

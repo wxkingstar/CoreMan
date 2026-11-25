@@ -31,6 +31,7 @@ from coreman.core.db.models import (
     WorkTaskEvent,
     WorkTaskRun,
 )
+from coreman.core.work_tasks import cards
 from coreman.core.work_tasks.service import name_of, to_review
 from coreman.runtime.worker.chat.inbound import joined_text, message_type_of
 from coreman.runtime.worker.chat.models import Intake, Verdict
@@ -406,6 +407,7 @@ async def final_transition(
     )
     if row is None or row.status in ("shadow", "cancelled"):
         return
+    before_ask, before_status = row.ask, row.status
     body = verdict.final_text.removesuffix(suffix).strip()
     first = next((line.strip() for line in body.splitlines() if line.strip()), "")
     # 编号按要求写成了任务页链接：判断开头和记成一句话时都只看编号。
@@ -450,4 +452,13 @@ async def final_transition(
             agent_detail={"status": verdict.log_status, "reply": body[:4000]},
             chat_task_id=ctx.task.id,
         )
+    )
+    await session.flush()
+    await cards.sync(
+        session,
+        row,
+        before_ask=before_ask,
+        before_status=before_status,
+        actor_id=None,
+        base_url=ctx.public_base_url,
     )

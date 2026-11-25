@@ -44,6 +44,8 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "assistant_eligibility": {"mode": "all", "department_ids": [], "user_ids": []},
     # 开通个人助理时可选的 AI，按顺序挑第一个助理池里有可用节点的。
     "assistant_backends": ["claude", "codex"],
+    # 任务平台发卡片用的飞书员工（编号）：任务和哪位 AI 员工都无关时（网页上人派给人）用它发。
+    "work_task_notifier_bot_id": "",
     # 提示词段落：默认值由 CoreMan 提供，管理台可逐段覆盖。
     **PROMPT_DEFAULTS_BY_KEY,
 }
@@ -112,6 +114,8 @@ class SettingsPatch(BaseModel):
     assistant_backends: list[Literal["claude", "codex"]] | None = Field(
         default=None, min_length=1, max_length=2
     )
+    # 空串 = 不指定（只用和任务有关的 AI 员工发卡片）。
+    work_task_notifier_bot_id: _UUID | Literal[""] | None = None
     # 提示词段落：min_length=1 挡住「存成空串」——空串不会被 _check_not_null 当成置空，
     # 却会让安全策略/运行模式整段消失。20000 字符够放最长的 codex 输出契约还有余量。
     # 组织背景出厂就是空的，存成空串即「不加这一段」，所以不设 min_length。
