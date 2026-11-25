@@ -11,6 +11,7 @@ import pytest
 
 from coreman.core.feishu_apps import manifest
 from coreman.core.feishu_personal import endpoints, permissions, sends, service, tools
+from coreman.core.feishu_personal.toolsets import docs
 
 UUID = "a1b2c3"
 # One minimal valid call per tool; a new tool without an entry fails the coverage test.
@@ -182,6 +183,7 @@ SAMPLES = {
     "feishu_download_mail_attachment": {"message_id": "m1", "attachment_id": "att1"},
     "feishu_download_message_file": {"message_id": "om_1", "file_key": "fk_1"},
     "feishu_download_drive_file": {"file_token": "box1"},
+    "feishu_download_doc_media": {"file_token": "box2"},
     "feishu_prepare_upload": {"filename": "plan.pdf"},
     "feishu_send_file": {
         "receive_id": "oc_1",
@@ -891,6 +893,7 @@ async def test_documents_are_read_as_markdown_and_edited_by_command(upstream):
     assert path == "/docs_ai/v1/documents/wikcn1/fetch"
     assert kw["json"]["export_option"]["export_block_id"] is True
     assert out["content"] == "# 标题\n正文" and out["document_id"] == "doc1"
+    assert "media_hint" not in out
     upstream.reset_mock()
     await invoke("feishu_read_document", {"document_id": "doc1", "format": "text"})
     assert calls(upstream)[0][1] == "/docx/v1/documents/doc1/raw_content"
@@ -1097,6 +1100,28 @@ async def test_downloads_become_short_lived_links(upstream):
     assert out["filename"] == "file.png"
     _, path, kwargs = calls(upstream)[-1]
     assert path == "/im/v1/messages/om_1/resources/img_1" and kwargs["params"] == {"type": "image"}
+
+
+async def test_document_images_are_named_in_the_text_and_downloaded_by_token(upstream):
+    content = (
+        "步骤一\n![截图说明](https://feishu.cn/file/ImgToken1)\n"
+        "[附件.pdf](https://example.feishu.cn/file/FileToken2)\n![again](https://feishu.cn/file/ImgToken1)"
+    )
+
+    async def respond(session, cipher, scope, method, path, **kwargs):
+        if path.endswith("/fetch"):
+            return {"document": {"content": content}}
+        return _upstream(method, path)
+
+    upstream.side_effect = respond
+    out = await invoke("feishu_read_document", {"document_id": "doc1"})
+    assert "feishu_download_doc_media" in out["media_hint"]
+    assert docs.media_tokens(content) == ["ImgToken1", "FileToken2"]
+    upstream.next_download = FakeDownload(b"png", None, "image/png")
+    got = await invoke("feishu_download_doc_media", {"file_token": "ImgToken1"})
+    _, path, _ = calls(upstream)[-1]
+    assert path == "/drive/v1/medias/ImgToken1/download"
+    assert got["filename"] == "file.png" and got["download_url"].endswith("/files/t0")
 
 
 async def test_files_are_sent_as_images_or_typed_files(upstream):

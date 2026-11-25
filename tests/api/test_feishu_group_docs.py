@@ -132,6 +132,8 @@ async def test_the_app_reads_a_document_shared_with_this_group(client, app, db_s
         )
     assert out["content"] == "群里的方案" and out["read_as"] == "app"
     assert out["content_trust"] == "external_untrusted_data"
+    # 纯文本里没有图片：告诉它要看图时怎么取。
+    assert "feishu_doc_media" in out["media_hint"]
     assert route.calls[0].request.headers["authorization"] == "Bearer t-app"
 
 
@@ -235,6 +237,105 @@ async def test_a_connected_asker_reads_directly_without_a_card(client, app, db_s
     assert "user-secret" not in json.dumps(out)
     assert other["reason"] == "link_not_from_chat"
     assert (await db_session.scalars(select(FeishuDocConsent))).all() == []
+
+
+IMAGES = (
+    "步骤一\n![截图](https://feishu.cn/file/ImgToken1)\n![二](https://feishu.cn/file/ImgToken2)"
+    "\n![再来一次](https://feishu.cn/file/ImgToken1)"
+)
+
+
+async def test_images_in_a_document_are_fetched_as_the_asker(
+    client, app, db_session, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(app.state.settings, "object_storage_root", str(tmp_path))
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        tenant(mock)
+        permissions(mock)
+        mock.post(f"{OPEN}/docs_ai/v1/documents/DocToken1234/fetch").mock(
+            return_value=httpx.Response(
+                200, json={"code": 0, "data": {"document": {"content": IMAGES}}}
+            )
+        )
+        media = {
+            token: mock.get(f"{OPEN}/drive/v1/medias/{token}/download").mock(
+                return_value=httpx.Response(
+                    200, content=token.encode(), headers={"content-type": "image/png"}
+                )
+            )
+            for token in ("ImgToken1", "ImgToken2")
+        }
+        read = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_read", {"url": DOC})
+            )
+        )
+        auth = await headers(app, task)
+        got = value(
+            await client.post(URL, headers=auth, json=rpc("feishu_doc_media", {"url": DOC}))
+        )
+        # 只能取这篇文档里出现的图，不能借它去取提问人别处的文件。
+        outside = value(
+            await client.post(
+                URL,
+                headers=auth,
+                json=rpc("feishu_doc_media", {"url": DOC, "tokens": ["ImgToken1", "Elsewhere9"]}),
+            )
+        )
+        other = value(
+            await client.post(URL, headers=auth, json=rpc("feishu_doc_media", {"url": OTHER}))
+        )
+        sheet = value(
+            await client.post(
+                URL,
+                headers=auth,
+                json=rpc("feishu_doc_media", {"url": "https://example.feishu.cn/sheets/Sheet1234"}),
+            )
+        )
+    assert read["read_as"] == "requester" and "feishu_doc_media" in read["media_hint"]
+    assert got["read_as"] == "requester" and got["total"] == 2
+    assert [item["token"] for item in got["items"]] == ["ImgToken1", "ImgToken2"]
+    assert "curl" in got["how"] and "more_tokens" not in got
+    for route in media.values():
+        assert route.call_count == 1
+        assert route.calls[0].request.headers["authorization"] == "Bearer user-secret"
+    first = got["items"][0]
+    assert first["filename"] == "file.png" and "user-secret" not in json.dumps(got)
+    served = await client.get(first["download_url"].removeprefix("http://testserver"))
+    assert served.status_code == 200 and served.content == b"ImgToken1"
+    assert outside == {
+        "error": "media_not_in_document",
+        "tokens": ["Elsewhere9"],
+        "hint": outside["hint"],
+        "read_as": "requester",
+        "can_offer_share": True,
+        "content_trust": "external_untrusted_data",
+    }
+    assert other["reason"] == "link_not_from_chat"
+    assert sheet["error"] == "unsupported_type"
+
+
+async def media_scopes(*args, **kwargs):
+    return ["docx:document:readonly", "docs:document.media:download", "offline_access"]
+
+
+async def test_reading_text_alone_is_not_enough_for_images(client, app, db_session, monkeypatch):
+    bot, user, task = await group(db_session, app)
+    await connected(db_session, app, bot, user)
+    await connected_scopes(db_session, ["docx:document:readonly"])
+    monkeypatch.setattr(service.permissions, "app_user_scopes", media_scopes)
+    with respx.mock:
+        out = value(
+            await client.post(
+                URL, headers=await headers(app, task), json=rpc("feishu_doc_media", {"url": DOC})
+            )
+        )
+    # 能读正文但授权里没有下载素材：私信提问人一张升级卡，授权完成后自动续接。
+    assert out["status"] == "upgrade_offered"
+    wait = (await db_session.scalars(select(FeishuAuthWait))).one()
+    assert (wait.status, wait.chat_id) == ("offered", "oc_group")
 
 
 async def test_links_posted_earlier_in_this_group_can_be_read(client, app, db_session):
