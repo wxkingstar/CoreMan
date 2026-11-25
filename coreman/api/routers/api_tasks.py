@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,12 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.api import mcp_rpc
 from coreman.api.deps import client_ip, get_session
 from coreman.api.errors import ApiError, not_found
+from coreman.api.infra_auth import require_scope
 from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.security import verify_csrf
 from coreman.core.api_tasks import service, tokens
 from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.audit import record_audit
-from coreman.core.db.models import ApiTask, Bot, PersonalAccessToken, User
+from coreman.core.db.models import ApiClient, ApiTask, Bot, PersonalAccessToken, User
 from coreman.core.timeutils import utcnow
 
 router = APIRouter(tags=["api-tasks"])
@@ -131,6 +132,103 @@ async def cancel_task(
 ) -> dict[str, Any]:
     token, _ = await _caller(request, session)
     row = await _own_task(session, token, task_id)
+    await service.cancel(session, row)
+    await session.commit()
+    return {"code": 0, "data": await service.view(session, row)}
+
+
+# ---- 业务系统代员工发起（API 调用方签名，`tasks` 接口组） --------------------------------------
+
+
+class ClientTaskIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user: str = Field(min_length=1, max_length=128)
+    bot_key: str = Field(min_length=1, max_length=50)
+    prompt: str = Field(min_length=1, max_length=service.PROMPT_MAX)
+    request_id: str | None = Field(default=None, min_length=1, max_length=service.REQUEST_ID_MAX)
+
+
+class ClientUserIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user: str = Field(min_length=1, max_length=128)
+
+
+tasks_client = require_scope(service.CLIENT_SCOPE)
+
+
+@router.post("/api/infra/tasks/run", status_code=202)
+async def create_client_task(
+    body: ClientTaskIn,
+    request: Request,
+    response: Response,
+    client: ApiClient = Depends(tasks_client),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        row, created = await service.create_for_client(
+            session,
+            client=client,
+            subject=body.user,
+            bot_key=body.bot_key,
+            prompt=body.prompt,
+            request_id=body.request_id,
+        )
+    except TokenError as exc:
+        await session.rollback()
+        raise _error(exc) from None
+    if created:
+        await record_audit(
+            session,
+            action="api_task.create",
+            actor_id=row.user_id,
+            actor_login=body.user.strip().lower(),
+            target_type="bot",
+            target_id=str(row.bot_id),
+            diff={"api_task_id": str(row.id), "api_client": client.app_key},
+            ip=client_ip(request),
+        )
+    data = await service.view(session, row)
+    await session.commit()
+    if not created:
+        response.status_code = 200
+    return {"code": 0, "data": data}
+
+
+async def _client_task(
+    session: AsyncSession, client: ApiClient, task_id: uuid.UUID, subject: str
+) -> ApiTask:
+    """只看得到这个调用方自己为这位员工发起的任务。"""
+    row = await session.get(ApiTask, task_id)
+    if row is None or row.client_key != client.app_key:
+        raise not_found("任务不存在")
+    user = await session.get(User, row.user_id)
+    prefix = (user.email or "").split("@", 1)[0].lower() if user else ""
+    if not prefix or prefix != subject.strip().lower():
+        raise not_found("任务不存在")
+    return row
+
+
+@router.get("/api/infra/tasks/run/{task_id}")
+async def get_client_task(
+    task_id: uuid.UUID,
+    user: str = Query(min_length=1, max_length=128),
+    client: ApiClient = Depends(tasks_client),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    row = await _client_task(session, client, task_id, user)
+    data = await service.view(session, row)
+    await session.commit()
+    return {"code": 0, "data": data}
+
+
+@router.post("/api/infra/tasks/run/{task_id}/cancel")
+async def cancel_client_task(
+    task_id: uuid.UUID,
+    body: ClientUserIn,
+    client: ApiClient = Depends(tasks_client),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    row = await _client_task(session, client, task_id, body.user)
     await service.cancel(session, row)
     await session.commit()
     return {"code": 0, "data": await service.view(session, row)}

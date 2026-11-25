@@ -59,14 +59,21 @@ class ApiTask(Base):
     __tablename__ = "api_tasks"
     __table_args__ = (
         CheckConstraint(enum_check("target", API_TASK_TARGETS), name="target"),
+        # 发起方二选一：成员的个人令牌，或代成员调用的 API 调用方。
+        CheckConstraint("(token_id IS NULL) <> (client_key IS NULL)", name="caller"),
         UniqueConstraint("token_id", "request_id", name="uq_api_tasks_token_request"),
+        UniqueConstraint("client_key", "request_id", name="uq_api_tasks_client_request"),
         Index("api_tasks_token_idx", "token_id", "created_at"),
+        Index("api_tasks_client_idx", "client_key", "user_id", "created_at"),
     )
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")
     )
-    token_id: Mapped[uuid.UUID] = mapped_column(
+    token_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("personal_access_tokens.id", ondelete="CASCADE")
+    )
+    client_key: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("api_clients.app_key", ondelete="CASCADE")
     )
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"))
     bot_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bots.id", ondelete="CASCADE"))

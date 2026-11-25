@@ -305,6 +305,8 @@ class ApiClient(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(Text)
     secret_enc: Mapped[str] = mapped_column(Text, comment="enc")
     scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    # `tasks` 接口组能驱动的 AI 员工；空表示一个都不能。
+    bot_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(Uuid()), server_default=text("'{}'"))
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
