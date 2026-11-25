@@ -452,8 +452,13 @@ class FinalizeStage(ChatStageBase):
         logged_text = verdict.final_text
         verdict, offer = await self._postprocess_rate_limit(ctx, pre, verdict)
         verdict = await self._attach_files(ctx, pre, verdict)
-        if ctx.task.payload.get("api_client") and verdict.final_text:
+        if (
+            ctx.task.payload.get("api_client")
+            and verdict.final_text
+            and not ctx.task.payload.get("api_group")
+        ):
             # 业务系统发起的独立会话：回复发在私聊里，尾注说明它不在私聊的对话上下文中。
+            # 群承接模式的回复就在群主会话里，不加。
             verdict = replace(
                 verdict, final_text=verdict.final_text + msg("api_push_footer", ctx.locale)
             )

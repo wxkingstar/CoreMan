@@ -17,6 +17,7 @@ from coreman.core.db.models.account import (
 from coreman.core.db.models.alert import AlertState
 from coreman.core.db.models.api_tasks import (
     API_TASK_TARGETS,
+    ApiClientGroupRoute,
     ApiTask,
     ApiTaskUpload,
     BotConversationAlias,
@@ -353,6 +354,7 @@ __all__ += [
 
 __all__ += [
     "API_TASK_TARGETS",
+    "ApiClientGroupRoute",
     "ApiTask",
     "ApiTaskUpload",
     "BotConversationAlias",

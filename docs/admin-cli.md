@@ -608,12 +608,18 @@ coreman clients list
 coreman clients create demo-app --name 演示 --scope org --scope notify [--secret-file 文件]
 coreman clients set demo-app --scope relay --enabled off      # --scope 替换全部接口组；--no-scope 清空
 coreman clients rotate-secret demo-app --yes                 # 旧密钥立即失效
+coreman clients group-options --bot ops-bot                  # 群承接可选的群与服务账号
+coreman clients group-add monitor --bot ops-bot --chat oc_xxx --service-user svc-ops
+coreman clients groups monitor
+coreman clients group-remove monitor <配置 id> --yes
 coreman clients jwt-keys
 coreman clients jwt-rotate --yes
 coreman clients token-providers
 ```
 
 调用方密钥只在 `create` 和 `rotate-secret` 时打印这一次，请立即保存；不给 `--secret-file` 时随机生成。
+
+群承接：调用方为某个 AI 员工配了群承接后，驱动它时不再指定员工，任务以配置的服务账号（必须是在用的 service 账号）在群的主会话里运行，确认卡发到群里按点卡人身份执行。AI 员工要先在调用方的可驱动列表里（`--bot`）。详见 [API 驱动 AI 员工](features/api-tasks.md#群承接模式)。
 
 ## 审计日志、统计、对话记录与任务
 

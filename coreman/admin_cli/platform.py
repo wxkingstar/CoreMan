@@ -719,6 +719,31 @@ def register_clients(sub: Any) -> None:
     p = leaf(ops, "rotate-secret", "重新生成调用方密钥（旧密钥立即失效）", clients_rotate)
     p.add_argument("app_key")
     add_yes(p)
+    p = leaf(ops, "groups", "列出调用方的群承接配置", clients_groups)
+    p.add_argument("app_key")
+    p = leaf(
+        ops,
+        "group-options",
+        "建群承接配置时可选的群与服务账号（AI 员工告警来源里的 + 所有在用服务账号）",
+        clients_group_options,
+    )
+    p.add_argument("--bot", metavar="AI员工", help="列出它告警来源里的群和服务账号")
+    p = leaf(
+        ops,
+        "group-add",
+        "新增群承接：调用方驱动该 AI 员工时以服务账号在这个群里跑（请求不能再指定员工）",
+        clients_group_add,
+    )
+    p.add_argument("app_key")
+    p.add_argument("--bot", required=True, metavar="AI员工", help="须已在调用方可驱动的 AI 员工里")
+    p.add_argument("--chat", required=True, metavar="chat_id", help="飞书群 chat_id")
+    p.add_argument(
+        "--service-user", required=True, metavar="服务账号", help="服务账号的 id 或登录名"
+    )
+    p = leaf(ops, "group-remove", "删除一条群承接配置", clients_group_remove)
+    p.add_argument("app_key")
+    p.add_argument("route_id", help="配置 id（见 clients groups）")
+    add_yes(p)
     leaf(ops, "jwt-keys", "列出 JWT 签名密钥（平台管理员）", jwt_keys)
     add_yes(leaf(ops, "jwt-rotate", "轮换平台 JWT 签名密钥", jwt_rotate))
     leaf(ops, "token-providers", "列出业务令牌签发方", token_providers)
@@ -744,6 +769,7 @@ async def clients_list(c: AdminClient, args: argparse.Namespace) -> int:
                 ("状态", output.enabled),
                 ("接口组", "scopes"),
                 ("可驱动 AI 员工", lambda r: len(r.get("bot_ids") or [])),
+                ("群承接", lambda r: r.get("group_routes") or 0),
                 ("最近调用", "last_used_at"),
             ],
         )
@@ -804,6 +830,80 @@ async def clients_rotate(c: AdminClient, args: argparse.Namespace) -> int:
     else:
         print(f"已重新生成 {args.app_key} 的密钥")
         print_secret(data)
+    return 0
+
+
+GROUP_COLUMNS = [
+    ("id", "id"),
+    ("AI 员工", "bot_key"),
+    ("群 chat_id", "chat_id"),
+    ("服务账号", "service_user"),
+    ("创建时间", "created_at"),
+]
+
+
+async def clients_groups(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(f"{CLIENTS}/{args.app_key}/group-routes")
+    if args.json:
+        output.dump(rows)
+    else:
+        output.table(rows, GROUP_COLUMNS)
+    return 0
+
+
+async def group_options(c: AdminClient, bot_ref: str | None) -> dict[str, Any]:
+    params = {"bot_id": (await c.bot(bot_ref))["id"]} if bot_ref else {}
+    return await c.get(f"{CLIENTS}/group-route-options", **params)  # type: ignore[no-any-return]
+
+
+async def clients_group_options(c: AdminClient, args: argparse.Namespace) -> int:
+    data = await group_options(c, args.bot)
+    if args.json:
+        output.dump(data)
+        return 0
+    names = {u["id"]: u["login_name"] for u in data["service_users"]}
+    if args.bot:
+        print("告警来源里的群：")
+        output.table(
+            data["alert_sources"],
+            [
+                ("群 chat_id", "chat_id"),
+                ("服务账号", lambda r: names.get(r["service_user_id"], r["service_user_id"])),
+            ],
+        )
+    print("在用的服务账号：")
+    output.table(
+        data["service_users"], [("id", "id"), ("登录名", "login_name"), ("名称", "display_name")]
+    )
+    return 0
+
+
+async def clients_group_add(c: AdminClient, args: argparse.Namespace) -> int:
+    data = await group_options(c, None)
+    found = [u for u in data["service_users"] if args.service_user in (u["id"], u["login_name"])]
+    if not found:
+        raise CliError(f"找不到在用的服务账号：{args.service_user}")
+    body = {
+        "bot_id": (await c.bot(args.bot))["id"],
+        "chat_id": args.chat,
+        "service_user_id": found[0]["id"],
+    }
+    row = await c.request("POST", f"{CLIENTS}/{args.app_key}/group-routes", body=body)
+    if args.json:
+        output.dump(row)
+    else:
+        print(
+            f"已新增群承接 {row['id']}：{row['bot_key']} 在 {row['chat_id']}，"
+            f"身份 {row['service_user']}"
+        )
+    return 0
+
+
+async def clients_group_remove(c: AdminClient, args: argparse.Namespace) -> int:
+    require_yes(args, f"删除 {args.app_key} 的群承接配置 {args.route_id}")
+    await c.request("DELETE", f"{CLIENTS}/{args.app_key}/group-routes/{args.route_id}")
+    if not args.json:
+        print(f"已删除群承接配置 {args.route_id}")
     return 0
 
 
