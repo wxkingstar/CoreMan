@@ -64,9 +64,11 @@ async def test_api_tasks_are_mirrored_read_only_and_follow_their_turn(db_session
     assert await ledger.sync(db_session, now) >= 1
     await db_session.commit()
     mirror = await db_session.scalar(select(WorkTask).where(WorkTask.origin_ref == f"api:{api.id}"))
-    assert mirror.title == "统计上周退货率" and mirror.source == "api"
+    # 回到私聊的 API 任务：只记谁发起、状态，不复制内容。
+    assert mirror.title == "API发起的私聊任务" and mirror.brief == "" and mirror.source == "api"
     assert mirror.status == "in_progress" and mirror.principal_user_id == alice.id
-    assert mirror.brief.startswith("统计上周退货率")
+    # 没有变化时不重复改。
+    assert await ledger.sync(db_session, now) == 0
     # 镜像只读：不能在任务页转交、取消。
     try:
         await service.cancel(db_session, mirror, alice, "不要了")
@@ -74,8 +76,9 @@ async def test_api_tasks_are_mirrored_read_only_and_follow_their_turn(db_session
         assert "原处" in exc.message
     else:
         raise AssertionError("mirror should be read-only")
-    # 那一轮做完：镜像跟着完成；再同步一次不重复建。
+    # 那一轮做完（哪怕原记录已经过了 7 天）：镜像跟着完成；再同步一次不重复建。
     turn.status = "succeeded"
+    api.created_at = now - timedelta(days=10)
     await db_session.commit()
     await ledger.sync(db_session, now)
     await db_session.commit()

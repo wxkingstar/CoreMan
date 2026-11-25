@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks.service import feishu_user_id
@@ -95,6 +95,8 @@ async def tick(session: AsyncSession, now: datetime, base_url: str) -> int:
                 WorkTask.status.in_(WORK_TASK_OPEN),
                 WorkTask.origin_ref.is_(None),
                 WorkTask.overdue_notified_at.is_(None),
+                # 已经提醒过「快到期」、还没超期的不占名额。
+                or_(WorkTask.due_at <= now, WorkTask.due_reminded_at.is_(None)),
             )
             .order_by(WorkTask.due_at)
             .limit(BATCH)

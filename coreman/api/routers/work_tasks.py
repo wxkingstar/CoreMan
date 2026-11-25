@@ -366,7 +366,11 @@ async def work_task_stats(
         await session.scalar(
             select(func.count())
             .select_from(WorkTask)
-            .where(WorkTask.closed_at >= since, WorkTask.status == "done")
+            .where(
+                WorkTask.closed_at >= since,
+                WorkTask.status == "done",
+                WorkTask.origin_ref.is_(None),
+            )
         )
         or 0
     )

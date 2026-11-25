@@ -358,8 +358,11 @@ class SchedulerService(Service):
             try:
                 if self.is_leader:
                     now = datetime.now(UTC)
+                    # 镜像和提醒各用各的事务：一边出错不拖累另一边。
                     async with self._factory() as session:
                         mirrored = await ledger.sync(session, now)
+                        await session.commit()
+                    async with self._factory() as session:
                         reminded = await due.tick(session, now, get_settings().public_base_url)
                         await session.commit()
                     if mirrored or reminded:

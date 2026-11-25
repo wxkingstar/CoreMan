@@ -352,7 +352,7 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     related = await _related_note(session, row)
     if related:
         lines.append(related)
-    past = await _past_digests(session, row, intake.bot.id)
+    past = await _past_digests(session, row, row.assignee_bot_id) if row.assignee_bot_id else None
     if past:
         lines.append(past)
     history = await _history(session, row)
