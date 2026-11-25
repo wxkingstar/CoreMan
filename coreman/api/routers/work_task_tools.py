@@ -6,14 +6,15 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api import mcp_rpc
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
 from coreman.core.bus import tasks
-from coreman.core.db.models import Bot, Task
-from coreman.core.work_tasks import tools
+from coreman.core.db.models import Bot, Task, WorkTask
+from coreman.core.work_tasks import agent_tools, tools
 
 router = APIRouter(tags=["work-tasks"])
 MAX_BODY = 65_536
@@ -41,6 +42,17 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         or not bot.enabled
     ):
         raise ApiError(403, 403, "Task turn is no longer active")
+    # 任务会话（work:<编号>）里、这件事此刻在这位员工手上：另有做任务用的工具。
+    current = None
+    session_key = task.session_key or ""
+    if session_key.startswith("work:"):
+        current = await session.scalar(
+            select(WorkTask)
+            .where(WorkTask.code == session_key.removeprefix("work:"))
+            .with_for_update()
+        )
+        if current is not None and current.assignee_bot_id != bot.id:
+            current = None
     parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
     if isinstance(parsed, Response):
         return parsed
@@ -51,7 +63,8 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     if method in ("ping", "tools/list"):
         if params:
             return mcp_rpc.error(rid, -32602, "Invalid params")
-        result = {} if method == "ping" else {"tools": tools.definitions()}
+        listed = tools.definitions() + (agent_tools.definitions() if current else [])
+        result = {} if method == "ping" else {"tools": listed}
     elif method == "tools/call":
         if (
             set(params) - {"name", "arguments"}
@@ -59,9 +72,23 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             or not isinstance(params.get("arguments", {}), dict)
         ):
             return mcp_rpc.error(rid, -32602, "Invalid params")
-        value = await tools.invoke(
-            session, capability, bot, params["name"], params.get("arguments", {})
-        )
+        name, arguments = params["name"], params.get("arguments", {})
+        if name in agent_tools.NAMES:
+            value = (
+                await agent_tools.invoke(
+                    session,
+                    current,
+                    bot,
+                    name,
+                    arguments,
+                    chat_task_id=task.id,
+                    base_url=request.app.state.settings.public_base_url,
+                )
+                if current is not None
+                else {"error": "not_in_task", "stop": True, "message": "这一轮不在做任务"}
+            )
+        else:
+            value = await tools.invoke(session, capability, bot, name, arguments)
         await session.commit()
         result = {
             "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],

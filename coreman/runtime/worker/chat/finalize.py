@@ -292,6 +292,10 @@ class FinalizeStage(ChatStageBase):
                 await work.final_transition(
                     session, ctx, intake, verdict, msg("done_suffix", ctx.locale)
                 )
+                # 子任务的一轮不出声：结果已经由平台交回上级任务。
+                collaboration_silent = collaboration_silent or bool(
+                    ctx.task.payload.get("work_silent")
+                )
             entry = (
                 log_entry(
                     ctx,

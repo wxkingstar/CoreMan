@@ -12,7 +12,7 @@ const task = vi.hoisted(() => ({
   dispatcher: null, review_required: true, priority: 'normal', due_at: null,
   start_mode: 'manual', claimed_at: null, needs_drive: true,
   now: '数据助手还没开工。在飞书里对它说「做 T-7」，或给它配定时领取。',
-  ask: null, can_manage: true, related_codes: [],
+  ask: null, can_manage: true, related_codes: [], artifacts: [],
   created_at: '2026-11-02T00:00:00Z', updated_at: '2026-11-02T00:00:00Z', closed_at: null,
 }))
 const asked = vi.hoisted(() => ({
@@ -29,7 +29,7 @@ const asked = vi.hoisted(() => ({
     options: [{ key: 'accept', label: '接受' }, { key: 'decline', label: '拒绝' }],
     other: true, needs_text: ['decline', 'other', 'reject'], mine: true, can_answer: true,
   },
-  can_manage: true, related_codes: [],
+  can_manage: true, related_codes: [], artifacts: [],
   created_at: '2026-11-02T00:00:00Z', updated_at: '2026-11-02T00:00:00Z', closed_at: null,
 }))
 vi.mock('@/api/workTasks', () => ({
@@ -42,7 +42,7 @@ vi.mock('@/api/workTasks', () => ({
         { id: 1, kind: 'created', actor_type: 'human', actor_name: '李雷', human_text: '李雷建了任务', agent_detail: { brief: '口径按退货单数除以签收单数' }, created_at: '2026-11-02T00:00:00Z' },
         { id: 2, kind: 'started', actor_type: 'bot', actor_name: '数据助手', human_text: '', agent_detail: { tool: 'query' }, created_at: '2026-11-02T00:00:00Z' },
       ],
-      agent: { brief: '统计上周退货率，口径按退货单数除以签收单数', digest: '', waiting_on: null, runs: [], decision: null },
+      agent: { brief: '统计上周退货率，口径按退货单数除以签收单数', digest: '', report: '总结论：退货率 4.2%', waiting_on: null, runs: [], decision: null },
     }),
     answer: vi.fn().mockResolvedValue({ ...asked, ask: null, status: 'in_progress' }),
   },
@@ -116,5 +116,6 @@ describe('WorkTasksView', () => {
     // 给 Agent 看的细节默认折叠。
     const layer = drawer.querySelector('[data-test="agent-layer"]')
     expect(layer?.querySelector('.el-collapse-item.is-active')).toBeNull()
+    expect(layer?.querySelector('[data-test="agent-report"]')?.textContent).toContain(i18n.global.t('workTasks.report'))
   })
 })

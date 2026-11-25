@@ -30,7 +30,11 @@ from coreman.core.wecom.messages import InboundMessage, Sender, TextPart
 from coreman.core.work_tasks import service
 from coreman.core.work_tasks.service import WorkTaskError, add_event, clip, name_of, now, usable_bot
 
-TRIGGERS = ("chat", "cron", "rerun", "web")
+# chat：人在对话里叫它；cron：定时领取；rerun：验收退回；comment：停下后人补了话；
+# subtask：上级 AI 员工派的子任务；resume：等的子任务都有结果了；handoff：别的员工整件转交过来。
+TRIGGERS = ("chat", "cron", "rerun", "comment", "subtask", "resume", "handoff")
+# 不需要「待领取」状态就能开工的触发方式。
+_RESTART = ("rerun", "resume")
 
 
 async def start(
@@ -41,11 +45,15 @@ async def start(
     trigger: str,
     triggered_by: dict[str, Any],
     note: str = "",
+    silent: bool = False,
 ) -> None:
-    """排一轮执行员工的对话。`trigger`：chat（人在对话里叫它）、cron（定时领取）、rerun。"""
+    """排一轮执行员工的对话。`silent`：子任务这样没人在看的一轮，回复不发到任何会话。
+
+    回复发到哪：不出声的一轮不发；调度员交来的任务回到原群；其余发到代表人和它的私聊。
+    """
     if row.assignee_bot_id != bot.id:
         raise WorkTaskError(403, f"{row.code} 不是派给「{bot.name}」的任务")
-    if trigger == "rerun":
+    if trigger in _RESTART:
         if row.status in ("shadow", "done", "cancelled"):
             raise WorkTaskError(409, f"{row.code} 已结束")
     elif not ((row.status == "todo" and row.claimed_at is None) or service.restartable(row)):
@@ -57,14 +65,22 @@ async def start(
         raise WorkTaskError(409, f"{row.code} 的代表人已停用")
     await usable_bot(session, bot.id, principal.id)
     pid = await feishu_user_id(session, principal.id)
-    reached = await session.get(UserReached, (bot.id, principal.id))
-    if not pid or reached is None or not reached.platform_chat_id:
-        raise WorkTaskError(
-            409,
-            f"{name_of(principal)}还没有在飞书私聊过「{bot.name}」，结果没处回报；"
-            f"请他先私聊「{bot.name}」一次",
-        )
-    chat_id = reached.platform_chat_id
+    if not pid:
+        raise WorkTaskError(409, f"{name_of(principal)}没有飞书身份，没法以他的身份去做")
+    chat_type = "single"
+    if silent:
+        chat_id = f"work:{row.code}"
+    elif row.source == "dispatch" and row.platform == "feishu" and row.chat_id:
+        chat_id, chat_type = row.chat_id, "group"
+    else:
+        reached = await session.get(UserReached, (bot.id, principal.id))
+        if reached is None or not reached.platform_chat_id:
+            raise WorkTaskError(
+                409,
+                f"{name_of(principal)}还没有在飞书私聊过「{bot.name}」，结果没处回报；"
+                f"请他先私聊「{bot.name}」一次",
+            )
+        chat_id = reached.platform_chat_id
     seq = int(
         await session.scalar(
             select(func.count()).select_from(WorkTaskRun).where(WorkTaskRun.work_task_id == row.id)
@@ -77,13 +93,13 @@ async def start(
         platform="feishu",
         bot_id=bot.id,
         kind="message",
-        chat_type="single",
+        chat_type=chat_type,
         chat_id=chat_id,
         sender=Sender(platform_user_id=pid),
         message_id=message_id,
         mentions_bot=True,
         parts=[TextPart(text=text)],
-        reply_context={"chat_id": chat_id, "chat_type": "single"},
+        reply_context={"chat_id": chat_id, "chat_type": chat_type},
     )
     sealed_values = await sealed.seal_values(
         session,
@@ -98,7 +114,7 @@ async def start(
             platform="feishu",
             platform_msg_id=message_id,
             kind="message",
-            chat_type="single",
+            chat_type=chat_type,
             chat_id=chat_id,
             sender_platform_user_id=pid,
             sender_open_id=None,
@@ -107,7 +123,7 @@ async def start(
         )
         .returning(InboundEvent.id)
     )
-    if row.platform is None or row.chat_id is None:
+    if not silent and (row.platform is None or row.chat_id is None):
         row.platform, row.chat_id = "feishu", chat_id
     if row.claimed_at is None:
         row.claimed_at = now()
@@ -118,7 +134,10 @@ async def start(
         "chat": f"{who}叫{bot.name}开工",
         "cron": f"{bot.name}按定时任务领取",
         "rerun": f"交回{bot.name}重做",
-        "web": f"{who}让{bot.name}开工",
+        "comment": f"{who}补充后交回{bot.name}接着做",
+        "subtask": f"{bot.name}接手",
+        "resume": f"等的事都有结果了，{bot.name}接着做",
+        "handoff": f"转交给{bot.name}",
     }.get(trigger, f"{bot.name}开工")
     add_event(
         session,
@@ -129,19 +148,8 @@ async def start(
         human_text=line,
         detail={"trigger": trigger, "triggered_by": triggered_by, "note": note},
     )
-    await outbox.add(
-        session,
-        bot_id=bot.id,
-        platform="feishu",
-        kind="send",
-        dedupe_key=f"work-task:{row.id}:{event_id}:trigger",
-        target={
-            "chat_id": chat_id,
-            "recipient_user_id": str(principal.id),
-            "recipient_platform_user_id": pid,
-        },
-        payload={"markdown": clip(f"**{row.code}** {line}：{row.title}", 200)},
-    )
+    if chat_type == "single" and not silent:
+        await _announce(session, row, bot, chat_id, principal, pid, event_id, line)
     await tasks.enqueue(
         session,
         tasks.NewTask(
@@ -155,12 +163,39 @@ async def start(
                 "work_task_id": row.id,
                 "work_note": note,
                 "work_trigger": trigger,
+                "work_silent": silent,
                 "work_triggered_by": triggered_by,
                 "bot_key": bot.bot_key,
                 "platform_user_id": pid,
                 "serialize_session": True,
             },
         ),
+    )
+
+
+async def _announce(
+    session: AsyncSession,
+    row: WorkTask,
+    bot: Bot,
+    chat_id: str,
+    principal: User,
+    pid: str,
+    event_id: int | None,
+    line: str,
+) -> None:
+    """代表人的私聊里说一句开工了：私聊里冒出来的回复要让人知道是哪件事。"""
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"work-task:{row.id}:{event_id}:trigger",
+        target={
+            "chat_id": chat_id,
+            "recipient_user_id": str(principal.id),
+            "recipient_platform_user_id": pid,
+        },
+        payload={"markdown": clip(f"**{row.code}** {line}：{row.title}", 200)},
     )
 
 

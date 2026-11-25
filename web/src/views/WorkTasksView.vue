@@ -573,6 +573,20 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           >
             {{ detail.summary || '—' }}
           </el-descriptions-item>
+          <el-descriptions-item
+            v-if="detail.artifacts.length"
+            :label="t('workTasks.artifacts')"
+            :span="2"
+          >
+            <a
+              v-for="item in detail.artifacts"
+              :key="item.url"
+              :href="item.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="related"
+            >{{ item.title }}</a>
+          </el-descriptions-item>
         </el-descriptions>
 
         <template v-if="detail.children.length">
@@ -641,6 +655,14 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           v-model="agentOpen"
           data-test="agent-layer"
         >
+          <el-collapse-item
+            v-if="detail.agent.report"
+            :title="t('workTasks.report')"
+            name="report"
+            data-test="agent-report"
+          >
+            <pre>{{ detail.agent.report }}</pre>
+          </el-collapse-item>
           <el-collapse-item
             v-if="detail.agent.brief"
             :title="t('workTasks.brief')"

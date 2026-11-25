@@ -44,16 +44,15 @@ WORK_TASK_OPEN = ("todo", "in_progress", "waiting", "review")
 WORK_TASK_ACTORS = ("human", "bot", "system")
 WORK_TASK_SOURCES = ("dispatch", "web", "agent", "api", "collaboration")
 WORK_TASK_PRIORITIES = ("normal", "high", "urgent")
-WORK_TASK_RUN_STATUSES = ("running", "done", "confirm", "failed", "cancelled")
+# waiting：这一轮派出子任务或问了人，任务在等结果。
+WORK_TASK_RUN_STATUSES = ("running", "done", "confirm", "failed", "cancelled", "waiting")
 
 
 class WorkTask(Base):
     __tablename__ = "work_tasks"
     __table_args__ = (
-        # 旧状态只为发布期间上一版本的 worker 保留，新代码不写；下一版迁移去掉。
         CheckConstraint(
-            "status IN ('shadow','todo','in_progress','waiting','review','done','cancelled',"
-            "'pending','queued','running','awaiting_confirmation','unfinished','needs_human')",
+            "status IN ('shadow','todo','in_progress','waiting','review','done','cancelled')",
             name="status",
         ),
         CheckConstraint(
@@ -124,6 +123,12 @@ class WorkTask(Base):
     brief: Mapped[str] = mapped_column(Text, server_default=text("''"))
     # 完成时的任务记要（Agent 层），后续相关任务的背景。
     digest: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # 有子任务的任务交付时的完整汇报（Agent 层，人展开看）。
+    report: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # 产出物（人话线）：[{title, url}]。
+    artifacts: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
     # 要不要在群里跟进：简单的事照样记下，但群里不出编号、调度员不发言，执行员工直接回复。
     tracked: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # 在等什么（人话线）：{kind: human|queue|quota|task|external, user_id?, human_text}。
@@ -173,7 +178,8 @@ class WorkTaskRun(Base):
     __tablename__ = "work_task_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running','done','confirm','failed','cancelled')", name="status"
+            "status IN ('running','done','confirm','failed','cancelled','waiting')",
+            name="status",
         ),
         UniqueConstraint("chat_task_id", name="uq_work_task_runs_chat_task_id"),
         Index("work_task_runs_task_idx", "work_task_id", "started_at"),

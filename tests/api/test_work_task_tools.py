@@ -78,13 +78,14 @@ async def test_agent_lists_and_claims_tasks_as_the_principal(
     assert items[0]["from"] == "alice" and items[0]["waiting_to_be_claimed"] is True
 
     # 代表人没私聊过这位员工：没处回报，领取失败并说明原因。
+    db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_a"))
+    await db_session.commit()
     response = await client.post(
         URL, json=_call("start_task", {"codes": [first.code]}), headers=auth
     )
     result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
     assert result["started"] is False and "私聊" in result["reason"]
 
-    db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_a"))
     db_session.add(UserReached(bot_id=bot.id, user_id=alice.id, platform_chat_id="oc_dm"))
     await db_session.commit()
     response = await client.post(
