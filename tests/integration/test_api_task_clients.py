@@ -10,6 +10,7 @@ from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
     ApiClient,
+    ApiTask,
     ChatLog,
     ChatSession,
     OutboxItem,
@@ -140,10 +141,10 @@ async def test_request_id_replays_per_client_and_rejects_changed_content(db_sess
 async def test_open_limit_is_per_member(db_session, monkeypatch):
     _, _, client = await _setup(db_session)
     monkeypatch.setattr(service, "MAX_OPEN_PER_CLIENT_USER", 2)
-    await _create(db_session, client)
-    await _create(db_session, client)
+    await _create(db_session, client, prompt="第一件")
+    await _create(db_session, client, prompt="第二件")
     with pytest.raises(TokenError) as full:
-        await _create(db_session, client)
+        await _create(db_session, client, prompt="第三件")
     assert full.value.status == 429
 
 
@@ -270,3 +271,85 @@ async def test_images_past_the_inline_limit_become_download_links(db_engine, db_
     assert f"本次共 {uploads.INLINE + 2} 张图片" in text
     assert text.count("/api/infra/tasks/uploads/") == 2
     assert str(ids[-1]) in text and str(ids[0]) not in text
+
+
+async def test_known_exhausted_quota_waits_without_running_or_messaging(db_engine, db_session):
+    from datetime import timedelta
+
+    from coreman.core.db.models import Bot, RelayServer
+    from coreman.core.timeutils import utcnow
+
+    bot, _, client = await _setup(db_session)
+    relay = await db_session.get(RelayServer, (await db_session.get(Bot, bot.id)).relay_server_id)
+    resets = utcnow() + timedelta(hours=2)
+    relay.rate_limit_5h_used_pct, relay.rate_limit_5h_resets_at = 100, resets
+    await db_session.commit()
+    row, _ = await _create(db_session, client)
+    await _trigger_sent(db_session, row)
+    task = await _claim(db_session)
+    fake = await _run(db_engine, task)
+    assert fake.requests == []
+    waiting = await tasks.get(db_session, task.id)
+    assert waiting.status == "queued" and waiting.run_after >= resets - timedelta(seconds=5)
+    view = await service.view(
+        db_session, await db_session.get(ApiTask, row.id, populate_existing=True)
+    )
+    assert view["status"] == "waiting_quota" and view["resume_at"]
+    sent = await db_session.scalars(
+        select(OutboxItem.dedupe_key).where(OutboxItem.dedupe_key.like(f"api-task:{row.id}:%"))
+    )
+    assert set(sent) == {f"api-task:{row.id}:trigger"}
+
+
+async def test_waiting_longer_than_a_week_gives_up(db_engine, db_session):
+    from datetime import timedelta
+
+    from coreman.core.db.models import Bot, RelayServer
+    from coreman.core.timeutils import utcnow
+
+    bot, _, client = await _setup(db_session)
+    relay = await db_session.get(RelayServer, (await db_session.get(Bot, bot.id)).relay_server_id)
+    relay.rate_limit_7d_used_pct = 100
+    relay.rate_limit_7d_resets_at = utcnow() + timedelta(days=1)
+    await db_session.commit()
+    row, _ = await _create(db_session, client)
+    stored = await db_session.get(ApiTask, row.id)
+    stored.quota_waiting_since = utcnow() - timedelta(days=8)
+    await db_session.commit()
+    await _trigger_sent(db_session, row)
+    task = await _claim(db_session)
+    await _run(db_engine, task)
+    done = await tasks.get(db_session, task.id)
+    assert done.status == "failed" and done.error_code == "quota_wait_expired"
+
+
+async def test_hitting_the_limit_mid_turn_queues_a_retry_in_the_same_session(db_engine, db_session):
+    from tests.fakes.fake_relay import FakeRelay
+
+    _, _, client = await _setup(db_session)
+    row, _ = await _create(db_session, client)
+    await _trigger_sent(db_session, row)
+    first = await _claim(db_session)
+    await _run(db_engine, first, FakeRelay("rate_limit"))
+    stored = await db_session.get(ApiTask, row.id, populate_existing=True)
+    assert stored.task_id != first.id and stored.resume_at is not None
+    retry = await tasks.get(db_session, stored.task_id)
+    assert retry.session_key == first.session_key and retry.status == "queued"
+    assert retry.inbound_event_id == first.inbound_event_id
+    log = await db_session.scalar(select(ChatLog).where(ChatLog.task_id == first.id))
+    assert "已排队" in log.response_content and "切换" not in log.response_content
+    view = await service.view(db_session, stored)
+    assert view["status"] == "waiting_quota"
+
+
+async def test_same_content_while_unfinished_returns_the_same_task(db_session):
+    _, _, client = await _setup(db_session)
+    first, created = await _create(db_session, client)
+    again, again_created = await _create(db_session, client)
+    assert created and not again_created and again.id == first.id
+    other, other_created = await _create(db_session, client, prompt="另一件事")
+    assert other_created and other.id != first.id
+    await service.cancel(db_session, first)
+    await db_session.commit()
+    third, third_created = await _create(db_session, client)
+    assert third_created and third.id != first.id

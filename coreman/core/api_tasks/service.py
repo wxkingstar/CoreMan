@@ -35,6 +35,7 @@ from coreman.core.db.models import (
     UserReached,
 )
 from coreman.core.i18n.messages import MESSAGES
+from coreman.core.timeutils import aware_utc, utcnow
 from coreman.core.wecom.messages import ImagePart, InboundMessage, Sender, TextPart
 
 PROMPT_MAX = 20000
@@ -378,6 +379,30 @@ async def _client_replay(
     return row
 
 
+async def _open_duplicate(
+    session: AsyncSession,
+    client: ApiClient,
+    user_id: uuid.UUID,
+    bot_id: uuid.UUID,
+    prompt: str,
+    image_ids: list[uuid.UUID],
+) -> ApiTask | None:
+    rows = await session.scalars(
+        select(ApiTask)
+        .join(Task, Task.id == ApiTask.task_id)
+        .where(
+            ApiTask.client_key == client.app_key,
+            ApiTask.user_id == user_id,
+            ApiTask.bot_id == bot_id,
+            ApiTask.prompt == prompt,
+            Task.status.in_(tasks.OPEN),
+            Task.cancel_requested_at.is_(None),
+        )
+        .order_by(ApiTask.created_at)
+    )
+    return next((row for row in rows if list(row.image_ids or []) == image_ids), None)
+
+
 async def create_for_client(
     session: AsyncSession,
     *,
@@ -424,6 +449,10 @@ async def create_for_client(
             Task.cancel_requested_at.is_(None),
         )
     )
+    same = await _open_duplicate(session, client, user.id, bot.id, prompt, wanted)
+    if same is not None:
+        # 同样的内容上一条还没做完（排队、等额度、执行中）：不再建一条。
+        return same, False
     if (open_count or 0) >= MAX_OPEN_PER_CLIENT_USER:
         raise TokenError(429, f"这位员工已有 {MAX_OPEN_PER_CLIENT_USER} 个任务未结束，请稍后再发起")
     from coreman.core.api_tasks import uploads
@@ -544,8 +573,19 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
         from coreman.core.api_tasks import writes
 
         user = await session.get(User, row.user_id)
+        waiting = (
+            status == "queued"
+            and row.resume_at is not None
+            and task is not None
+            and task.run_after is not None
+            and aware_utc(task.run_after) > utcnow()
+        )
+        if waiting:
+            status = "waiting_quota"
         who = {
             "user": (user.email or "").split("@", 1)[0].lower() if user else None,
+            # 运行时额度用完、排队等恢复时的预计重跑时间。
+            "resume_at": row.resume_at.isoformat() if waiting and row.resume_at else None,
             # 写操作要员工在私聊里点确认卡：任务结束不等于数据已经写进业务系统。
             "writes": await writes.view(session, row),
         }

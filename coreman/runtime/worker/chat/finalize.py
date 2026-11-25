@@ -73,6 +73,25 @@ class FinalizeStage(ChatStageBase):
             return text[: -len(done)] + note + done
         return text + note
 
+    async def _queue_for_quota(
+        self, session: AsyncSession, ctx: TaskContext, pre: Prepared, verdict: Verdict
+    ) -> Verdict:
+        """业务系统发起的任务撞了额度：同一会话里另排一轮，到额度重置时用原内容重跑。"""
+        if not verdict.final_text or not is_rate_limited(verdict.final_text):
+            return verdict
+        from coreman.core.api_tasks import quota
+        from coreman.core.db.models import ApiTask
+
+        raw = ctx.task.payload.get("api_task_id")
+        row = await session.get(ApiTask, uuid.UUID(str(raw)), with_for_update=True) if raw else None
+        if row is None or row.task_id != ctx.task.id:
+            return verdict
+        now = datetime.now(UTC)
+        relay = await session.get(RelayServer, pre.relay.id, populate_existing=True)
+        at = await quota.requeue(session, ctx.task, row, relay, now)
+        note = quota.notice(at, now) if at is not None else "\n\n" + quota.EXPIRED_MESSAGE
+        return replace(verdict, final_text=verdict.final_text + note)
+
     async def _postprocess_rate_limit(
         self, ctx: TaskContext, pre: Prepared, verdict: Verdict
     ) -> tuple[Verdict, dict[str, Any] | None]:
@@ -81,6 +100,10 @@ class FinalizeStage(ChatStageBase):
         取消 / 超时那几路不进来：用户根本没拿到模型的回答，一张额度表帮不上任何忙。
         """
         if verdict.log_status not in ("success", "error") or not verdict.final_text:
+            return verdict, None
+        if ctx.task.payload.get("api_client"):
+            # 业务系统发起的任务撞额度时排队重跑（见 `_queue_for_quota`），不给额度表和切换卡：
+            # 切换是整个 AI 员工换机，会打断别人正在用的上下文。
             return verdict, None
         now = datetime.now(UTC)
         limited = is_rate_limited(verdict.final_text)
@@ -238,6 +261,8 @@ class FinalizeStage(ChatStageBase):
                 only_active=True,
                 bot_id=ctx.task.bot_id,
             )
+            if owned and ctx.task.payload.get("api_client"):
+                verdict = await self._queue_for_quota(session, ctx, pre, verdict)
             # 流里收到了 background 帧、请求也没被我们断开：进程已经在后台阶段，不论这一轮怎么
             # 收尾都要记下来，否则进程没人看着、本人下一条消息也会被写进一个平台不知道的进程。
             run = (

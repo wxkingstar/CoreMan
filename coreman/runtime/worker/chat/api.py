@@ -36,14 +36,20 @@ from coreman.runtime.worker.context import TaskContext
 
 
 async def _refuse(
-    session: AsyncSession, ctx: TaskContext, bot: Bot | None, row: ApiTask | None, reason: str
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot | None,
+    row: ApiTask | None,
+    reason: str,
+    *,
+    error_code: str = "api_unavailable",
 ) -> None:
     """这一轮不做：任务记失败，承接会话里说一句原因（会话里已经有那句「通过 API 发起」）。"""
     await tasks.finish(
         session,
         ctx.task.id,
         status="failed",
-        error_code="api_unavailable",
+        error_code=error_code,
         error_message=reason,
         bot_id=ctx.task.bot_id,
     )
@@ -174,6 +180,8 @@ async def resolve(
     if reason is not None or relay is None:
         await _refuse(session, ctx, bot, row, reason or "AI 员工的运行时不可用")
         return None
+    if row.client_key is not None and await _wait_for_quota(session, ctx, bot, row, relay):
+        return None
     parts = [p for p in (event.payload.get("parts") or []) if isinstance(p, dict)]
     if row.client_key is not None and row.image_ids:
         # 图片多时只把前几张直接给模型，其余换成开轮这一刻签的下载链接。
@@ -195,6 +203,28 @@ async def resolve(
         message_type_of(parts),
     )
     return intake, relay, parts
+
+
+async def _wait_for_quota(
+    session: AsyncSession, ctx: TaskContext, bot: Bot, row: ApiTask, relay: RelayServer
+) -> bool:
+    """业务系统发起的任务：已知运行时额度用完就不开轮，放回队列等重置，员工那边什么都不发。
+
+    不换运行时：换是整个 AI 员工换机，会打断别人正在用的上下文。返回是否已经处理掉这一轮。"""
+    from coreman.core.api_tasks import quota
+    from coreman.core.timeutils import utcnow
+
+    now = utcnow()
+    until = quota.exhausted_until(relay, now)
+    if until is None:
+        # 等到了（或额度本来就够）：这一轮照常开，不再显示预计时间。
+        row.resume_at = None
+        return False
+    if quota.expired(row, now):
+        await _refuse(session, ctx, bot, row, quota.EXPIRED_MESSAGE, error_code=quota.EXPIRED_CODE)
+        return True
+    quota.mark_waiting(row, until, now)
+    return await tasks.defer(session, ctx.task.id, seconds=(until - now).total_seconds())
 
 
 async def note(session: AsyncSession, ctx: TaskContext) -> str | None:
