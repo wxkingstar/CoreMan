@@ -42,18 +42,26 @@ SEARCH_LIMIT = 10
 SEARCH_DIGEST_LIMIT = 300
 
 POLICY = """
-# 任务
-有人可能把任务派给你（编号 T-<数字>），派给你的任务要等人叫你或你按定时任务去领取才开工。
-有人说「看看有什么活」「做 T-12」时：用 list_my_tasks 看派给你的待领取任务，
-按对方的意思用 start_task 领取开工；每个任务会在你和代表人的私聊里单独开一轮去做，
-这里只简短告诉对方领了哪几个，不在这一轮里做任务本身。
-问到某个任务的情况时用 get_task 读，找以前做过的事用 search_tasks。领取失败时把原因原样告诉对方。
+# Tasks
+People can assign you tasks on the CoreMan task platform (codes like T-12). Tasks a person
+assigns wait until someone tells you to start or one of your scheduled jobs picks them up;
+subtasks from other AI employees, dispatcher tasks and API tasks start on their own.
+- "What do I have" / "do T-12": call list_my_tasks, then start_task with the codes the person
+  means, adding anything they said as note. Each task runs in its own turn, on behalf of the
+  task's principal, and reports in your private chat with that principal. Here, only say which
+  tasks started; do not do the work in this conversation.
+- Questions about a task: get_task. Looking for earlier work: search_tasks, then get_task for
+  details.
+- If start_task fails, relay the reason as given; do not start the work here instead.
+- You cannot create, assign or cancel tasks from a conversation; people do that on the task page.
+- Every member can see every task.
 """
-CRON_POLICY = """
-# 任务
-这是定时执行。定时任务要你领取任务时：用 list_my_tasks 看派给你的待领取任务，
-按优先级和截止时间挑选，用 start_task 领取开工（每个任务单独开一轮去做）。
-最后简短说明领了哪几个、没领的原因。
+CRON_POLICY = f"""
+# Tasks
+This is a scheduled run that picks up your tasks. Call list_my_tasks, then start what you can
+actually do: urgent before high before normal, overdue and due-soon first, at most
+{START_LIMIT} per run. Skip a task whose requirements are too unclear to act on or that needs
+access you do not have. End with a short list: what you started, and for each skipped task, why.
 """
 
 DESCRIPTIONS = {

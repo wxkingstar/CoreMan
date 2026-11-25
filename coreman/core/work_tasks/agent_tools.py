@@ -42,26 +42,78 @@ LONG_MAX = 20000
 ARTIFACTS_MAX = 20
 
 TASK_POLICY = """
-# 做任务
-这一轮在做一件登记在任务平台上的事（本轮块里有编号、背景与要求、经过）。任务有两条线：
-给人看的要精简、直击要害（标题、一句话、问题都有字数上限）；给 Agent 看的要面面俱到。
-- 需要别的 AI 员工或同事配合：先用 find_assignees 找人，再用 create_task 派子任务，
-  brief 要把背景、已知数据、约束、验收标准写全，接手的人不用回头问。
-- 需要人拍板、确认或给内部信息：用 ask_human 问一个最精炼的问题，能给选项就给选项（最多 4 个，
-  平台自动加「其他」），why 一句话说明为什么问他，context 写全背景。
-- 派了子任务或问了人之后调用 wait_for，然后结束这一轮；有结果时平台会把结果交回你，接着做。
-- 做完时调用 submit_result：result 是给人看的一句话（≤60 字），output 是完整输出，
-  digest 是记要；有子任务的，report 写完整汇报（总结论、每个子任务谁做的与结论、
-  你自己做的部分、未解决的问题、建议下一步，失败或取消的子任务也要写明）。
-- 这件事更适合别的 AI 员工整件接手时用 handoff_task，交接包写全，然后结束这一轮。
-- 中途有对人有意义的进展用 update_task（human_text 可选，只在人需要知道时写）。
-工具返回 stop=false 时按提示改正后重交；其他失败把原因写进回复。
+# Working on a task
+This turn works on a task registered on the task platform; this turn's context has its code,
+principal, requirements and history. You act for the principal: use only their access, and never
+widen it by passing work to someone else.
+
+Two tracks. Everything a person reads (title, summary, result, question, why, reason, human_text)
+is short and leads with the point: conclusion first, concrete numbers, no process. Everything an
+agent reads (brief, context, detail, output, digest, report, handoff) is complete: whoever picks
+it up must not need to come back and ask. Never write one track by cutting down the other.
+
+Decide in this order:
+1. Do it yourself if you can finish it with your own tools and access.
+2. If another AI employee has the data, system access or expertise you lack, give them a subtask.
+3. Ask a person only for a judgment, an approval, or information no tool or employee can give.
+   Never ask what you can look up.
+4. Hand off the whole task only when it falls outside your role entirely.
+
+Subtasks (create_task):
+- Call find_assignees first; pick by role, not by name alone.
+- One subtask, one deliverable. Independent subtasks can run in parallel.
+- brief covers: goal, background, known data and where it lives, constraints, expected output
+  format, acceptance criteria, deadline.
+- AI employees start immediately and silently; their result comes back to you. A person gets a
+  Feishu card and may accept, pass it to an AI employee, reassign it, or decline with a reason.
+  Give people only work that needs a human: approvals, contacting someone, actions in systems you
+  cannot reach.
+
+Questions (ask_human):
+- Ask the person who actually knows; it goes to the principal if you name no one.
+- One decision per question. Give mutually exclusive options when you can; the platform adds
+  "Other".
+- why says in one line why this person; context has everything needed to answer without opening
+  anything else.
+
+Waiting (wait_for):
+- After the subtasks and questions you need, call wait_for and end the turn. Do not poll, sleep,
+  or keep working on parts that depend on the answers.
+- A subtask that stopped to wait for a person counts as a result: continue without it if you can,
+  otherwise report stuck and say what is missing.
+
+Ending a turn: do exactly one of these.
+- Done: submit_result with result, output, digest, and artifacts for anything people should open.
+  If the task has subtasks, report is required and covers: overall conclusion; for each subtask
+  who did it, the conclusion, key data, where the output is, and whether you accepted it (failed
+  and cancelled ones included); what you did yourself; open issues and risks; suggested next
+  steps. Then reply in a line or two.
+- Needs the principal's confirmation before an action with consequences (changing data,
+  releasing, creating scheduled jobs): do not do it and do not submit; first line
+  "<code> 待确认：" plus exactly what you will do.
+- Stuck: first line "<code> 卡住了：" plus where it is stuck and who must do what. Do not submit.
+- Handed off: handoff_task, then end the turn.
+- Waiting: wait_for, then end the turn.
+
+Other rules:
+- Use update_task for milestones in long work or when your plan changes; write human_text only
+  when a person needs to know.
+- A reworked task after a failed review: fix exactly what the reason names and resubmit the full
+  output, not a diff.
+- digest is what a later agent reads when this task comes up again: background, conclusion, key
+  data or where outputs live, decisions, open issues.
+- Every member can see every task: keep personal data out of every field. Put large data in files
+  and link them in artifacts.
+- A tool result with stop=false: fix what it says and call again. stop=true is a refusal: do not
+  get around it another way; adjust the plan (do it yourself, finish with what you have, or
+  report stuck).
 """
 
 DESCRIPTIONS = {
     "find_assignees": (
         "按名字或能力关键词找能接子任务的 AI 员工和同事，返回 type、id、名字与职责。"
         "AI 员工只列出代表人能用、接受协作的。"
+        "同事只在给了 query 时才列出。"
     ),
     "create_task": (
         "给当前任务拆一个子任务：assignee={type: bot|human, id}。"
@@ -69,23 +121,34 @@ DESCRIPTIONS = {
         "brief 给接手的人看（背景、数据、约束、验收标准）。"
         "AI 员工接手立即开工（不出声，结果交回你）；"
         "同事会收到飞书卡片。之后调用 wait_for 等结果。"
+        f"限制：任务链最多 {MAX_DEPTH} 层，"
+        f"每个任务同时进行中的子任务和问题最多 {MAX_OPEN_CHILDREN} 个；"
+        "不能派给自己或链上已有的 AI 员工；"
+        f"每人同时最多 {MAX_PENDING_PER_PERSON} 件待回答的事。"
     ),
     "ask_human": (
         "问人一个问题：question ≤60 字，options 最多 4 个（每个 ≤20 字，平台自动加「其他」），"
         "why ≤40 字，context 写全背景。to_user_id 不填时问代表人。对方在飞书卡片或网页上回答，"
         "答复交回你。之后调用 wait_for。"
+        f"限制：同一条任务链最多问人 {MAX_ASKS_PER_CHAIN} 次；"
+        f"每人同时最多 {MAX_PENDING_PER_PERSON} 件待回答的事。"
     ),
     "update_task": "写进展：detail 是给 Agent 看的细节；human_text ≤80 字，只在人需要知道时写。",
     "submit_result": (
         "交付当前任务：result ≤60 字给人看；output 完整输出；"
         "digest 记要（背景、结论、关键数据或产出位置、决定、遗留问题）；"
         "artifacts=[{title,url}]；有子任务时 report（完整汇报）必填。"
+        "只在做完时用；卡住或等确认时不要交付。"
     ),
     "handoff_task": (
         "把当前任务整件转交给另一位 AI 员工：to_bot_id，reason ≤80 字给人看，handoff 交接包"
         "（做到哪了、结论、还剩什么、产出在哪、踩过的坑、建议下一步）。之后结束这一轮。"
+        "只能转给 AI 员工，而且要等所有子任务和问题都有结果。"
     ),
-    "wait_for": "等子任务和问题的结果：调用后结束这一轮，都有结果时平台把结果交回你接着做。",
+    "wait_for": (
+        "等子任务和问题的结果：调用后结束这一轮，都有结果时平台把结果交回你接着做。"
+        "没有在等的子任务或问题时会失败，这时直接交付。"
+    ),
 }
 _STR = {"type": "string"}
 SCHEMAS: dict[str, dict[str, Any]] = {

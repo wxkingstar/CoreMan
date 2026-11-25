@@ -19,6 +19,8 @@ from coreman.core.prompting.defaults import (
     PLATFORM_RULES,
 )
 from coreman.core.prompting.system_prompt import PromptSegments, build_system_prompt
+from coreman.core.work_tasks import agent_tools as work_task_agent_tools
+from coreman.core.work_tasks import tools as work_task_tools
 from coreman.runtime.worker.chat import (
     collaboration,
     credentials,
@@ -121,6 +123,9 @@ def _capability_texts() -> dict[str, str]:
         "credentials": credentials.guidance("chat") + credentials.guidance("cron"),
         "feishu": feishu,
         "wecom": wecom,
+        "work_tasks": work_task_tools.POLICY
+        + work_task_tools.CRON_POLICY
+        + work_task_agent_tools.TASK_POLICY,
     }
 
 
