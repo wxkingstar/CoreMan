@@ -82,11 +82,11 @@ def client_trigger_text(user: User, client_name: str, prompt: str, images: int =
 async def _bot_for(
     session: AsyncSession, bot_ids: list[uuid.UUID], user: User, key: str, denied: str
 ) -> Bot:
-    bot = await _bot_by_key(session, key)
+    bot = await bot_by_key(session, key)
     return await check_bot(session, bot_ids, bot, user, denied)
 
 
-async def _bot_by_key(session: AsyncSession, key: str) -> Bot:
+async def bot_by_key(session: AsyncSession, key: str) -> Bot:
     bot = await session.scalar(select(Bot).where(Bot.bot_key == key))
     if bot is None:
         raise TokenError(404, "AI 员工不存在")
@@ -434,7 +434,7 @@ async def create_for_client(
         raise TokenError(422, f"prompt 须非空且不超过 {PROMPT_MAX} 个字符")
     from coreman.core.api_tasks import groups
 
-    target_bot = await _bot_by_key(session, bot_key)
+    target_bot = await bot_by_key(session, bot_key)
     routes = await groups.routes_for(session, client.app_key, target_bot.id)
     if routes:
         return await groups.create(

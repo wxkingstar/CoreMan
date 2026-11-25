@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import time
+import uuid
+
 from sqlalchemy import select
 
 from coreman.core.api_tasks import groups
+from coreman.core.auth.signatures import sign_request
 from coreman.core.db.models import (
     ApiClient,
     ApiClientGroupRoute,
+    ApiTaskUpload,
     AuditLog,
     BotAlertSource,
     User,
@@ -145,3 +151,42 @@ async def test_full_queue_answers_429_queue_full(client, db_session, monkeypatch
     full = await client.post("/api/infra/tasks/run", json={"bot_key": "sales_bot", "prompt": "2"})
     assert full.status_code == 429
     assert full.json()["errors"] == [{"type": "queue_full"}]
+
+
+async def test_group_mode_uploads_belong_to_the_service_account(client, db_session):
+
+    bot, svc, _ = await _setup(client, db_session)
+    db_session.add(
+        ApiClientGroupRoute(
+            client_key="monitor", bot_id=bot.id, chat_id="oc_alerts", service_user_id=svc.id
+        )
+    )
+    await db_session.commit()
+    path = "/api/infra/tasks/uploads"
+    data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+    async def upload(fields):  # type: ignore[no-untyped-def]
+        ts = str(int(time.time()))
+        headers = {
+            "X-App-Key": "monitor",
+            "X-Timestamp": ts,
+            "X-Signature": sign_request("POST", path, fields, ts, "monitor", "client-secret"),
+        }
+        return await client.post(
+            path, data=fields, files={"file": ("a.png", data, "image/png")}, headers=headers
+        )
+
+    sha = hashlib.sha256(data).hexdigest()
+    with_user = await upload({"user": "alice", "bot_key": "sales_bot", "sha256": sha})
+    assert with_user.status_code == 422
+    done = await upload({"bot_key": "sales_bot", "sha256": sha})
+    assert done.status_code == 201, done.text
+    upload_id = done.json()["data"]["upload_id"]
+    row = await db_session.get(ApiTaskUpload, uuid.UUID(upload_id))
+    assert row.user_id == svc.id and row.client_key == "monitor"
+    client.auth = Signed("monitor", "client-secret")
+    created = await client.post(
+        "/api/infra/tasks/run",
+        json={"bot_key": "sales_bot", "prompt": "看看这张图", "images": [upload_id]},
+    )
+    assert created.status_code == 202, created.text

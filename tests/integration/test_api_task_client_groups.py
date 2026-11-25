@@ -100,14 +100,68 @@ async def test_runs_as_the_service_account_in_the_group_main_session(db_engine, 
     assert view["status"] == "succeeded" and "你好，世界" in view["reply"]
 
 
-async def test_subject_and_images_are_refused_in_group_mode(db_session):
+async def test_subject_is_refused_in_group_mode(db_session):
     _, _, client = await _setup(db_session)
     with pytest.raises(TokenError) as with_user:
         await _create(db_session, client, subject="alice")
     assert with_user.value.status == 422 and "user" in with_user.value.message
-    with pytest.raises(TokenError) as with_images:
-        await _create(db_session, client, images=[client.bot_ids[0]])
-    assert with_images.value.status == 422
+
+
+async def _images(session, client, owner, count, salt=b""):  # type: ignore[no-untyped-def]
+    from coreman.core.api_tasks import uploads
+
+    ids = []
+    for index in range(count):
+        data = b"\x89PNG\r\n\x1a\n" + salt + index.to_bytes(4, "big") * 8
+        row = await uploads.save(session, client_key=client.app_key, user_id=owner.id, data=data)
+        ids.append(row.id)
+    await session.commit()
+    return ids
+
+
+async def test_images_go_into_the_group_turn_in_order(db_engine, db_session):
+    _, svc, client = await _setup(db_session)
+    ids = await _images(db_session, client, svc, 2)
+    row, created = await _create(db_session, client, images=list(reversed(ids)))
+    assert created and row.image_ids == list(reversed(ids))
+    trigger = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"api-task:{row.id}:trigger")
+    )
+    assert "（附 2 张图片）" in trigger.payload["markdown"]
+    await _trigger_sent(db_session, row)
+    task = await _claim(db_session)
+    assert task.session_key == GROUP
+    fake = await _run(db_engine, task)
+    content = fake.requests[0]["messages"][1]["content"]
+    images = [p for p in content if p.get("type") == "image_url"]
+    # 从上传记录里取到，按请求里的顺序进这一轮。
+    assert len(images) == 2
+    assert all(i["image_url"]["url"].startswith("data:image/png;base64,") for i in images)
+
+
+async def test_uploads_of_another_member_cannot_be_claimed(db_session):
+    _, _, client = await _setup(db_session)
+    member = await db_session.scalar(select(User).where(User.login_name == "u-alice"))
+    theirs = await _images(db_session, client, member, 1)
+    with pytest.raises(TokenError) as foreign:
+        await _create(db_session, client, images=theirs)
+    assert foreign.value.status == 404
+
+
+async def test_request_id_replay_counts_the_images(db_session):
+    _, svc, client = await _setup(db_session)
+    ids = await _images(db_session, client, svc, 2)
+    first, created = await _create(db_session, client, request_id="alert-img", images=ids)
+    again, replayed = await _create(db_session, client, request_id="alert-img", images=ids)
+    assert created and not replayed and again.id == first.id
+    with pytest.raises(TokenError) as changed:
+        await _create(db_session, client, request_id="alert-img", images=ids[:1])
+    assert changed.value.status == 409
+    # 不带 request_id：同样的内容和图片还没做完，返回原来那条；换了图片就新建。
+    same, fresh = await _create(db_session, client, images=ids)
+    assert not fresh and same.id == first.id
+    other, fresh = await _create(db_session, client, images=ids[:1])
+    assert fresh and other.id != first.id
 
 
 async def test_chat_id_picks_the_group_when_several_are_configured(db_session):

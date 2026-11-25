@@ -178,11 +178,21 @@ async def upload_client_image(
     client: ApiClient = Depends(tasks_upload_client),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """一次一张：表单字段 `user`、`sha256`（都在签名里）和文件 `file`。"""
+    """一次一张：表单字段 `user`、`sha256`（都在签名里）和文件 `file`。
+
+    群承接模式不带 `user`，改带 `bot_key`（多个承接群时再带 `chat_id`）：图片归配置里的服务
+    账号，发起时按同一个身份认领。"""
     form = await request.form()
     subject, digest, upload = form.get("user"), form.get("sha256"), form.get("file")
-    if not isinstance(subject, str) or not isinstance(digest, str) or isinstance(upload, str):
-        raise ApiError(422, 422, "需要表单字段 user、sha256 和文件 file")
+    bot_key, chat_id = form.get("bot_key"), form.get("chat_id")
+    group = subject is None and isinstance(bot_key, str) and bool(bot_key)
+    if (
+        not (isinstance(subject, str) or group)
+        or not isinstance(digest, str)
+        or isinstance(upload, str)
+        or (chat_id is not None and not isinstance(chat_id, str))
+    ):
+        raise ApiError(422, 422, "需要表单字段 user（群承接模式为 bot_key）、sha256 和文件 file")
     if upload is None:
         raise ApiError(422, 422, "需要文件 file")
     data = await upload.read(uploads.MAX_BYTES + 1)
@@ -192,7 +202,18 @@ async def upload_client_image(
     if hashlib.sha256(data).hexdigest() != digest.strip().lower():
         raise ApiError(401, 401, "接口签名无效或已过期")
     try:
-        user = await service.resolve_member(session, subject)
+        if group:
+            assert isinstance(bot_key, str)
+            user = await groups.upload_owner(
+                session, client, bot_key, chat_id if isinstance(chat_id, str) else None
+            )
+        else:
+            assert isinstance(subject, str)
+            if isinstance(bot_key, str) and await groups.routes_for(
+                session, client.app_key, (await service.bot_by_key(session, bot_key)).id
+            ):
+                raise TokenError(422, "这个 AI 员工走群承接模式，上传图片不能带 user")
+            user = await service.resolve_member(session, subject)
         row = await uploads.save(session, client_key=client.app_key, user_id=user.id, data=data)
     except TokenError as exc:
         await session.rollback()

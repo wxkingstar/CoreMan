@@ -77,11 +77,12 @@ def speaker(route: ApiClientGroupRoute, user: User) -> Speaker:
     return Speaker(f"{SPEAKER_PREFIX}{route.id}", user.id, user.login_name, user.display_name)
 
 
-def trigger_text(client_name: str, prompt: str) -> str:
-    """群里的第一句：在哪个系统里发起、要做什么。"""
+def trigger_text(client_name: str, prompt: str, images: int = 0) -> str:
+    """群里的第一句：在哪个系统里发起、要做什么、附了几张图。"""
     body = prompt if len(prompt) <= PREVIEW else prompt[:PREVIEW] + f"…（共 {len(prompt)} 字）"
     quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in body.splitlines())
-    return f"在「{client_name}」里发起\n{quoted}"
+    attached = f"（附 {images} 张图片）" if images else ""
+    return f"在「{client_name}」里发起{attached}\n{quoted}"
 
 
 def _pick(routes: list[ApiClientGroupRoute], chat_id: str | None) -> ApiClientGroupRoute:
@@ -133,14 +134,14 @@ async def create(
             422,
             "这个调用方驱动该 AI 员工走群承接模式，执行身份固定为配置的服务账号，请求里不能带 user",
         )
-    if images:
-        raise TokenError(422, "群承接模式不支持图片")
     route = _pick(routes, chat_id)
     user = await session.get(User, route.service_user_id, populate_existing=True)
     if user is None or not service_usable(user):
         raise TokenError(409, "群承接配置的服务账号不存在、已停用或不是服务账号")
     await service.check_bot(session, client.bot_ids, bot, None, "调用方没有授权驱动该 AI 员工")
-    fingerprint: tuple[Any, ...] = (user.id, bot.id, prompt, [])
+    # 和私聊模式同一口径：图片按顺序去重后算进幂等指纹和同内容去重。
+    wanted = list(dict.fromkeys(images or []))
+    fingerprint: tuple[Any, ...] = (user.id, bot.id, prompt, wanted)
     if request_id is not None:
         replay = await service.client_replay(session, client, request_id, fingerprint)
         if replay is not None:
@@ -157,7 +158,7 @@ async def create(
         replay = await service.client_replay(session, client, request_id, fingerprint)
         if replay is not None:
             return replay, False
-    same = await service.open_duplicate(session, client, user.id, bot.id, prompt, [])
+    same = await service.open_duplicate(session, client, user.id, bot.id, prompt, wanted)
     if same is not None and same.chat_id == route.chat_id and is_group_row(same):
         return same, False
     if await queued(session, bot.id, route.chat_id) >= QUEUE_MAX:
@@ -166,9 +167,14 @@ async def create(
             f"这个群里已有 {QUEUE_MAX} 条 API 任务在排队，这条没有接收，请稍后再发起",
             QUEUE_FULL,
         )
+    from coreman.core.api_tasks import uploads
+
+    # 上传归属和私聊模式同一口径：(调用方, 执行身份)，这里的执行身份是配置里的服务账号。
+    image_ids = await uploads.claim(session, client_key=client.app_key, user_id=user.id, ids=wanted)
     row = ApiTask(
         id=uuid.uuid4(),
         client_key=client.app_key,
+        image_ids=image_ids,
         user_id=user.id,
         bot_id=bot.id,
         request_id=request_id,
@@ -184,11 +190,31 @@ async def create(
         bot=bot,
         user=user,
         pid="",
-        trigger=trigger_text(client.name, prompt),
+        trigger=trigger_text(client.name, prompt, len(image_ids)),
         session_key=route.chat_id,
         # 群里有人的轮次在跑就排在后面，不打断人。
         extra={"api_client": client.app_key, PAYLOAD_KEY: True, "serialize_session": True},
+        images=image_ids,
     ), True
+
+
+async def upload_owner(
+    session: AsyncSession, client: ApiClient, bot_key: str, chat_id: str | None
+) -> User:
+    """群承接模式上传图片的归属：这个调用方为这个 AI 员工配的（那个群的）服务账号。
+
+    和发起时认领用同一个执行身份，别的员工名下的上传认领不了。"""
+    from coreman.core.api_tasks import service
+
+    bot = await service.bot_by_key(session, bot_key)
+    routes = await routes_for(session, client.app_key, bot.id)
+    if not routes:
+        raise TokenError(422, "调用方没有为这个 AI 员工配置群承接，上传图片请带 user")
+    route = _pick(routes, chat_id)
+    user = await session.get(User, route.service_user_id)
+    if user is None or not service_usable(user):
+        raise TokenError(409, "群承接配置的服务账号不存在、已停用或不是服务账号")
+    return user
 
 
 async def options(session: AsyncSession, bot_id: uuid.UUID | None) -> dict[str, Any]:
