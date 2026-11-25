@@ -86,6 +86,7 @@ async def _recheck(
             operation_id=item["operation_id"],
             path_params=item.get("path_params"),
             query=item.get("query"),
+            headers=item.get("headers"),
             body=item.get("body"),
         )
         p = await proxy.prepare(pctx, args)

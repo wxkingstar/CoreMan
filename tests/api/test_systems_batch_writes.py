@@ -390,6 +390,17 @@ async def test_one_batch_per_turn_and_writes_only(client, app, db_session, fake)
         },
     )
     assert read["error"] == "batch_read_only"
+    refund = await call(
+        client,
+        auth,
+        "systems_call",
+        {
+            "system": "stock",
+            "operation_id": "refundSupplier",
+            "batch": {"upload_id": uploaded.json()["upload_id"]},
+        },
+    )
+    assert refund["error"] == "batch_single_only"
 
 
 async def test_turns_nobody_can_confirm_stage_nothing(client, app, db_session, fake) -> None:

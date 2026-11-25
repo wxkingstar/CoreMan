@@ -99,7 +99,7 @@ DESCRIPTIONS = {
         "Default first step: find operations by keywords, operationId, module name or alias "
         "(Chinese or English) across this turn's systems, then systems_describe the one you "
         "pick. Optionally filter by system, module or risk. Best matches first, up to 10 per "
-        "page, each with its module and why it matched; a marker such as [financial; 不代理] "
+        "page, each with its module and why it matched; a marker such as [write; 未开启写入] "
         "says the operation needs confirmation or cannot be called this turn."
     ),
     "systems_describe": (
@@ -206,7 +206,6 @@ def charge(
 
 
 CALL_NOTES = {
-    "risk_not_allowed": "不代理",
     "write_not_allowed": "未开启写入",
     "owner_turn_required": "所有者不在场",
     "confirmation_required": "需所有者当面确认",
@@ -245,8 +244,7 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
             return (
                 "平台代理：用 systems_call 调用。读操作直接执行；所有者不在场，write 调用后自动"
                 "提交给所有者审批，批准后由平台按原样执行并把结果交回本会话；destructive 不能做"
-                "（等所有者在场时由他在确认卡上确认）；financial 不代理，"
-                "需用户本人在业务系统里操作。"
+                "（等所有者在场时由他在确认卡上确认）；financial 同样不能做。"
             )
         if ctx.owner_absent:
             writes = "所有者不在场，不能做"
@@ -260,8 +258,8 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
             writes = "未开启，需管理员开启「允许写入」"
         return (
             "平台代理：用 systems_call 调用。读操作直接执行；"
-            f"写操作（write、destructive）{writes}；"
-            "financial 不代理，需用户本人在业务系统里操作。"
+            f"写操作（write、destructive、financial）{writes}；"
+            "financial 每次只能提交一个、单独一张确认卡，不能用 batch。"
         )
     return (
         "持令牌直接调用（按 systems_describe 的 curl 模板）。risk=read 直接执行；其余操作先向"
@@ -635,13 +633,18 @@ def call_template(
             "tool": "systems_call",
             "allowed": denied in (None, proxy.OWNER_APPROVAL),
             "message": "这个系统由平台代理调用：用 systems_call 传 system、operation_id 和参数"
-            "（path_params、query、body）。运行环境里没有这个系统的令牌，不要用 curl 直接调用。"
-            + ("" if denied is None else proxy.DENIALS[denied]),
+            "（path_params、query、headers、body）。运行环境里没有这个系统的令牌，"
+            "不要用 curl 直接调用。" + ("" if denied is None else proxy.DENIALS[denied]),
         }
         form = (op.get("validate") or {}).get("body") or {}
         if form.get("multipart") and form.get("files") and ctx.settings is not None:
             template["upload"] = uploads.instructions(ctx.settings.public_base_url, form["files"])
-        elif op["risk"] in proxy.CONFIRMED_RISKS and denied is None and ctx.settings is not None:
+        elif (
+            op["risk"] in proxy.CONFIRMED_RISKS
+            and op["risk"] not in proxy.SINGLE_RISKS
+            and denied is None
+            and ctx.settings is not None
+        ):
             template["batch"] = batch.instructions(ctx.settings.public_base_url, system, op["risk"])
         return template
     if ctx.anonymous:

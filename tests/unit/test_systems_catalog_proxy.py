@@ -9,7 +9,14 @@ import httpx
 import pytest
 
 from coreman.core.systems_catalog.compiler import compile_spec
-from coreman.core.systems_catalog.proxy import RESULT_MAX, Call, build_request, fit_json, shape
+from coreman.core.systems_catalog.proxy import (
+    RESULT_MAX,
+    Call,
+    build_headers,
+    build_request,
+    fit_json,
+    shape,
+)
 from coreman.core.systems_catalog.validate import Validator, coerce
 from tests.fakes.business_system import BASE_URL, SPEC_URL, extended_spec
 
@@ -154,3 +161,33 @@ def test_shape_text(cut_off: bool) -> None:
     text = response(200, b"plain " * 30000, {"Content-Type": "text/plain"})
     result = shape(text, text.content, cut_off, "tok")
     assert len(result["text"]) == RESULT_MAX and result["truncated"] is True
+
+
+def test_build_headers_only_takes_declared_one_line_values() -> None:
+    def header(name: str, required: bool = False) -> dict[str, object]:
+        return {"name": name, "in": "header", "required": required, "schema": {"type": "string"}}
+
+    op = {
+        "validate": {
+            "params": [
+                header("If-Match", required=True),
+                header("Idempotency-Key", required=True),
+                header("Authorization"),
+            ],
+            "body": None,
+        }
+    }
+
+    def run(headers: dict[str, object] | None) -> tuple[dict[str, str], list[str]]:
+        return build_headers(op, {}, Call(system="s", operation_id="x", headers=headers))
+
+    assert run({"if-match": "7"}) == ({"If-Match": "7"}, [])
+    assert run(None)[1] == ["headers.If-Match: required"]
+    # The platform owns the token and idempotency headers.
+    _, problems = run({"If-Match": "7", "Authorization": "Bearer x", "Idempotency-Key": "k"})
+    assert problems == [
+        "headers.Authorization: unknown parameter",
+        "headers.Idempotency-Key: unknown parameter",
+    ]
+    forged, problems = run({"If-Match": "7\r\nX-Evil: 1"})
+    assert forged == {} and problems[0].startswith("headers.If-Match: must be one line")

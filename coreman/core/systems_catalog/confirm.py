@@ -1,7 +1,8 @@
 """Writes through the platform proxy wait for the member's confirmation.
 
-`systems_call` on a `write`/`destructive` operation only stages the checked request. All writes a
-turn stages form one batch; when the turn ends the member gets one card listing them, rendered
+`systems_call` on a `write`/`destructive`/`financial` operation only stages the checked request.
+All writes a turn stages form one batch (a `financial` operation is alone on its card); when the
+turn ends the member gets one card listing them, rendered
 from the staged requests (the model's own explanation is shown separately, as unverified text).
 Confirming runs exactly what was staged, as the member, without the model in between (see
 `worker/systems_write_cards.py`). Turns nobody can confirm on the spot stage nothing.
@@ -25,7 +26,7 @@ from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem, Task
 from coreman.core.systems_catalog import uploads
 from coreman.core.systems_catalog.context import Context
-from coreman.core.systems_catalog.proxy import Call, Prepared, record
+from coreman.core.systems_catalog.proxy import SINGLE_RISKS, Call, Prepared, record
 from coreman.core.timeutils import aware_utc, utcnow
 
 KIND = "systems_write"
@@ -51,6 +52,8 @@ CARD_BYTES_MAX = 28_000
 SHOW_MAX = 80
 SHOW_CHANGES = 3
 _HIDDEN = ("Cc", "Cf", "Zl", "Zp")
+# Shown after the operation's name; such cards are red with a red confirm button.
+WARNINGS = {"destructive": "（删除后无法恢复）", "financial": "（涉及资金）"}
 DETAIL_TITLE = "查看详情（实际发出的请求）"
 AAD = "systems_write.v1"
 
@@ -65,6 +68,10 @@ UNAVAILABLE = (
 BATCH_FULL = (
     f"一次最多确认 {MAX_ITEMS} 个写操作，这一个没有加入。更多的修改请让用户在业务系统里用批量"
     "导入或批量编辑完成，不要拆成多轮逐条提交。"
+)
+FINANCIAL_ALONE = (
+    "涉及资金的操作（financial）只能单独一张确认卡、一次一个，这一个没有加入。先结束本轮让提问人"
+    "确认已暂存的部分，这项请提问人另发一条消息再做。"
 )
 BATCH_TOO_LONG = (
     "这批写操作的内容已经放不进一张确认卡，这一个没有加入。先结束本轮让用户确认已暂存的部分，"
@@ -97,6 +104,8 @@ def op_digest(op: dict[str, Any]) -> str:
 
 def _digest(args: Call) -> str:
     basis = [args.system, args.operation_id, args.path_params, args.query, args.body]
+    if args.headers:
+        basis.append(args.headers)
     return hashlib.sha256(
         json.dumps(basis, sort_keys=True, ensure_ascii=False, default=str).encode()
     ).hexdigest()[:32]
@@ -182,6 +191,10 @@ async def propose(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
     if len(items) >= MAX_ITEMS:
         await session.commit()
         return {"error": "confirmation_batch_full", "message": BATCH_FULL}
+    single = p.op["risk"] in SINGLE_RISKS
+    if items and (single or any(item["risk"] in SINGLE_RISKS for item in items)):
+        await session.commit()
+        return {"error": "confirmation_single_only", "message": FINANCIAL_ALONE}
     staged = len(items)
     items.append(
         {
@@ -195,6 +208,7 @@ async def propose(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
             "op_digest": op_digest(p.op),
             "path_params": args.path_params,
             "query": args.query,
+            "headers": p.headers or None,
             "body": args.body,
             "note": args.note.model_dump(exclude_none=True) if args.note else None,
             # What the card shows for each file; the request itself keeps the upload IDs.
@@ -259,7 +273,7 @@ def title(item: dict[str, Any]) -> str:
 
 
 def headline(index: int, item: dict[str, Any], *, numbered: bool = True) -> str:
-    mark = "（删除后无法恢复）" if item["risk"] == "destructive" else ""
+    mark = WARNINGS.get(item["risk"], "")
     return (f"{index}. " if numbered else "") + title(item) + mark
 
 
@@ -284,7 +298,7 @@ def _summary_lines(
     if numbered:
         lines = [headline(index, item)]
     else:
-        lines = ["⚠️ 删除后无法恢复"] if item["risk"] == "destructive" else []
+        lines = [f"⚠️ {WARNINGS[item['risk']].strip('（）')}"] if item["risk"] in WARNINGS else []
     indent = "   " if numbered else ""
     note = item.get("note") or {}
     if note.get("target"):
@@ -320,6 +334,8 @@ def _detail_lines(index: int, item: dict[str, Any], *, full: bool) -> list[str]:
         return lines
     for key, value in (item.get("query") or {}).items():
         lines.append(f"   ?{key} = {_value(value)}")
+    for key, value in (item.get("headers") or {}).items():
+        lines.append(f"   请求头 {key} = {_value(value)}")
     files = item.get("files") or []
     body = item.get("body")
     if files and isinstance(body, dict):
@@ -408,7 +424,7 @@ def _card(
             ],
         }
 
-    destructive = any(item["risk"] == "destructive" for item in items)
+    destructive = any(item["risk"] in WARNINGS for item in items)
     heading = f"请确认：{title(items[0])}" if len(items) == 1 else f"请确认 {len(items)} 项操作"
     systems = "、".join(dict.fromkeys(str(item["system_name"]) for item in items))
     return {

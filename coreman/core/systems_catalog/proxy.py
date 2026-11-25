@@ -2,9 +2,10 @@
 
 The platform calls the system on the member's behalf, so the token never reaches the runtime.
 Only operations in the catalog that the member can see are callable and arguments are validated
-against the operation's schemas. Reads run at once. `write` and `destructive` need the AI
-employee's grant to allow writes and are only staged: the member confirms them on a card and the
-platform then runs exactly what was staged (see `confirm`). `financial` is never proxied. The
+against the operation's schemas. Reads run at once. `write`, `destructive` and `financial` need
+the AI employee's grant to allow writes and are only staged: the member confirms them on a card and
+the platform then runs exactly what was staged (see `confirm`). A `financial` operation is staged
+one at a time, alone on its card, and never in a batch or without a card. The
 response is bounded and every call that reaches a policy decision is recorded without arguments,
 bodies or the token.
 
@@ -43,19 +44,34 @@ from coreman.core.systems_catalog.validate import Validator, coerce
 log = get_logger(__name__)
 
 CALL_TIMEOUT = 30
+# Reads may be slow queries (reports, analytics); writes keep the shorter limit.
+READ_TIMEOUT = 60
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 RESULT_MAX = 100_000
 ERROR_MAX = 4000
 LIST_STEPS = (200, 100, 50, 20, 10, 5, 2, 1)
-NEVER_PROXIED = ("financial",)
 # Staged for the member's confirmation instead of running at once.
-CONFIRMED_RISKS = ("write", "destructive")
+CONFIRMED_RISKS = ("write", "destructive", "financial")
+# Confirmed one at a time: never batched, never run without a card, alone on its card.
+SINGLE_RISKS = ("financial",)
 # Writes a turn may run without a confirmation card once the owner approved the turn in advance
 # (a personal assistant's dispatch with `allow_write`): as many as one card holds.
 PREAPPROVED_WRITES_MAX = 50
 # Header parameters the platform fills itself. A staged write keeps its value, so running it again
 # reaches the business system with the same key.
 IDEMPOTENCY_HEADERS = ("idempotency-key", "x-operation-request-id")
+# Header parameters the caller may never set: the platform owns them.
+RESERVED_HEADERS = (
+    "authorization",
+    "cookie",
+    "host",
+    "content-type",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "accept",
+)
+HEADER_VALUE_MAX = 1000
 DATA_TRUST = {"content_trust": "system_returned_data"}
 # Failures that happen before the request leaves: it certainly did not reach the business system.
 NOT_SENT = (
@@ -110,6 +126,10 @@ class Call(BaseModel):
     query: dict[str, Scalar | list[Scalar]] | None = Field(
         default=None, description="Query parameters"
     )
+    headers: dict[str, Scalar] | None = Field(
+        default=None,
+        description="Header parameters the operation declares, e.g. If-Match",
+    )
     body: Any = Field(
         default=None,
         description="Request body. For an upload or import operation, each file field takes "
@@ -133,7 +153,8 @@ DESCRIPTION = (
     "with systems_describe first. Reads run directly. Writes (write, destructive) need the AI "
     "employee's write permission and only join this turn's confirmation list: when the turn "
     "ends the member gets one card for all of them, and the platform runs them once confirmed. "
-    "Financial operations are never proxied. Operations that take files: upload each file first "
+    "A financial operation is confirmed on a card of its own, one at a time, never in a batch. "
+    "Operations that take files: upload each file first "
     "as systems_describe shows and pass its upload_id. Many items of one write operation: put "
     "them in a JSON Lines file, upload it and pass batch, one call for the whole batch."
 )
@@ -152,6 +173,8 @@ class Prepared:
     keys: list[str]
     # Multipart operations: (field, upload) for every file, in the order given.
     files: list[tuple[str, StoredObject]] = field(default_factory=list)
+    # Header parameters the operation declares, as given (e.g. If-Match).
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 def _text(value: Scalar) -> str:
@@ -193,8 +216,8 @@ def build_request(
             problems += validator.errors(value, param["schema"], f"query.{name}")
             values = value if isinstance(value, list) else [value]
             pairs += [(name, _text(v)) for v in values]
-        elif where == "header" and name.lower() in IDEMPOTENCY_HEADERS:
-            continue
+        elif where == "header" and name.lower() not in RESERVED_HEADERS:
+            continue  # idempotency keys are filled by `send`, the rest by `build_headers`
         elif param["required"]:
             problems.append(f"{name}: {where} parameters are not supported by systems_call")
     problems += [f"path_params.{name}: unknown parameter" for name in given_path]
@@ -215,6 +238,46 @@ def build_request(
     if "{" in path:
         problems.append("path: undeclared path parameter in the catalog")
     return path, pairs, args.body, problems
+
+
+def _control(ch: str) -> bool:
+    return ord(ch) < 32 or ord(ch) == 127
+
+
+def build_headers(
+    op: dict[str, Any], defs: dict[str, Any], args: Call
+) -> tuple[dict[str, str], list[str]]:
+    """(headers, problems): the header parameters the operation declares, checked like the rest."""
+    validator = Validator(defs)
+    declared = {
+        param["name"].lower(): param
+        for param in op["validate"]["params"]
+        if param["in"] == "header"
+        and param["name"].lower() not in IDEMPOTENCY_HEADERS
+        and param["name"].lower() not in RESERVED_HEADERS
+    }
+    given = {str(name).lower(): (name, value) for name, value in (args.headers or {}).items()}
+    problems = [
+        f"headers.{name}: unknown parameter"
+        for key, (name, _) in given.items()
+        if key not in declared
+    ]
+    headers: dict[str, str] = {}
+    for key, param in declared.items():
+        name = param["name"]
+        if key not in given:
+            if param["required"]:
+                problems.append(f"headers.{name}: required")
+            continue
+        value = coerce(given[key][1], param["schema"], validator)
+        problems += validator.errors(value, param["schema"], f"headers.{name}")
+        text = _text(value)
+        if not text or len(text) > HEADER_VALUE_MAX or any(_control(ch) for ch in text):
+            limit = HEADER_VALUE_MAX
+            problems.append(f"headers.{name}: must be one line of at most {limit} characters")
+            continue
+        headers[name] = text
+    return headers, problems
 
 
 def _form_problems(body: Any, spec: dict[str, Any], validator: Validator) -> list[str]:
@@ -429,29 +492,25 @@ def policy_error(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> st
     only in a personal assistant's unattended turn that may submit approvals, and only for systems
     whose grant allows writes. `destructive` stays refused while the owner is away.
     """
-    if op["risk"] in NEVER_PROXIED:
-        return "risk_not_allowed"
     if op["risk"] in CONFIRMED_RISKS and ctx.owner_absent:
         if op["risk"] == "write" and system.key in ctx.stageable:
             return OWNER_APPROVAL
         return "owner_turn_required"
     if op["risk"] in CONFIRMED_RISKS and system.key not in ctx.writable:
         return "write_not_allowed"
-    if op["risk"] == "destructive" and ctx.writes_preapproved:
-        # 所有者批准的是一句任务描述，这一轮没有人逐项确认：删了恢复不了的不在这里做。
+    if op["risk"] in ("destructive", *SINGLE_RISKS) and ctx.writes_preapproved:
+        # 所有者批准的是一句任务描述，这一轮没有人逐项确认：删了恢复不了的、动钱的不在这里做。
         return "confirmation_required"
     return None
 
 
 DENIALS = {
-    "risk_not_allowed": "涉及资金的操作（financial）不通过平台代理执行。"
-    "请告诉用户需要本人在业务系统里操作。",
     "write_not_allowed": "这个 AI 员工没有该系统的写入权限。需要管理员在 AI 员工的「系统权限」里"
     "为这个系统开启「允许写入」；在此之前不要尝试其他写入方式。",
     "owner_turn_required": "这一轮是个人助理在所有者不在场时跑的，业务系统只能查询，不能做写操作；"
     "把要做的写操作写进给所有者的结论里，由所有者在私聊里亲自让助理去做。",
     "confirmation_required": "这一轮是所有者批准后由个人助理调度来的，没有人能逐项确认："
-    "删除后无法恢复的操作（destructive）不在这种轮次里执行。把要做的事写进答复里，"
+    "删除后无法恢复的操作（destructive）和涉及资金的操作（financial）不在这种轮次里执行。把要做的事写进答复里，"
     "由所有者在私聊里亲自让助理去做，在确认卡上确认。",
     "preapproved_writes_exhausted": "这一轮已经执行了 {limit} 个写操作，达到所有者一次批准"
     "能做的上限。停止写入，把已经完成和还没做的部分如实写进答复里；更多的修改请所有者"
@@ -521,7 +580,10 @@ async def build(
     ctx: Context, system: BusinessSystem, loaded: Any, op: dict[str, Any], args: Call
 ) -> Prepared | dict[str, Any]:
     """The request of one call to an operation that passed `operation` and the policy."""
-    path, pairs, body, problems = build_request(op, loaded.compiled.get("defs") or {}, args)
+    defs = loaded.compiled.get("defs") or {}
+    path, pairs, body, problems = build_request(op, defs, args)
+    headers, header_problems = build_headers(op, defs, args)
+    problems += header_problems
     if problems:
         return {
             "error": "invalid_arguments",
@@ -546,7 +608,9 @@ async def build(
                 "按 systems_describe 的说明重新上传后再调用。",
             }
         files.append((name, row))
-    return Prepared(system, args.operation_id, op, url, body, idempotency_headers(op), files)
+    return Prepared(
+        system, args.operation_id, op, url, body, idempotency_headers(op), files, headers
+    )
 
 
 async def send(
@@ -566,7 +630,7 @@ async def send(
             "reason": exc.code,
             "message": "平台没能为当前用户签发这个系统的令牌，请联系管理员检查签发方和用户授权。",
         }
-    headers = {"Accept": "application/json", **fetch.auth_headers(token)}
+    headers = {**p.headers, "Accept": "application/json", **fetch.auth_headers(token)}
     value = key or str(uuid.uuid4())
     headers.update({name: value for name in p.keys})
     # With storage, a large body is read in full and kept as a file; otherwise only what fits.
@@ -574,7 +638,8 @@ async def send(
     started = time.monotonic()
     with tempfile.SpooledTemporaryFile(max_size=MAX_RESPONSE_BYTES) as spool:
         try:
-            async with fetch.client_for(p.url, timeout=CALL_TIMEOUT) as client:
+            timeout = READ_TIMEOUT if op["risk"] == "read" else CALL_TIMEOUT
+            async with fetch.client_for(p.url, timeout=timeout) as client:
                 if (op["validate"].get("body") or {}).get("multipart"):
                     sent: dict[str, Any] = {"files": await _form(ctx, p)}
                 else:
@@ -668,6 +733,7 @@ async def _stage(ctx: Context, p: Prepared, args: Call) -> dict[str, Any]:
         operation_id=p.operation_id,
         path_params=args.path_params,
         query=args.query,
+        headers=p.headers or None,
         body=p.body,
         url=str(p.url),
     )

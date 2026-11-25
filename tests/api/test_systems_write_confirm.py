@@ -55,6 +55,33 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> FakeBusinessSystem:
         }
     }
     system.routes[("POST", "/api/stock/adjust")] = adjust
+    matched: list[str | None] = []
+
+    def set_price(request: httpx.Request) -> httpx.Response:
+        matched.append(request.headers.get("if-match"))
+        return httpx.Response(200, json={"code": 0, "data": {"version": 13}})
+
+    system.spec["paths"]["/api/stock/price"] = {  # type: ignore[index]
+        "put": {
+            "operationId": "setPrice",
+            "tags": ["documents"],
+            "summary": "修改价格",
+            "x-permission": "stock:doc:write",
+            "parameters": [
+                {"name": "If-Match", "in": "header", "required": True, "schema": {"type": "string"}}
+            ],
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": {"type": "object"}}},
+            },
+            "responses": {"200": {"description": "OK"}},
+        }
+    }
+    system.routes[("PUT", "/api/stock/price")] = set_price
+    system.matched = matched  # type: ignore[attr-defined]
+    system.routes[("POST", "/api/stock/refunds")] = lambda request: httpx.Response(
+        200, json={"code": 0, "data": {"refunded": True}}
+    )
     system.routes[("POST", "/api/stock/documents/D1/cancel")] = lambda request: httpx.Response(
         200, json={"code": 0, "data": {"id": "D1", "status": "cancelled"}}
     )
@@ -569,3 +596,64 @@ async def test_no_response_is_an_unknown_outcome_not_a_failure(
     (follow,) = await resumed(db_session)
     assert "不要直接重做" in follow.payload[confirm.RESULT_KEY]
     assert (await batch(db_session)).state[confirm.RUN]["finished"] is True
+
+
+REFUND = {"system": "stock", "operation_id": "refundSupplier"}
+
+
+async def test_financial_runs_alone_after_confirmation_with_a_red_card(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    staged, other = await stage(client, app, task, user, REFUND, draft("SKU-1"))
+    assert staged["status"] == "pending_confirmation", staged
+    # A financial operation is confirmed on a card of its own.
+    assert other["error"] == "confirmation_single_only"
+    await release(app, task)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
+    assert card.payload["card"]["header"]["template"] == "red"
+    assert "涉及资金" in card.payload["card"]["body"]["elements"][0]["text"]["content"]
+    state = await batch(db_session)
+    assert state.state["count"] == 1
+    pressed = await press(db_session, bot, task, state.id)
+    assert await run_click(db_session, db_engine, pressed) == "systems_write_done"
+    assert posts(fake) == ["/api/stock/refunds"]
+    assert await outcomes(db_session) == [
+        ("refundSupplier", "proposed"),
+        ("refundSupplier", "confirmed_ok"),
+    ]
+
+
+async def test_financial_is_not_added_to_other_writes(client, app, db_session, fake) -> None:
+    _, user, task = await turn(db_session, app)
+    first, refund = await stage(client, app, task, user, draft("SKU-1"), REFUND)
+    assert first["status"] == "pending_confirmation"
+    assert refund["error"] == "confirmation_single_only"
+    assert (await batch(db_session)).state["count"] == 1
+
+
+async def test_declared_headers_are_staged_and_sent_as_confirmed(
+    client, app, db_session, db_engine, fake
+) -> None:
+    bot, user, task = await turn(db_session, app)
+    price = {"system": "stock", "operation_id": "setPrice", "body": {"price": 10}}
+    missing, unknown, staged = await stage(
+        client,
+        app,
+        task,
+        user,
+        price,
+        {**price, "headers": {"If-Match": "12", "X-Debug": "1"}},
+        {**price, "headers": {"if-match": "12"}},
+    )
+    assert "headers.If-Match: required" in missing["invalid"]
+    assert "headers.X-Debug: unknown parameter" in unknown["invalid"]
+    assert staged["status"] == "pending_confirmation", staged
+    await release(app, task)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
+    detail = card.payload["card"]["body"]["elements"][1]["elements"][0]["text"]["content"]
+    assert 'If-Match = "12"' in detail
+    state = await batch(db_session)
+    pressed = await press(db_session, bot, task, state.id)
+    assert await run_click(db_session, db_engine, pressed) == "systems_write_done"
+    assert fake.matched == ["12"]  # type: ignore[attr-defined]

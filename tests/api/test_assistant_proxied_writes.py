@@ -698,7 +698,7 @@ async def test_no_write_permission_no_approval(
     [
         # 所有者在场时 destructive 走确认卡；无人在场没人点卡，也不提审批，照旧拒绝。
         ("cancelDocument", "destructive", "owner_turn_required"),
-        ("refundSupplier", "financial", "risk_not_allowed"),
+        ("refundSupplier", "financial", "owner_turn_required"),
     ],
 )
 async def test_destructive_and_financial_are_never_staged(

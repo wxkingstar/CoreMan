@@ -100,6 +100,11 @@ async def test_an_approved_dispatch_never_deletes_and_writes_no_more_than_one_ca
         },
     )
     assert deleted["error"] == "confirmation_required" and "确认卡" in deleted["message"]
+    # 动钱的同样只能当面在确认卡上确认。
+    refund = await call(
+        client, approved, "systems_call", {"system": "stock", "operation_id": "refundSupplier"}
+    )
+    assert refund["error"] == "confirmation_required"
     for sku in ("SKU-1", "SKU-2"):
         written = await call(
             client, approved, "systems_call", {**WRITE, "body": {"sku": sku, "quantity": 1}}

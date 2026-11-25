@@ -89,8 +89,8 @@ class BotSystemGrant(Base):
     system_key: Mapped[str] = mapped_column(
         Text, ForeignKey("systems.key", ondelete="CASCADE"), primary_key=True
     )
-    # 平台代理调用（token_delivery=proxy）时是否允许 write 级操作；
-    # destructive、financial 一律不开放。
+    # 平台代理调用（token_delivery=proxy）时是否允许 write、destructive、financial 级操作
+    # （都要提问人在确认卡上确认）。
     allow_write: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     granted_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     granted_at: Mapped[datetime] = mapped_column(
