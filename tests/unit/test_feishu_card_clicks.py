@@ -31,6 +31,7 @@ def test_event_keys_match_the_cards_that_send_them() -> None:
     from coreman.core.feishu_personal import inflow
     from coreman.core.systems_catalog import batch as systems_batch
     from coreman.core.systems_catalog import confirm as systems
+    from coreman.core.systems_catalog import member_writes
     from coreman.runtime.worker import assistant_stop
 
     assert {
@@ -39,6 +40,7 @@ def test_event_keys_match_the_cards_that_send_them() -> None:
         cloud.CARD_EVENT,
         systems.CARD_EVENT,
         systems_batch.CARD_EVENT,
+        member_writes.CARD_EVENT,
     } == rb.WRITE_CARD_EVENTS
     assert systems.RESEND == "resend"
     assert set(rb.TOPIC_EVENTS) == {topics.NEW, topics.FORK}
@@ -82,6 +84,7 @@ def test_choice_card_keys_match() -> None:
         ({"event_key": "cloud_write", "level": "confirm:abc"}, "write_confirm"),
         ({"event_key": "feishu_group_write", "level": "cancel:abc"}, "write_cancel"),
         ({"event_key": "systems_write", "level": "resend:abc"}, "write_resend"),
+        ({"event_key": "member_write", "level": "confirm:abc"}, "write_confirm"),
         ({"event_key": "personal_schedule", "level": "confirm:abc"}, "schedule_confirm"),
         ({"event_key": "personal_schedule", "level": "cancel:abc"}, "schedule_cancel"),
         ({"event_key": "topic_new"}, "topic_new"),

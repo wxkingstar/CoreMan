@@ -95,8 +95,23 @@ def unseal(cipher: Cipher, state: InteractionState) -> list[dict[str, Any]]:
     return items
 
 
+CARD_REF_PREFIX = "personal:member-write:"
+
+
 def card_ref(state_id: uuid.UUID) -> str:
-    return f"personal:member-write:{state_id}"
+    return f"{CARD_REF_PREFIX}{state_id}"
+
+
+def parse_card_ref(task_id: str) -> uuid.UUID | None:
+    """The interaction state a card's `task_id` names, when it is a member-write card."""
+    if not task_id.startswith(CARD_REF_PREFIX):
+        return None
+    raw = task_id.removeprefix(CARD_REF_PREFIX)
+    try:
+        state_id = uuid.UUID(raw)
+    except ValueError:
+        return None
+    return state_id if str(state_id) == raw else None
 
 
 async def build_context(
@@ -311,6 +326,10 @@ async def result(ctx: Context, args: Result) -> dict[str, Any]:
         state_id = uuid.UUID(args.confirmation_id)
     except ValueError:
         state_id = None
+    # Read before the loop: the rollback below expires the member's ORM rows, and reading an
+    # expired attribute would lazy-load outside the greenlet (MissingGreenlet).
+    user_id = str(ctx.member.user.id)
+    grant_id = str(ctx.member.oauth_grant_id)
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
         state = (
@@ -321,8 +340,8 @@ async def result(ctx: Context, args: Result) -> dict[str, Any]:
         if (
             state is None
             or state.kind != KIND
-            or state.state.get("user_id") != str(ctx.member.user.id)
-            or state.state.get("grant_id") != str(ctx.member.oauth_grant_id)
+            or state.state.get("user_id") != user_id
+            or state.state.get("grant_id") != grant_id
         ):
             return {
                 "error": "confirmation_not_found",

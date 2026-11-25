@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from coreman.api.routers import systems_catalog as router
 from coreman.api.routers.systems_catalog import PUBLIC_PATH
@@ -24,17 +24,23 @@ from coreman.core.db.models import (
     OutboxItem,
     Setting,
     SystemCall,
+    Task,
     User,
     UserIdentity,
 )
 from coreman.core.db.models.oauth import OAuthClient, OAuthGrant
+from coreman.core.db.session import make_session_factory
 from coreman.core.oauth import server as oauth
 from coreman.core.systems_catalog import member_writes, service
 from coreman.core.timeutils import utcnow
 from coreman.core.work_tasks.cards import NOTIFIER_SETTING
+from coreman.runtime.gateway_feishu.inbound import normalize_event
+from coreman.runtime.gateway_feishu.reply_buttons import admit
 from coreman.runtime.worker import member_write_cards
+from coreman.runtime.worker.card_actions import CardActionHandler
 from tests.api.test_systems_catalog import bot_cipher, turn
 from tests.fakes.business_system import FakeBusinessSystem, install
+from tests.integration.worker_helpers import build_ctx
 
 
 @pytest.fixture
@@ -262,7 +268,7 @@ async def click(
 
 
 async def test_write_waits_for_the_members_click_on_the_card(
-    app: Any, db_session: AsyncSession, fake: FakeBusinessSystem
+    app: Any, db_session: AsyncSession, fake: FakeBusinessSystem, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bot, member, _, access = await setup(db_session)
     db_session.add(User(login_name="lisi", display_name="李四", email="lisi@example.test"))
@@ -293,8 +299,13 @@ async def test_write_waits_for_the_members_click_on_the_card(
         flat = str(card.payload["card"])
         assert "来自你本机的 Claude Code" in flat and "SKU-9 入库草稿" in flat
         assert card.payload["card"]["task_id"] == member_writes.card_ref(uuid.UUID(confirmation))
+        # Poll several times: each round rolls back the session, which must not lazy-load the
+        # member afterwards (MissingGreenlet, a 500).
+        monkeypatch.setattr(member_writes, "WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(member_writes, "POLL_SECONDS", 0.01)
         waiting = await call(client, "systems_call_result", {"confirmation_id": confirmation})
         assert waiting["status"] == "pending"
+        monkeypatch.setattr(member_writes, "WAIT_SECONDS", 0.0)
 
         # Someone else clicking does nothing; the member's click runs it once.
         assert await click(app, db_session, bot, confirmation, "confirm", who="ou_ls") == "ignored"
@@ -318,6 +329,76 @@ async def test_write_waits_for_the_members_click_on_the_card(
         select(OutboxItem).where(OutboxItem.kind == "card_update").order_by(OutboxItem.id.desc())
     )
     assert updated is not None and "已完成" in str(updated.payload["card"])
+
+
+def _buttons(node: Any) -> list[dict[str, Any]]:
+    if isinstance(node, dict):
+        found = [node] if node.get("tag") == "button" else []
+        return found + [b for v in node.values() for b in _buttons(v)]
+    if isinstance(node, list):
+        return [b for v in node for b in _buttons(v)]
+    return []
+
+
+async def test_confirm_click_runs_through_gateway_and_worker(
+    app: Any, db_session: AsyncSession, db_engine: AsyncEngine, fake: FakeBusinessSystem
+) -> None:
+    """The real path: the card's own button value, normalized and admitted by the Feishu gateway,
+    then run by the worker's card-action handler."""
+    bot, _, _, access = await setup(db_session)
+    body = {"system": "stock", "operation_id": "createDraft", "body": {"sku": "E2E", "quantity": 2}}
+    async with agent(app, access) as client:
+        confirmation = (await call(client, "systems_call", body))["confirmation_id"]
+        card = await db_session.scalar(
+            select(OutboxItem).where(OutboxItem.kind == "send", OutboxItem.bot_id == bot.id)
+        )
+        assert card is not None
+        card.status = "sent"
+        card.payload = {**card.payload, "_feishu_message_id": "om_member_card"}
+        await db_session.commit()
+        [value] = [
+            b["behaviors"][0]["value"]
+            for b in _buttons(card.payload["card"])
+            if str(b["behaviors"][0]["value"].get("level", "")).startswith("confirm:")
+        ]
+        raw = {
+            "header": {
+                "app_id": "cli_a",
+                "event_type": "card.action.trigger",
+                "event_id": "ev_member_confirm",
+                "tenant_key": "tenant",
+            },
+            "event": {
+                "operator": {"user_id": "ou_zs", "open_id": "ou_open_zs"},
+                "context": {"open_chat_id": "oc_dm_zs", "open_message_id": "om_member_card"},
+                "action": {"tag": "button", "value": value},
+            },
+        }
+        message = normalize_event(
+            raw,
+            bot_id=bot.id,
+            app_id="cli_a",
+            bot_open_id="ou_bot",
+            gateway_instance="gw",
+            now=datetime.now(UTC),
+        )
+        assert message is not None
+        factory = make_session_factory(db_engine)
+        async with factory() as session:
+            outcome = await admit(session, bot, message, lease_generation=1)
+            await session.commit()
+        assert outcome == "write_confirm"
+        task = await db_session.scalar(select(Task).where(Task.kind == "card_action"))
+        assert task is not None
+        task.status = "running"
+        await db_session.commit()
+        await CardActionHandler().run(build_ctx(db_engine, task))
+        finished = await db_session.get(Task, task.id, populate_existing=True)
+        assert finished is not None and finished.result == {"card": "member_write_ok"}
+        posts = [r for r in fake.requests if r.method == "POST"]
+        assert len(posts) == 1 and json.loads(posts[0].content) == body["body"]
+        done = await call(client, "systems_call_result", {"confirmation_id": confirmation})
+        assert done["status"] == "ok"
 
 
 async def test_cancel_and_revoked_grant(

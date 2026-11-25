@@ -244,6 +244,23 @@ def test_malformed_credential_task_id_is_ignored():
     assert normalize_event(raw, cipher=Cipher(b"\x07" * 32), **KW) is None
 
 
+def test_member_write_confirm_clicks_are_admitted():
+    # 成员本机发起的写操作，确认卡的 task_id 是 `personal:member-write:<uuid>`。
+    state_id = uuid.uuid4()
+    value = {
+        "task_id": f"personal:member-write:{state_id}",
+        "event_key": "member_write",
+        "level": f"confirm:{state_id}",
+    }
+    message = normalize_event(_click_event(value), **KW)
+    assert message is not None and message.kind == "card_action"
+    assert message.card_action["task_id"] == value["task_id"]
+    assert message.card_action["event_key"] == "member_write"
+    assert message.card_action["level"] == value["level"]
+    for bad in ("personal:member-write:not-a-uuid", f"personal:member-write:{state_id.hex}"):
+        assert normalize_event(_click_event({**value, "task_id": bad}), **KW) is None
+
+
 def test_group_observe_admits_unmentioned_group_messages():
     other = copy.deepcopy(RAW)
     other["event"]["message"]["mentions"] = []
