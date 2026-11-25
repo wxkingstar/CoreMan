@@ -248,6 +248,8 @@ export interface SettingsOut extends PromptSettings, Partial<AssistantPlatformSe
   group_observe_max_wait_seconds: number
   group_observe_bot_streak_limit: number
   busy_confirm_minutes: number
+  /** 任务平台发卡片用的飞书员工（编号，空串 = 不指定）：任务和哪位 AI 员工都无关时用它发。 */
+  work_task_notifier_bot_id: string
 }
 /** default_model 只读：PUT 带这个键后端会 422。 */
 export type SettingsPatch = Partial<Omit<SettingsOut, 'default_model'>>

@@ -5,7 +5,7 @@ import { useUnsavedChanges } from '@/composables/useUnsavedChanges'
 import { ElMessage } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settings } from '@/api/admin'
+import { bots, settings } from '@/api/admin'
 import AlertSettings from '@/components/AlertSettings.vue'
 import AssistantPlatformSettings from '@/components/AssistantPlatformSettings.vue'
 import NotificationSettings from '@/components/NotificationSettings.vue'
@@ -34,6 +34,7 @@ const KEYS = [
   'group_observe_max_wait_seconds',
   'group_observe_bot_streak_limit',
   'busy_confirm_minutes',
+  'work_task_notifier_bot_id',
   'prompt_org_context',
   'prompt_security_policy',
   'prompt_codex_contract',
@@ -62,6 +63,7 @@ function empty(): SettingsOut {
     group_observe_max_wait_seconds: 60,
     group_observe_bot_streak_limit: 3,
     busy_confirm_minutes: 10,
+    work_task_notifier_bot_id: '',
     prompt_org_context: '',
     prompt_security_policy: '',
     prompt_codex_contract: '',
@@ -82,6 +84,16 @@ useUnsavedChanges(() => initialized.value && Object.keys(changes()).length > 0)
 
 const loading = ref(false)
 const saving = ref(false)
+const notifierOptions = ref<{ id: string; name: string }[]>([])
+
+async function searchNotifier(keyword: string): Promise<void> {
+  try {
+    const page = await bots.list({ scope: 'all', platform: 'feishu', keyword, per_page: 50 })
+    notifierOptions.value = page.items.map(b => ({ id: b.id, name: b.name }))
+  } catch {
+    notifierOptions.value = []
+  }
+}
 
 function fail(e: unknown): void {
   // 422（设置项不能置空 / 关引导登录前先配登录应用）都是后端写好的中文，直接透传。
@@ -373,6 +385,30 @@ defineExpose({ form })
         />
         <div class="hint">
           {{ t('settings.busyConfirmHint') }}
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('settings.workTaskNotifier')">
+        <el-select
+          v-model="form.work_task_notifier_bot_id"
+          filterable
+          remote
+          clearable
+          :remote-method="searchNotifier"
+          :placeholder="t('settings.workTaskNotifierPlaceholder')"
+          data-test="work-task-notifier"
+          style="width: 280px"
+          @visible-change="(open: boolean) => open && searchNotifier('')"
+          @clear="form.work_task_notifier_bot_id = ''"
+        >
+          <el-option
+            v-for="bot in notifierOptions"
+            :key="bot.id"
+            :label="bot.name"
+            :value="bot.id"
+          />
+        </el-select>
+        <div class="hint">
+          {{ t('settings.workTaskNotifierHint') }}
         </div>
       </el-form-item>
 

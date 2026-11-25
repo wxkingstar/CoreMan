@@ -318,7 +318,7 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
         db_engine, db_session, monkeypatch, answer, mode="on"
     )
     (task,) = list(await db_session.scalars(select(WorkTask)))
-    assert task.status == "queued"
+    assert task.status == "waiting"
     assert task.tracked
     link = f"[{task.code}](http://localhost/work-tasks/{task.code})"  # 点开看任务页
     assert stream.final_text == f"@数据助手 查上周退货率（{link}）"  # 群里回一行
@@ -339,7 +339,7 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
     assert "口径按退货单数除以签收单数" in turn and f"「{link} 完成：」" in turn
     assert reply.reply_context["message_id"] == "om1"  # 回复发起人的原消息
     await db_session.refresh(task)
-    assert task.status == "done" and task.summary == f"{task.code} 完成：上周退货率 4.2%"
+    assert task.status == "done" and task.summary == "上周退货率 4.2%"
     kinds = [
         e.kind
         for e in await db_session.scalars(
@@ -363,7 +363,7 @@ async def test_simple_requests_say_who_took_it_without_a_task_code(
         db_engine, db_session, monkeypatch, answer, mode="on"
     )
     (task,) = list(await db_session.scalars(select(WorkTask)))
-    assert not task.tracked and task.status == "queued"  # 没写 track：照样交接、记下
+    assert not task.tracked and task.status == "waiting"  # 没写 track：照样交接、记下
     assert stream.final_text == "交给 @运维助手 了：说明白名单办理方式"  # 说交给谁，不带编号
     assert task.code not in stream.final_text
     assert decision.dispatch["said"] == stream.final_text
@@ -579,13 +579,15 @@ async def test_new_task_note_carries_results_of_related_finished_tasks(db_sessio
         )
     )
     running = await _untracked_task(db_session, assignee, first.created_by)
-    running.status = "running"
+    running.status = "in_progress"
     new = await _untracked_task(db_session, assignee, first.created_by, brief="加个渠道维度")
     new.related_codes = [done.code, running.code]
     await db_session.commit()
     handed = SimpleNamespace(task=SimpleNamespace(payload={"work_task_id": new.id}))
     text = await work.note(
-        db_session, handed, SimpleNamespace(session_key=dispatch.work_session_key(new.code))
+        db_session,
+        handed,
+        SimpleNamespace(session_key=dispatch.work_session_key(new.code), chat_type="group"),
     )
     assert "上周退货率 4.2%，主要是渠道 A" in text
     assert running.code not in text
@@ -594,7 +596,9 @@ async def test_new_task_note_carries_results_of_related_finished_tasks(db_sessio
     # 不是交接、是发起人接着问的那一轮：提醒员工问的可能是另一件事。
     asked = SimpleNamespace(task=SimpleNamespace(payload={}))
     text = await work.note(
-        db_session, asked, SimpleNamespace(session_key=dispatch.work_session_key(new.code))
+        db_session,
+        asked,
+        SimpleNamespace(session_key=dispatch.work_session_key(new.code), chat_type="group"),
     )
     assert "接着找你" in text
 

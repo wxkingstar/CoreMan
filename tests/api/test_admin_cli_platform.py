@@ -340,7 +340,7 @@ async def test_audit_stats_chats_and_tasks(cli, db_session):
     task = WorkTask(
         title="整理周报",
         summary="汇总本周数据",
-        status="running",
+        status="in_progress",
         platform="feishu",
         chat_id="oc_demo",
         requester_name="爱丽丝",
@@ -380,7 +380,7 @@ async def test_audit_stats_chats_and_tasks(cli, db_session):
     code, out, _ = await cli("chats", "stats", "--status", "success", "--as", "ops")
     assert code == 0 and "1200" in out
 
-    code, out, _ = await cli("tasks", "list", "--status", "running", "--as", "bob")
+    code, out, _ = await cli("tasks", "list", "--status", "in_progress", "--as", "bob")
     assert code == 0 and task.code in out and "整理周报" in out and "销售" in out
     code, out, _ = await cli("tasks", "show", task.code, "--as", "bob")
     assert code == 0 and "已分派" in out and "按模板整理" in out

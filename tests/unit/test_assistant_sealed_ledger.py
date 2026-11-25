@@ -38,6 +38,8 @@ ENTITY_SELECTS = {
     # 批量写操作的批次列表：个人助理不开放批量，没有封存的行；只出元数据
     "coreman/api/routers/system_batches.py": 1,
     "coreman/core/api_tasks/service.py": 1,  # session.scalar，自动还原
+    # 任务卡片的发送记录：只读 _feishu_message_id 与机器人；个人助理不接任务
+    "coreman/core/work_tasks/cards.py": 1,
     # 业务系统发起的任务里的写操作批次：显式还原后只读状态与业务系统、操作名
     "coreman/core/api_tasks/writes.py": 1,
     # 引用回复载入原任务：原任务会话第一轮和最后一轮的回复，session.scalar（自动还原）
@@ -167,6 +169,7 @@ RAW_STATEMENTS = {
 # 在已登记的文件里新增一条写语句同样会失败。
 WRITE_STATEMENTS = {
     "coreman/core/api_tasks/service.py": 1,  # 合成入站事件，载荷封存
+    "coreman/core/work_tasks/execute.py": 1,  # 任务开工的合成入站事件，载荷封存
     # 调度单：经 ORM 新建（flush 钩子封存目标员工与问题）
     "coreman/core/assistants/approvals/dispatching.py": 1,
     # 代理写操作的审批单：经 ORM 新建（flush 钩子封存完整请求）

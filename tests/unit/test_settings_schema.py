@@ -33,6 +33,7 @@ def test_patch_partial_and_bounds() -> None:
         "assistant_daily_turn_budget",
         "assistant_eligibility",
         "assistant_backends",
+        "work_task_notifier_bot_id",
         "prompt_org_context",
         "prompt_security_policy",
         "prompt_codex_contract",
