@@ -188,8 +188,13 @@ async def resolve(
         from coreman.core.api_tasks import uploads
         from coreman.core.timeutils import utcnow
 
-        parts = uploads.split_for_turn(
-            parts, cipher=ctx.cipher, base_url=ctx.public_base_url, now=utcnow()
+        parts = await uploads.split_for_turn(
+            session,
+            parts,
+            store=ctx.tmp_store,
+            cipher=ctx.cipher,
+            base_url=ctx.public_base_url,
+            now=utcnow(),
         )
     intake = Intake(
         bot,

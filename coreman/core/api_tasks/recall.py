@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from coreman.core.assistants.approvals.attachments import Store
 from coreman.core.db.models import (
     ApiClient,
     ApiTask,
@@ -106,6 +107,7 @@ async def recall(
     cipher: Any,
     base_url: str,
     now: datetime,
+    store: Store | None = None,
 ) -> Recalled | None:
     """被引用的是本人的 API 任务、而且这个会话里还没带过：返回要带进来的内容，并记下已带过。"""
     from coreman.core.api_tasks import uploads, writes
@@ -156,11 +158,11 @@ async def recall(
             lines.append(f"前 {len(parts)} 张附在这条消息里。")
         rest = images[uploads.INLINE :]
         if rest:
-            lines.append("其余的用下面的链接下载到工作目录 api-inputs/ 下查看（24 小时内有效）：")
-            lines += [
-                f"{index}. {uploads.link(cipher, base_url, identity, now)}"
-                for index, identity in enumerate(rest, uploads.INLINE + 1)
-            ]
+            urls, ttl = await uploads.links(
+                session, rest, store=store, cipher=cipher, base_url=base_url, now=now
+            )
+            lines.append(f"其余的用下面的链接下载到工作目录 api-inputs/ 下查看（{ttl}内有效）：")
+            lines += [f"{index}. {url}" for index, url in enumerate(urls, uploads.INLINE + 1)]
     replies = await _replies(session, bot_id, client_session_key(row.id))
     if replies:
         lines.append("原任务的回复：" if len(replies) == 1 else "原任务第一轮和最后一轮的回复：")

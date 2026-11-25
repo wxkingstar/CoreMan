@@ -271,7 +271,62 @@ async def test_images_past_the_inline_limit_become_download_links(db_engine, db_
     text = "\n".join(str(p.get("text") or "") for p in content)
     assert f"本次共 {uploads.INLINE + 2} 张图片" in text
     assert text.count("/api/infra/tasks/uploads/") == 2
+    assert "链接 24 小时内有效" in text
     assert str(ids[-1]) in text and str(ids[0]) not in text
+
+
+async def _run_with_bucket(engine, task):  # type: ignore[no-untyped-def]
+    from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.fakes.fake_relay import FakeRelay
+    from tests.integration.approval_helpers import STORE
+    from tests.integration.worker_helpers import build_ctx
+
+    fake = FakeRelay("normal")
+    ctx = build_ctx(engine, task, relay_client_factory=lambda _r: fake.client())
+    ctx.tmp_store = STORE
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    return fake
+
+
+async def test_images_past_the_inline_limit_go_through_the_temporary_bucket(
+    db_engine, db_session, monkeypatch
+):
+    from coreman.core.api_tasks import uploads
+    from coreman.core.db.models import ApiTaskUpload
+    from tests.integration.approval_helpers import install_files
+
+    _, bucket = install_files(monkeypatch)
+    _, member, client = await _setup(db_session)
+    ids = await _images(db_session, client, member, uploads.INLINE + 2)
+    row, _ = await _create(db_session, client, images=ids)
+    await _trigger_sent(db_session, row)
+    fake = await _run_with_bucket(db_engine, await _claim(db_session))
+    text = "\n".join(str(p.get("text") or "") for p in _content(fake.requests[0]))
+    assert "链接 7 天内有效" in text
+    assert "/api/infra/tasks/uploads/" not in text
+    assert text.count("https://tmp.example.com/pa/api-tasks/") == 2
+    assert len(bucket.objects) == 2
+    last = await db_session.get(ApiTaskUpload, ids[-1])
+    assert bytes(last.data) in bucket.objects.values()
+
+
+async def test_temporary_bucket_down_falls_back_to_platform_links(
+    db_engine, db_session, monkeypatch
+):
+    from coreman.core.api_tasks import uploads
+    from tests.integration.approval_helpers import install_files
+
+    _, bucket = install_files(monkeypatch)
+    bucket.down = True
+    _, member, client = await _setup(db_session)
+    ids = await _images(db_session, client, member, uploads.INLINE + 1)
+    row, _ = await _create(db_session, client, images=ids)
+    await _trigger_sent(db_session, row)
+    fake = await _run_with_bucket(db_engine, await _claim(db_session))
+    text = "\n".join(str(p.get("text") or "") for p in _content(fake.requests[0]))
+    assert "链接 24 小时内有效" in text
+    assert text.count("/api/infra/tasks/uploads/") == 1
 
 
 async def test_known_exhausted_quota_waits_without_running_or_messaging(db_engine, db_session):
