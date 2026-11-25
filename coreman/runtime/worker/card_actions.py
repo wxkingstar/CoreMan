@@ -151,12 +151,14 @@ class CardActionHandler:
                 from coreman.core.assistants import cold_start, request_cards
                 from coreman.core.assistants.approvals import batch as assistant_writes
                 from coreman.core.cloud_proxy import confirm as cloud_confirm
+                from coreman.core.feishu_apps import scope_prompt
                 from coreman.core.feishu_docs import confirm
                 from coreman.core.systems_catalog import batch as systems_batch
                 from coreman.core.systems_catalog import confirm as systems_confirm
                 from coreman.core.work_tasks import cards as work_task_cards_core
                 from coreman.core.work_tasks import due as work_task_due
                 from coreman.runtime.worker import (
+                    app_scope_cards,
                     assistant_range,
                     assistant_scope,
                     assistant_stop,
@@ -186,6 +188,7 @@ class CardActionHandler:
                     assistant_range.EVENT_KEY: assistant_range.handle,
                     cold_start.EVENT_KEY: cold_start_cards.handle,
                     request_cards.EVENT_KEY: gap_request_cards.handle,
+                    scope_prompt.EVENT_KEY: app_scope_cards.handle,
                     work_task_cards_core.EVENT_KEY: work_task_cards.handle,
                     work_task_due.EVENT_KEY: work_task_cards.handle,
                 }.get(str(action.get("event_key")), handle_selection)

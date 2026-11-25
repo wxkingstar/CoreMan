@@ -68,13 +68,44 @@ class ChatTaskHandler(
         pre = await self._prepare(ctx)
         if pre is None:
             return
-        outcome = await self._converse(ctx, pre)
-        for _ in range(self.LIVE_RETRIES):
-            if outcome.live_conflict is None or ctx.cancel_event.is_set():
-                break
-            pre = await self._resend_live(ctx, pre, outcome.live_conflict)
+        # 和这一轮并行，不拖慢回复：管理员私聊时顺带提醒飞书应用缺的权限。
+        offer = asyncio.create_task(self._offer_app_scopes(ctx, pre.intake))
+        try:
             outcome = await self._converse(ctx, pre)
-        await self._finalize(ctx, pre, outcome)
+            for _ in range(self.LIVE_RETRIES):
+                if outcome.live_conflict is None or ctx.cancel_event.is_set():
+                    break
+                pre = await self._resend_live(ctx, pre, outcome.live_conflict)
+                outcome = await self._converse(ctx, pre)
+            await self._finalize(ctx, pre, outcome)
+        finally:
+            await offer
+
+    async def _offer_app_scopes(self, ctx: TaskContext, intake: Intake) -> None:
+        """员工的管理员在私聊里说话、它的飞书应用又缺权限：发一张补齐卡片。出错不影响这一轮。"""
+        if (
+            intake.bot.platform != "feishu"
+            or intake.chat_type != "single"
+            or ctx.task.payload.get("origin")
+            or intake.speaker.user_id is None
+        ):
+            return
+        from coreman.core.feishu_apps import scope_prompt
+
+        try:
+            async with ctx.session_factory() as session:
+                if await scope_prompt.offer(
+                    session,
+                    ctx.cipher,
+                    intake.bot,
+                    intake.speaker.user_id,
+                    intake.chat_id,
+                    ctx.task.id,
+                ):
+                    await session.commit()
+                    ctx.log.info("feishu_app_scopes_offered")
+        except Exception as exc:  # noqa: BLE001 只是顺带提醒，失败记一笔就算了
+            ctx.log.warning("feishu_app_scopes_offer_failed", error=type(exc).__name__)
 
     async def _resend_live(self, ctx: TaskContext, pre: Prepared, code: str) -> Prepared:
         """驱动拒收后重建请求再发：流与对话记录沿用，还没有任何内容写出去。

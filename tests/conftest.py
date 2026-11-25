@@ -311,6 +311,18 @@ def _isolate_network_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key.lower(), raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_feishu_scope_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """管理员私聊时会顺带问飞书应用缺不缺权限：默认当作查不到，不打真实网络。"""
+    from coreman.core.feishu_apps import scope_prompt
+
+    async def unknown(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(scope_prompt, "fetch_missing", unknown)
+    scope_prompt._checked.clear()
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--shard",
