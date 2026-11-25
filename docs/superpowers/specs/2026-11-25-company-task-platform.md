@@ -1,6 +1,6 @@
 # 全公司任务平台：人与 Agent 之间的任务流转
 
-状态：设计稿，待确认。承接 `2026-11-02-group-dispatcher-and-work-tasks.md`（调度员与任务跟进），本稿取代其中 §5.2 确认、§6 任务模型、§8 任务页。
+状态：第一期已上线（迁移 0129）；第二期实现中（迁移 0130）。承接 `2026-11-02-group-dispatcher-and-work-tasks.md`（调度员与任务跟进），本稿取代其中 §5.2 确认、§6 任务模型、§8 任务页。
 
 ## 1. 目标与已定
 
@@ -195,7 +195,8 @@ Agent 用工具（§6）发起，分两种：
 | `handoff_task` | 整件转交 | 人话：`reason`（一行）；细节：`handoff` 交接包 |
 | `update_task` | 写进展 | 细节：`detail`；人话 `human_text` 选填，只在人需要知道时写 |
 | `submit_result` | 交付 | 人话：`result`（一句话）、`artifacts`；细节：`output`、`digest`；有子任务时 `report`（完整汇报，§5.3）必填 |
-| `wait_for(codes)` | 结束本轮，等子任务或答复 | 无 |
+| `wait_for()` | 结束本轮，等这件事所有没结果的子任务和问题 | 无 |
+| `find_assignees(query)` | 找能接子任务的 AI 员工和同事 | 无 |
 
 人话字段超长或缺必填项时，返回 `stop=false` 和修改要求，让 Agent 改了重交（和现有协作工具的约定一致）。没调 `submit_result` 就结束的一轮，平台按现有逻辑从回复里推断结果，并在任务页标「缺记要」。
 
