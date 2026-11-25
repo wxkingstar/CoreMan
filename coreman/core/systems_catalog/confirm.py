@@ -341,7 +341,9 @@ def _detail_lines(index: int, item: dict[str, Any], *, full: bool) -> list[str]:
         lines.append(f"   请求头 {key} = {_value(value)}")
     files = item.get("files") or []
     body = item.get("body")
-    if files and isinstance(body, dict):
+    if files and uploads.is_ref(body):
+        body = None  # the whole body is the file listed below
+    elif files and isinstance(body, dict):
         named = {file["field"] for file in files}
         body = {key: value for key, value in body.items() if key not in named} or None
     if body is not None:

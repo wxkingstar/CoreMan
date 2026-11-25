@@ -168,7 +168,8 @@ async def test_denied_and_unsupported_calls(
         refund = await call(
             client, "systems_call", {"system": "stock", "operation_id": "refundSupplier"}
         )
-        assert refund["error"] == "risk_not_allowed"
+        # Financial operations wait for the member's card like other writes.
+        assert refund["status"] == "pending_confirmation"
         batch = await call(
             client,
             "systems_call",

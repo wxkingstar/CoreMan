@@ -201,7 +201,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 新增 `systems_call(system, operation_id, path_params?, query?, headers?, body?)`，只用于 `token_delivery = proxy` 的系统；对 `env` 系统返回 `not_proxied`，模型按 `systems_describe` 的 curl 模板调用。本轮存在代理系统时 `tools/list` 才列出它。
 
-- 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径、查询与请求头参数、JSON 请求体和带文件的 `multipart/form-data` 表单（见下文「上传文件」）。请求头参数用 `headers` 传（例如 `If-Match`），只认操作声明过的、名字不分大小写，值须是一行、不超过 1000 字符，随写操作一起暂存、在确认卡详情里列出并原样发出；名为 `Idempotency-Key`、`X-Operation-Request-Id` 的由平台生成，`Authorization`、`Cookie`、`Host`、`Accept`、`Content-Type` 等由平台设置，调用方不能传。必填的 Cookie 参数无法通过代理调用。批量提交的各项不带请求头。
+- 校验：操作在目录中且当前用户可见（隐藏、不存在、无权限一律 `operation_not_found`）；参数和请求体按 schema 校验。编译器第 2 版为每个操作保存校验用的 schema（去掉说明和示例，保留本地 `$ref`，被引用的定义单独存一份），旧目录在下次复查时重新完整拉取。校验覆盖类型（含 `nullable` 与 3.1 类型列表）、`enum`/`const`、长度、数值上下限、`required`、`additionalProperties`、`items`、`allOf`/`anyOf`/`oneOf`（`oneOf` 按 `anyOf` 处理）；`pattern` 和 `format` 交给业务系统，避免在服务端对模型输入运行业务系统提供的正则。路径参数整段编码，不能借值增加路径段或查询；未声明的参数一律拒绝；只支持路径、查询与请求头参数、JSON 请求体、带文件的 `multipart/form-data` 表单和整文件请求体（见下文「上传文件」）。请求头参数用 `headers` 传（例如 `If-Match`），只认操作声明过的、名字不分大小写，值须是一行、不超过 1000 字符，随写操作一起暂存、在确认卡详情里列出并原样发出；名为 `Idempotency-Key`、`X-Operation-Request-Id` 的由平台生成，`Authorization`、`Cookie`、`Host`、`Accept`、`Content-Type` 等由平台设置，调用方不能传。必填的 Cookie 参数无法通过代理调用。批量提交的各项不带请求头。
 - 风险策略：`read` 直接执行；`write`、`destructive`、`financial` 需要机器人对该系统的授权开启"允许写入"（个人助理无人在场的一轮另行处理，见下文「写操作确认卡」末条），并且只进入待确认列表，由提问人在确认卡上确认后执行（见下文「写操作确认卡」）。`financial` 更严：每张确认卡只能有它一项（本轮已有其他待确认写操作、或已有一项 `financial` 时返回 `confirmation_single_only`），不能批量提交（`batch_single_only`），所有者预先批准直写的调度轮次（`confirmation_required`）和无人在场的轮次（`owner_turn_required`）都不执行。`systems_describe` 的调用方式里写明当前是否允许。
 - 令牌：服务端在首次调用（或首次查权限）时签发，有效期与任务超时一致，签发记录用途为 `proxy`；以任务和系统为 AAD 加密后存在任务里，任务内复用，不进入运行环境、工具结果或日志。
 - 请求：只发往目录里的服务器前缀（与系统地址同源），连接固定到登记的主机，不跟随重定向，不读取环境代理，读操作超时 60 秒、写操作 30 秒，响应最多读 5 MiB。Codex 运行时把目录 MCP 的工具超时设为 90 秒（默认 60 秒会先于平台超时），需要升级节点才生效。连不上或超时返回 `system_unreachable`，带 `maybe_sent`：连接没建起来为假；发出后没等到响应为真，这时写操作的提示改为「可能已经处理，先核对实际结果，不要重试」。
@@ -220,10 +220,10 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 
 ### 上传文件
 
-请求体是 `multipart/form-data` 的操作（上传图片、导入 CSV/xlsx 等）同样可以代理调用。编译器第 4 版把表单里 `type: string` 且 `format: binary`/`base64` 或带 `contentMediaType` 的字段（以及这类字段的数组）记为文件字段，其余字段按 JSON 对象校验，旧目录在下次复查时重新编译。
+请求体是 `multipart/form-data` 的操作（上传图片、导入 CSV/xlsx 等）同样可以代理调用。编译器第 4 版把表单里 `type: string` 且 `format: binary`/`base64` 或带 `contentMediaType` 的字段（以及这类字段的数组）记为文件字段，其余字段按 JSON 对象校验，旧目录在下次复查时重新编译。编译器第 5 版另外把请求体就是一个文件的操作（请求体只声明了 JSON、表单以外的媒体类型，例如 `image/jpeg`、`application/octet-stream`；`application/x-www-form-urlencoded` 除外）记为整文件请求体，保存声明的全部媒体类型。
 
 - 上传：运行环境用本轮目录 MCP 的凭据把文件 `PUT` 到 `/api/runtime/systems/uploads?filename=<文件名>`，拿到 `upload_id`。单个文件不超过 30 MB，保存 1 小时，只有同一轮、同一位发言者能用；类型取请求的 `Content-Type`，没有声明、或是 `curl --data-binary` 默认的表单编码与 `application/octet-stream` 时按文件名判断。`systems_describe` 对这类操作附上传用的 curl 模板和请求体写法。
-- 调用：`systems_call` 的 `body` 里文件字段写 `{"upload_id": "..."}`（数组字段写数组），其他字段照常写。平台先确认每个文件都是本轮本人上传、未过期的，再以发言者身份按 `multipart/form-data` 发出：文本字段在前，对象和数组字段转成 JSON 文本，文件带原文件名和类型。
+- 调用：`systems_call` 的 `body` 里文件字段写 `{"upload_id": "..."}`（数组字段写数组），其他字段照常写。平台先确认每个文件都是本轮本人上传、未过期的，再以发言者身份按 `multipart/form-data` 发出：文本字段在前，对象和数组字段转成 JSON 文本，文件带原文件名和类型。整文件请求体的操作 `body` 直接写 `{"upload_id": "..."}`，平台把文件原样作为请求体发出：文件类型与声明的类型相同、或声明了 `<主类型>/*`、`*/*` 时带文件自己的类型；声明了 `application/octet-stream` 时任何文件都按它发出；都不符合时返回 `invalid_arguments` 并列出 `accepted`。`systems_describe` 的 `upload` 给出 `accepted_types`。
 - 写操作照常进确认卡。卡片上不显示 `upload_id`，按字段列出文件名、大小和 sha256 前 12 位；点确认后发出的就是卡片上这几个文件。
 - 个人助理无人在场的一轮，带文件的写操作不提交所有者审批，按「所有者不在场」拒绝：审批可能几小时后才批，文件那时已经过期。
 
@@ -274,7 +274,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 - 系统范围：已启用、并且配了系统地址与 OpenAPI 地址的系统，不看 AI 员工授权和允许范围。
 - 只读已存的目录，不为这些请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
 - 按本人权限过滤：声明了权限查询的系统，用平台按成员签发的令牌（用途 `proxy`，签发记录带 `oauth_grant_id`，15 分钟，缓存在各 API 进程内存里）查一次权限码，过滤规则与任务内相同；`permission_check` 取 `filtered` / `unknown` / `not_declared`。成员算不出业务系统主体（缺邮箱、邮箱前缀重复）时退回匿名目录的样子（不过滤、直连），`systems_call` 返回 `subject_unavailable`。
-- `token_delivery = proxy` 的系统自动对成员开放代理调用（`call_mode = proxy`）：`tools/list` 多出 `systems_call` 与 `systems_call_result`。校验、请求、响应截断与脱敏和任务内相同；读操作直接执行；`financial` 不代理；上传文件和 `batch` 返回 `unsupported_for_member`；大结果截断、不转存。每位成员对每个系统每小时最多 `proxy_calls_per_turn` 次（按 `system_calls` 计，含被拒和暂存的），超出返回 `catalog_budget_exhausted`。
+- `token_delivery = proxy` 的系统自动对成员开放代理调用（`call_mode = proxy`）：`tools/list` 多出 `systems_call` 与 `systems_call_result`。校验、请求、响应截断与脱敏和任务内相同；读操作直接执行；写操作（含 `financial`）每个一张确认卡；上传文件和 `batch` 返回 `unsupported_for_member`；大结果截断、不转存。每位成员对每个系统每小时最多 `proxy_calls_per_turn` 次（按 `system_calls` 计，含被拒和暂存的），超出返回 `catalog_budget_exhausted`。
 - 写操作（`write`、`destructive`）只暂存（`interaction_states`，`kind = member_write`，请求按确认单与成员加密，迁移 `0134`），由系统设置里的「公共机器人」（`work_task_notifier_bot_id`，原「任务通知员工」）私聊成员一张与 AI 员工写操作确认卡同样式的卡片，另注明来自哪个本机客户端（自报名称）；返回 `pending_confirmation` 与 `confirmation_id`。没有可用的公共机器人或成员没有飞书身份时不暂存，返回 `confirmation_unavailable`；每人同时待确认最多 20 张。只有成员本人在那个私聊里点才算：确认后先记已提交，再复查（成员启用、OAuth 授权未吊销、系统仍代理、操作定义与可见性不变），以成员身份按暂存的请求执行一次（幂等键暂存时生成），审计结局 `confirmed_*`，卡片更新为结果。`systems_call_result(confirmation_id)` 最多等 20 秒，返回 `pending` / `ok` / `failed` / `unknown` / `refused` / `cancelled` / `expired`；只有同一授权能查。卡片 60 分钟有效，过期不能重新发起；清理与其他确认卡相同。
 - 审计：`system_calls` 的 `task_id`、`bot_id` 为空，带 `user_id` 与 `oauth_grant_id`。
 - 匿名：部署设置 `SYSTEMS_CATALOG_PUBLIC=true` 时不带令牌也能读：不按权限过滤、没有 `systems_call`，系统地址和接口说明会对能访问 CoreMan 的所有人可见，只在入口限定内网的部署里开启；端点不在 `/api/runtime/` 下，按前缀对外开放运行时路径的入口不会顺带放出它。

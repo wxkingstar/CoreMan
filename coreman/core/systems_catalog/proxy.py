@@ -72,6 +72,8 @@ RESERVED_HEADERS = (
     "accept",
 )
 HEADER_VALUE_MAX = 1000
+# The file of an operation whose request body is a whole file, in `Prepared.files`.
+RAW_FIELD = "body"
 DATA_TRUST = {"content_trust": "system_returned_data"}
 # Failures that happen before the request leaves: it certainly did not reach the business system.
 NOT_SENT = (
@@ -228,6 +230,12 @@ def build_request(
             problems.append("body: this operation takes no request body")
     elif body_spec.get("multipart"):
         problems += _form_problems(args.body, body_spec, validator)
+    elif body_spec.get("raw"):
+        if args.body is None:
+            if body_spec["required"]:
+                problems.append('body: required, pass {"upload_id": ...}')
+        elif not uploads.is_ref(args.body):
+            problems.append('body: the request body is a whole file, pass {"upload_id": ...}')
     elif not body_spec["json"]:
         problems.append("body: only JSON request bodies are supported by systems_call")
     elif args.body is None:
@@ -301,9 +309,31 @@ def _form_problems(body: Any, spec: dict[str, Any], validator: Validator) -> lis
     return problems + validator.errors(fields, spec["schema"], "body")
 
 
+def takes_files(op: dict[str, Any]) -> bool:
+    """The operation is sent with uploaded files: a multipart form or a whole-file body."""
+    body = op["validate"].get("body") or {}
+    return bool(body.get("multipart") or body.get("raw"))
+
+
+def raw_type(accepted: list[str], actual: str) -> str | None:
+    """The Content-Type to send a file of type `actual` with, or None when the operation does
+    not take it. `type/*` and `*/*` take the file's own type; `application/octet-stream` takes
+    any file as bytes."""
+    actual = actual.split(";", 1)[0].strip().lower()
+    main = actual.split("/", 1)[0]
+    if actual in accepted or f"{main}/*" in accepted or "*/*" in accepted:
+        return actual
+    if "application/octet-stream" in accepted:
+        return "application/octet-stream"
+    return None
+
+
 def form_files(op: dict[str, Any], body: Any) -> list[tuple[str, str]]:
-    """(field, upload_id) for every file a checked multipart body references."""
+    """(field, upload_id) for every file a checked multipart body references; a whole-file body
+    is the field `RAW_FIELD`."""
     spec = op["validate"].get("body") or {}
+    if spec.get("raw") and uploads.is_ref(body):
+        return [(RAW_FIELD, str(body["upload_id"]))]
     if not spec.get("multipart") or not isinstance(body, dict):
         return []
     out = []
@@ -608,6 +638,14 @@ async def build(
                 "message": "文件不存在、已过期（1 小时）或不是本轮上传的。"
                 "按 systems_describe 的说明重新上传后再调用。",
             }
+        accepted = (op["validate"].get("body") or {}).get("raw")
+        if accepted and raw_type(accepted, row.content_type) is None:
+            return {
+                "error": "invalid_arguments",
+                "invalid": [f"body: file type {row.content_type} is not accepted"],
+                "accepted": accepted,
+                "message": "这个操作不接受这种文件类型。换成 accepted 里的类型后重新上传。",
+            }
         files.append((name, row))
     return Prepared(
         system, args.operation_id, op, url, body, idempotency_headers(op), files, headers
@@ -641,8 +679,14 @@ async def send(
         try:
             timeout = READ_TIMEOUT if op["risk"] == "read" else CALL_TIMEOUT
             async with fetch.client_for(p.url, timeout=timeout) as client:
-                if (op["validate"].get("body") or {}).get("multipart"):
+                body_spec = op["validate"].get("body") or {}
+                if body_spec.get("multipart"):
                     sent: dict[str, Any] = {"files": await _form(ctx, p)}
+                elif body_spec.get("raw") and p.files:
+                    _, row = p.files[0]
+                    data = await uploads.read(ctx.settings or get_settings(), row)
+                    headers["Content-Type"] = raw_type(body_spec["raw"], row.content_type) or ""
+                    sent = {"content": data}
                 else:
                     sent = {"json": p.body} if p.body is not None else {}
                 async with client.stream(op["method"], p.url, headers=headers, **sent) as response:

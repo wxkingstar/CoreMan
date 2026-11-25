@@ -310,7 +310,7 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
             "batch_single_only",
             "涉及资金的操作（financial）不能批量提交：每次只提交一个，单独一张确认卡。",
         )
-    if (op["validate"].get("body") or {}).get("multipart"):
+    if proxy.takes_files(op):
         return _error("batch_files_unsupported", "带文件的操作不能批量提交，请逐项调用。")
     session, member = ctx.session, ctx.member
     bot = await session.get(Bot, member.bot_id)

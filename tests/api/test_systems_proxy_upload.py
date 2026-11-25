@@ -249,3 +249,75 @@ async def test_file_write_is_confirmed_on_the_card_then_sent(
         ("uploadImages", "proposed"),
         ("uploadImages", "confirmed_ok"),
     ]
+
+
+def photo_op(types: list[str]) -> dict[str, Any]:
+    binary = {"schema": {"type": "string", "format": "binary"}}
+    return {
+        "operationId": "uploadPhoto",
+        "tags": ["documents"],
+        "summary": "上传一张照片",
+        "x-permission": "none",
+        "x-agent": {"risk": "write"},
+        "parameters": [
+            {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": True, "content": {t: binary for t in types}},
+        "responses": {"200": {"description": "OK"}},
+    }
+
+
+async def test_a_whole_file_body_is_confirmed_then_sent_as_is(
+    client, app, db_session, db_engine, fake, storage
+) -> None:
+    received: list[tuple[str, bytes]] = []
+
+    def accept(request: httpx.Request) -> httpx.Response:
+        received.append((request.headers["content-type"], request.content))
+        return httpx.Response(200, json={"code": 0, "data": {"token": "photo:1"}})
+
+    fake.spec["paths"]["/api/stock/documents/{id}/photos"] = {  # type: ignore[index]
+        "post": photo_op(["image/jpeg", "image/png"])
+    }
+    fake.routes[("POST", "/api/stock/documents/D1/photos")] = accept
+    bot, user, task = await turn(db_session, app)
+    auth = bearer(app, task, user)
+    described = await call(
+        client, auth, "systems_describe", {"system": "stock", "operation_id": "uploadPhoto"}
+    )
+    assert described["call"]["upload"]["accepted_types"] == ["image/jpeg", "image/png"]
+    assert described["call"]["upload"]["body"] == '{"upload_id": "..."}'
+
+    jpeg = b"\xff\xd8\xff" + b"j" * 3000
+    photo = (await upload(client, auth, jpeg, "front.jpg", "image/jpeg")).json()
+    sheet = (await upload(client, auth, CSV)).json()
+    args = {"system": "stock", "operation_id": "uploadPhoto", "path_params": {"id": "D1"}}
+    wrong_type = await call(
+        client, auth, "systems_call", {**args, "body": {"upload_id": sheet["upload_id"]}}
+    )
+    assert wrong_type["error"] == "invalid_arguments" and "text/csv" in wrong_type["invalid"][0]
+    not_a_ref = await call(client, auth, "systems_call", {**args, "body": "aGVsbG8="})
+    assert not_a_ref["error"] == "invalid_arguments"
+    staged = await call(
+        client, auth, "systems_call", {**args, "body": {"upload_id": photo["upload_id"]}}
+    )
+    assert staged["status"] == "pending_confirmation", staged
+
+    assert await release(app, task)
+    card = (await db_session.scalars(select(OutboxItem).where(OutboxItem.kind == "send"))).one()
+    elements = card.payload["card"]["body"]["elements"]
+    assert "文件：front.jpg（2.9 KB）" in elements[0]["text"]["content"]
+    text = elements[1]["elements"][0]["text"]["content"]
+    assert '文件 body = "front.jpg"' in text and "请求体" not in text
+    state = await batch(db_session)
+    result = await run_click(db_session, db_engine, await press(db_session, bot, task, state.id))
+    assert result == "systems_write_done"
+    assert received == [("image/jpeg", jpeg)]
+
+
+def test_raw_type_matches_declared_media_types() -> None:
+    assert proxy.raw_type(["image/jpeg"], "image/jpeg") == "image/jpeg"
+    assert proxy.raw_type(["image/jpeg"], "image/png") is None
+    assert proxy.raw_type(["image/*"], "image/webp") == "image/webp"
+    assert proxy.raw_type(["application/octet-stream"], "image/png") == "application/octet-stream"
+    assert proxy.raw_type(["*/*"], "application/pdf") == "application/pdf"

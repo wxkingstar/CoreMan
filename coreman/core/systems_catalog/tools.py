@@ -251,8 +251,8 @@ def call_rules(ctx: Context, system: BusinessSystem) -> str:
     if ctx.own_agent and not ctx.direct(system):
         return (
             "平台代理：用 systems_call 以你本人的身份调用，平台签发令牌、你本机拿不到。读操作直接"
-            "执行；写操作（write、destructive）平台会在飞书里给你发确认卡，你点确认后才执行，"
-            "之后用 systems_call_result 取结果；financial 不代理；上传文件和批量提交不支持。"
+            "执行；写操作（write、destructive、financial）平台会在飞书里给你发确认卡（每个一张），"
+            "你点确认后才执行，之后用 systems_call_result 取结果；上传文件和批量提交不支持。"
         )
     if ctx.direct(system):
         return (
@@ -652,7 +652,7 @@ def call_template(
 ) -> dict[str, Any]:
     if ctx.own_agent and not ctx.direct(system):
         denied = proxy.policy_error(ctx, system, op)
-        multipart = bool(((op.get("validate") or {}).get("body") or {}).get("multipart"))
+        multipart = proxy.takes_files(op) if "validate" in op else False
         message = (
             "这个系统由平台代理调用：用 systems_call 传 system、operation_id 和参数"
             "（path_params、query、body），平台以你本人的身份调用，不要用 curl 直接调用。"
@@ -685,6 +685,8 @@ def call_template(
         form = (op.get("validate") or {}).get("body") or {}
         if form.get("multipart") and form.get("files") and ctx.settings is not None:
             template["upload"] = uploads.instructions(ctx.settings.public_base_url, form["files"])
+        elif form.get("raw") and ctx.settings is not None:
+            template["upload"] = uploads.raw_instructions(ctx.settings.public_base_url, form["raw"])
         elif (
             op["risk"] in proxy.CONFIRMED_RISKS
             and op["risk"] not in proxy.SINGLE_RISKS
