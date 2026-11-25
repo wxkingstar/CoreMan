@@ -42,8 +42,8 @@ export const router = createRouter({
         { path: 'skill-approvals', name: 'skill-approvals', component: () => import('@/views/SkillApprovalsView.vue'), meta: { roles: ['ai_committee', 'platform_admin'] } },
         { path: 'cron', name: 'cron', component: () => import('@/views/CronView.vue') },
         { path: 'chat-logs', name: 'chat-logs', component: () => import('@/views/ChatLogsView.vue') },
-        { path: 'work-tasks', name: 'work-tasks', component: () => import('@/views/WorkTasksView.vue') },
-        { path: 'work-tasks/:code', name: 'work-task', component: () => import('@/views/WorkTasksView.vue') },
+        // 列表和详情同一个路由：打开、关闭详情只换参数，列表不重新挂载、不刷新。
+        { path: 'work-tasks/:code?', name: 'work-tasks', component: () => import('@/views/WorkTasksView.vue') },
         {
           path: 'announcements',
           name: 'announcements',
