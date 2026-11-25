@@ -195,7 +195,9 @@ func buildCodexInput(req *openai.ChatCompletionRequest, model string, threadID, 
 	// already has this turn.
 	if openai.SystemsCatalogEnabled(req.EnvVars) {
 		encodedURL, _ := json.Marshal(strings.TrimSpace(req.EnvVars["COREMAN_SYSTEMS_MCP_URL"]))
-		out.Args = append(out.Args, "-c", "mcp_servers.coreman_systems.url="+string(encodedURL), "-c", `mcp_servers.coreman_systems.bearer_token_env_var="COREMAN_SYSTEMS_MCP_TOKEN"`, "-c", "mcp_servers.coreman_systems.enabled=true")
+		// Proxied reads may wait 60 s for the business system; Codex's own
+		// default tool timeout is 60 s, so give the call room to finish.
+		out.Args = append(out.Args, "-c", "mcp_servers.coreman_systems.url="+string(encodedURL), "-c", `mcp_servers.coreman_systems.bearer_token_env_var="COREMAN_SYSTEMS_MCP_TOKEN"`, "-c", "mcp_servers.coreman_systems.tool_timeout_sec=90", "-c", "mcp_servers.coreman_systems.enabled=true")
 	} else {
 		out.Args = append(out.Args, "-c", `mcp_servers.coreman_systems.url="http://127.0.0.1:1/disabled"`, "-c", "mcp_servers.coreman_systems.enabled=false")
 	}

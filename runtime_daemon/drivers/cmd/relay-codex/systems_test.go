@@ -10,7 +10,7 @@ func TestSystemsCatalogConfigPerTurn(t *testing.T) {
 	for _, thread := range []string{"", "thread-1"} {
 		req := &openai.ChatCompletionRequest{EnvVars: map[string]string{"COREMAN_CHAT_TYPE": "group", "COREMAN_SYSTEMS_MCP_URL": "https://example.test/systems", "COREMAN_SYSTEMS_MCP_TOKEN": "catalog-marker"}}
 		args := strings.Join(buildCodexInput(req, "gpt", thread, t.TempDir()).Args, " ")
-		for _, want := range []string{`mcp_servers.coreman_systems.url="https://example.test/systems"`, `mcp_servers.coreman_systems.bearer_token_env_var="COREMAN_SYSTEMS_MCP_TOKEN"`, "mcp_servers.coreman_systems.enabled=true"} {
+		for _, want := range []string{`mcp_servers.coreman_systems.url="https://example.test/systems"`, `mcp_servers.coreman_systems.bearer_token_env_var="COREMAN_SYSTEMS_MCP_TOKEN"`, "mcp_servers.coreman_systems.tool_timeout_sec=90", "mcp_servers.coreman_systems.enabled=true"} {
 			if !strings.Contains(args, want) {
 				t.Errorf("missing %s: %s", want, args)
 			}

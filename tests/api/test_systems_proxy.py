@@ -145,16 +145,11 @@ async def test_read_write_and_risk_policy(
             "path_params": {"id": "D1"},
             "body": {"reason": "录入错误"},
         },
+        # Financial operations are staged like any write now, so they need a card too.
+        {"system": "stock", "operation_id": "refundSupplier"},
     ):
         staged = await call(client, auth, "systems_call", args)
         assert staged["error"] == "confirmation_unavailable"
-    refused = await call(
-        client,
-        auth,
-        "systems_call",
-        {"system": "stock", "operation_id": "refundSupplier", "path_params": {"id": "D1"}},
-    )
-    assert refused["error"] == "risk_not_allowed" and refused["risk"] == "financial"
     assert not [r for r in fake.requests if r.method == "POST" and "documents" in r.url.path]
     assert fake.documents["D1"]["status"] == "confirmed"
 
@@ -176,7 +171,6 @@ async def test_read_write_and_risk_policy(
     assert [(c.operation_id, c.outcome, c.status_code) for c in calls] == [
         ("listDocuments", "ok", 200),
         ("createDraft", "denied", None),
-        ("refundSupplier", "denied", None),
     ]
     assert calls[0].token_id == proxy_issues[0].token_id and calls[0].duration_ms is not None
     await db_session.refresh(task)

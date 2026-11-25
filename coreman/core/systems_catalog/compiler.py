@@ -19,7 +19,8 @@ from coreman.core.systems_catalog.refs import MAX_DEPTH, Refs, local
 # Bump when the compiled format changes: stored catalogs of an older version are fetched again
 # in full (no If-None-Match) and recompiled on the next check. 2: validation schemas for calls.
 # 3: module groups, display names, aliases and module limits. 4: multipart forms with file fields.
-COMPILER_VERSION = 4
+# 5: request bodies that are a whole file (e.g. an image), sent from an upload.
+COMPILER_VERSION = 5
 RISKS = ("read", "write", "destructive", "financial")
 DEFAULT_MODULE = "default"
 GUIDE_MAX = 2000
@@ -437,7 +438,15 @@ def _validation(item: dict[str, Any], op: dict[str, Any], refs: Refs) -> dict[st
         form = None if media else _form_media(request["content"])
         if form is not None:
             body.update(_form_validation(form, refs))
+        elif media is None and (raw := _raw_media(request["content"])):
+            body["raw"] = raw
     return {"params": params, "body": body}
+
+
+def _raw_media(content: dict[str, Any]) -> list[str]:
+    """Media types of a body that is a whole file; URL-encoded forms are not files."""
+    types = [str(media_type).split(";", 1)[0].strip().lower() for media_type in content]
+    return [t for t in types if "/" in t and t != "application/x-www-form-urlencoded"]
 
 
 def _form_media(content: dict[str, Any]) -> dict[str, Any] | None:

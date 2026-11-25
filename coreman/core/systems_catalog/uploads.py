@@ -113,13 +113,31 @@ def describe(row: StoredObject) -> dict[str, Any]:
     }
 
 
-def instructions(public_base_url: str, files: dict[str, dict[str, bool]]) -> dict[str, Any]:
-    """How the runtime uploads the files of a multipart operation (part of systems_describe)."""
+def _curl(public_base_url: str) -> str:
     url = public_base_url.rstrip("/") + UPLOAD_PATH + "?filename=<文件名>"
-    curl = (
+    return (
         f'curl -sS -X PUT -H "Authorization: Bearer ${policy.TOKEN_ENV}" '
         f"--data-binary @<本地文件路径> {shlex.quote(url)}"
     )
+
+
+def raw_instructions(public_base_url: str, accepted: list[str]) -> dict[str, Any]:
+    """How the runtime sends an operation whose request body is a whole file."""
+    return {
+        "accepted_types": accepted,
+        "curl": _curl(public_base_url),
+        "body": '{"upload_id": "..."}',
+        "notes": "这个操作的请求体就是一个文件：先在运行环境里用 curl 把文件 PUT 到平台（文件名"
+        "带上正确的扩展名，或加 -H 'Content-Type: <类型>'），拿到返回的 upload_id；调用 "
+        'systems_call 时 body 传 {"upload_id": ...}，平台把文件原样作为请求体发出。'
+        f"文件类型须在 accepted_types 里，不超过 {UPLOAD_LIMIT // (1024 * 1024)} MB，"
+        "1 小时内、只在本轮有效。",
+    }
+
+
+def instructions(public_base_url: str, files: dict[str, dict[str, bool]]) -> dict[str, Any]:
+    """How the runtime uploads the files of a multipart operation (part of systems_describe)."""
+    curl = _curl(public_base_url)
     fields = ", ".join(
         f'"{name}": ' + ('[{"upload_id": "..."}]' if spec["many"] else '{"upload_id": "..."}')
         for name, spec in files.items()

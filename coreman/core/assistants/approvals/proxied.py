@@ -345,6 +345,7 @@ async def submit_system(
     query: dict[str, Any] | None,
     body: Any,
     url: str,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """目录代理在无人在场时的写调用：参数已按目录校验、授权本来允许写。只暂存，不调业务系统。"""
     session = ctx.session
@@ -365,6 +366,8 @@ async def submit_system(
         "method": method,
         "url": url,
     }
+    if headers:
+        arguments["headers"] = headers
     head = [
         "渠道：业务系统（平台代理）",
         f"对象：{name}（{system.key}）",
@@ -377,6 +380,8 @@ async def submit_system(
         rest += _section("路径参数：", path_params)
     if query:
         rest += _section("查询参数：", query)
+    if headers:
+        rest += _section("请求头：", headers)
     if body is not None:
         rest += _section("请求体：", body)
     if len(rest) == 1:
@@ -552,6 +557,7 @@ async def _execute_system(
                 operation_id=arguments["operation_id"],
                 path_params=arguments.get("path_params"),
                 query=arguments.get("query"),
+                headers=arguments.get("headers"),
                 body=arguments.get("body"),
             )
         except (KeyError, ValueError):
@@ -560,10 +566,16 @@ async def _execute_system(
         if isinstance(prepared, dict):
             await session.commit()
             return prepared
-        now = {"method": prepared.op["method"], "url": str(prepared.url), "body": prepared.body}
+        now = {
+            "method": prepared.op["method"],
+            "url": str(prepared.url),
+            "headers": prepared.headers or None,
+            "body": prepared.body,
+        }
         approved = {
             "method": arguments.get("method"),
             "url": arguments.get("url"),
+            "headers": arguments.get("headers"),
             "body": arguments.get("body"),
         }
         if now != approved or prepared.op["risk"] != "write":

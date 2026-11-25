@@ -291,10 +291,10 @@ def pick(items: list[dict[str, Any]], seed: int) -> list[int]:
 async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
     """Check and stage a whole batch for the asker's confirmation."""
     assert args.batch is not None
-    if args.path_params is not None or args.query is not None or args.body is not None:
+    if any(v is not None for v in (args.path_params, args.query, args.headers, args.body)):
         return _error(
             "invalid_tool_or_arguments",
-            "batch 与 path_params、query、body 不能同时传：每一项的参数写在上传的文件里。",
+            "batch 与 path_params、query、headers、body 不能同时传：每一项的参数写在上传的文件里。",
         )
     found = await proxy.operation(ctx, args.system, args.operation_id)
     if isinstance(found, dict):
@@ -305,7 +305,12 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
         return refused
     if op["risk"] not in proxy.CONFIRMED_RISKS:
         return _error("batch_read_only", "batch 只用于写操作；读操作直接逐次调用 systems_call。")
-    if (op["validate"].get("body") or {}).get("multipart"):
+    if op["risk"] in proxy.SINGLE_RISKS:
+        return _error(
+            "batch_single_only",
+            "涉及资金的操作（financial）不能批量提交：每次只提交一个，单独一张确认卡。",
+        )
+    if proxy.takes_files(op):
         return _error("batch_files_unsupported", "带文件的操作不能批量提交，请逐项调用。")
     session, member = ctx.session, ctx.member
     bot = await session.get(Bot, member.bot_id)

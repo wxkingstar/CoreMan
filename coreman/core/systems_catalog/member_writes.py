@@ -1,7 +1,8 @@
 """A member's own agent calls proxied business systems through the catalog MCP.
 
 The agent (Claude Code, Codex …) holds the member's CoreMan OAuth token with the `mcp` scope. Reads
-run at once as the member. A `write` or `destructive` call is only staged: the public bot (the
+run at once as the member. A `write`, `destructive` or `financial` call is only staged, one per
+card: the public bot (the
 system setting `work_task_notifier_bot_id`) sends the member a confirmation card in its private
 chat, the same card AI employees' writes get, and only a click there by the member runs exactly
 what was staged. The agent learns the outcome from `systems_call_result`. Nothing the agent holds
@@ -49,10 +50,10 @@ BUDGET_WINDOW = timedelta(hours=1)
 DESCRIPTION = (
     "Call an operation of a system marked as platform-proxied (call_mode proxy), as you, the "
     "member. Check it with systems_describe first. Reads run directly. Writes (write, "
-    "destructive) do not run now: the platform sends you a confirmation card in Feishu and runs "
-    "the request only after you click confirm there; then call systems_call_result with the "
-    "confirmation_id to get the outcome. Financial operations, file uploads and batch are not "
-    "available here."
+    "destructive, financial) do not run now: the platform sends you a confirmation card in "
+    "Feishu and runs the request only after you click confirm there; then call "
+    "systems_call_result with the confirmation_id to get the outcome. File uploads and batch "
+    "are not available here."
 )
 RESULT_DESCRIPTION = (
     "The outcome of a write staged by systems_call: waits up to 20 seconds for the member to "
@@ -154,7 +155,7 @@ async def call(ctx: Context, args: proxy.Call) -> dict[str, Any]:
     if isinstance(found, dict):
         return found
     system, loaded, op = found
-    if (op["validate"].get("body") or {}).get("multipart"):
+    if proxy.takes_files(op):
         return {"error": "unsupported_for_member", "message": UNSUPPORTED}
     stop = await _over_budget(ctx, system)
     if stop is not None:
@@ -226,6 +227,7 @@ async def propose(ctx: Context, p: proxy.Prepared, args: proxy.Call) -> dict[str
         "op_digest": confirm.op_digest(p.op),
         "path_params": args.path_params,
         "query": args.query,
+        "headers": p.headers or None,
         "body": args.body,
         "note": args.note.model_dump(exclude_none=True) if args.note else None,
         "files": [],
