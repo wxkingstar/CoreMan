@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 import os
 import secrets
+import socket
 import sys
 import uuid
 from collections.abc import AsyncIterator
@@ -40,7 +42,7 @@ def is_uuid(value: str) -> bool:
 
 
 class AdminClient:
-    def __init__(self, http: httpx.AsyncClient, actor: User) -> None:
+    def __init__(self, http: httpx.AsyncClient, actor: User | None) -> None:
         self.http = http
         self.actor = actor
 
@@ -144,6 +146,15 @@ class AdminClient:
         return one([s for s in rows if s["key"] == key], key, "业务系统", lambda s: s["key"])
 
 
+def operator() -> str:
+    """执行管理命令的系统账号与主机（容器里通常是镜像的运行账号与 Pod 名）。"""
+    try:
+        user = getpass.getuser()
+    except (KeyError, OSError):
+        user = str(os.getuid()) if hasattr(os, "getuid") else "unknown"
+    return f"{user}@{socket.gethostname()}"[:200]
+
+
 def one(found: list[dict[str, Any]], ref: str, kind: str, label: Any) -> dict[str, Any]:
     if not found:
         raise CliError(f"找不到{kind}：{ref}")
@@ -156,14 +167,43 @@ def one(found: list[dict[str, Any]], ref: str, kind: str, label: Any) -> dict[st
 
 @contextlib.asynccontextmanager
 async def connect(actor_login: str | None) -> AsyncIterator[AdminClient]:
-    """起一个不监听端口的 API 应用，以 actor_login 的身份建会话，用完吊销。"""
+    """两种模式：
+
+    - 给了 `--as`（或 COREMAN_CLI_USER）：在 API 镜像里起一个不监听端口的 API 应用，以这位成员的
+      身份建会话，用完吊销。运维和首次初始化用。
+    - 没给、但本机 `coreman login` 过：经 HTTP 以登录的本人身份调远程 CoreMan。
+    """
+    login = actor_login or os.environ.get(ACTOR_ENV)
+    if not login:
+        from coreman.admin_cli import remote
+
+        try:
+            creds = remote.load()
+        except remote.RemoteError as exc:
+            raise CliError(str(exc)) from None
+        if creds is None:
+            raise CliError(
+                "请先用 coreman login --server <CoreMan 地址> 登录；"
+                f"在服务器上运维时用 --as 登录名 指定成员（或设置环境变量 {ACTOR_ENV}）"
+            )
+        try:
+            async with remote.session(creds) as http:
+                yield AdminClient(http, None)
+        except remote.RemoteError as exc:
+            raise CliError(str(exc)) from None
+        except httpx.HTTPError as exc:
+            raise CliError(f"连不上 {creds.server}：{exc}") from None
+        return
+    async with _in_process(login) as client:
+        yield client
+
+
+@contextlib.asynccontextmanager
+async def _in_process(login: str) -> AsyncIterator[AdminClient]:
     # 应用只在真正执行命令时才导入：--help 和其它运维命令不必加载整套路由。
     from coreman.api.main import create_app
     from coreman.api.security import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, sign_session_id
 
-    login = actor_login or os.environ.get(ACTOR_ENV)
-    if not login:
-        raise CliError(f"请用 --as 登录名 指定以谁的身份操作（或设置环境变量 {ACTOR_ENV}）")
     # 只留告警以上的日志：命令行的输出是给人看的结果，不是服务日志。
     settings = get_settings().model_copy(update={"log_level": "WARNING"})
     app = create_app(settings)
@@ -180,7 +220,8 @@ async def connect(actor_login: str | None) -> AsyncIterator[AdminClient]:
             row = AdminSession(
                 user_id=actor.id,
                 auth_method="cli",
-                user_agent="coreman-cli",
+                # 真正操作的人在服务器上：会话里记下系统账号和主机，审计可据会话追到人。
+                user_agent=f"coreman-cli ({operator()})",
                 expires_at=now + SESSION_TTL,
                 last_seen_at=now,
             )
