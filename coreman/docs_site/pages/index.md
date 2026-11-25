@@ -10,6 +10,7 @@ CoreMan 是一个 AI 员工平台：在飞书和企业微信里运行 AI 员工�
 |---|---|---|
 | [本机接入业务系统目录](systems-catalog-mcp.md) | 用 Claude Code、Codex 等本机 Agent 的成员 | 把 CoreMan 的业务系统操作目录接成 MCP，Agent 查到接口后用你自己的令牌直连业务系统。 |
 | [通过 API 驱动 AI 员工](api-tasks.md) | 脚本、外部系统、你自己的 Agent | 用个人 API 令牌给飞书 AI 员工下一件事，在飞书会话里进行，并拿回结果。 |
+| [业务系统代员工调用 AI 员工](business-system-tasks.md) | 业务系统的开发者 | 一个调用方签名，以员工身份给 AI 员工下任务（可带图片），结果发到员工的飞书私聊，写回前由员工确认。 |
 | [业务系统 OpenAPI 接入规范](business-system-contract.md) | 想让 AI 员工调用自己 API 的业务系统 | 按这份契约提供 OpenAPI 描述，AI 员工就能按需发现并调用你的操作。 |
 
 ## 给 AI 读

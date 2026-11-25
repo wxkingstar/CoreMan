@@ -14,6 +14,8 @@ def test_every_page_has_a_source_and_fills_in_the_address() -> None:
         assert docs_site.PLACEHOLDER not in site.html(page.slug)
     assert f"{BASE}/api/systems/mcp?token_env=SSO_TOKEN" in site.markdown("systems-catalog-mcp")
     assert f'BASE = "{BASE}"' in site.markdown("api-tasks")
+    assert f'BASE = "{BASE}"' in site.markdown("business-system-tasks")
+    assert f"]({BASE}/docs/business-system-tasks.md)" in site.markdown("api-tasks")
 
 
 def test_links_between_pages() -> None:
