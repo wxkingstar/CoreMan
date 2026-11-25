@@ -498,3 +498,118 @@ async def test_skill_create_sources_exports_and_local_install(cli, db_session, t
     assert await db_session.scalar(select(AuditLog).where(AuditLog.action == "skill.env_export"))
     code, out, err = await cli("skills", "local-install", "report", "--as", "bob")
     assert code == 0 and "http://testserver" in out and "有效期至" in out, err
+
+
+async def test_tasks_person_to_person_flow(cli, db_session, tmp_path):
+    """建任务指派给成员 → 对方接受 → 评论、关注、完成、重开、取消，全程走命令行。"""
+    await add_user(db_session, "alice", display_name="爱丽丝")
+    await add_user(db_session, "bob", display_name="鲍勃")
+    await add_user(db_session, "carol", display_name="卡罗尔")
+    brief = tmp_path / "brief.md"
+    brief.write_text("列出上季度合作过的供应商\n", encoding="utf-8")
+
+    code, out, err = await cli(
+        "tasks",
+        "create",
+        "整理供应商名单",
+        "--summary",
+        "上季度的",
+        "--brief-file",
+        str(brief),
+        "--assignee",
+        "bob",
+        "--priority",
+        "high",
+        "--due",
+        "2026-12-01T18:00+08:00",
+        "--as",
+        "alice",
+    )
+    assert code == 0 and "todo" in out and "等鲍勃回答" in out, err
+    row = await db_session.scalar(select(WorkTask).where(WorkTask.title == "整理供应商名单"))
+    assert row is not None and row.priority == "high" and row.brief.startswith("列出上季度")
+    assert row.due_at == datetime(2026, 12, 1, 10, tzinfo=UTC)
+    task = row.code
+
+    code, out, _ = await cli("tasks", "list", "--view", "needs_me", "--as", "bob")
+    assert code == 0 and task in out and "鲍勃" in out and "high" in out
+    assert "待我处理：1" in out
+    code, out, _ = await cli("tasks", "list", "--assignee", "user:bob", "--as", "alice")
+    assert task in out
+    code, out, _ = await cli("tasks", "show", task, "--as", "bob")
+    assert code == 0 and "待回答（accept，问 鲍勃）" in out and "accept=接受" in out
+    assert "代表人" in out and "爱丽丝" in out
+
+    # 拒绝要写理由：命令行先拦下。
+    code, _, err = await cli("tasks", "answer", task, "decline", "--as", "bob")
+    assert code == 1 and "要写一句说明" in err
+    code, out, err = await cli("tasks", "answer", task, "accept", "--as", "bob")
+    assert code == 0 and "in_progress" in out, err
+    code, _, err = await cli("tasks", "answer", task, "accept", "--as", "bob")
+    assert code == 1 and "没有待回答的问题" in err
+
+    code, out, err = await cli("tasks", "comment", task, "推荐 A 供应商", "--as", "carol")
+    assert code == 0, err
+    code, out, _ = await cli("tasks", "watch", task, "--on", "--as", "carol")
+    assert code == 0 and "已关注" in out
+    code, out, _ = await cli("tasks", "list", "--view", "watching", "--json", "--as", "carol")
+    assert [i["code"] for i in json.loads(out)["items"]] == [task]
+    # 不相干的人改不了。
+    code, _, err = await cli("tasks", "complete", task, "--as", "carol")
+    assert code == 1 and err.strip()
+
+    code, out, err = await cli(
+        "tasks", "update", task, "--title", "整理供应商名单（Q3）", "--no-due", "--as", "alice"
+    )
+    assert code == 0, err
+    await db_session.refresh(row)
+    assert row.title == "整理供应商名单（Q3）" and row.due_at is None and row.priority == "high"
+    code, _, err = await cli("tasks", "update", task, "--as", "alice")
+    assert code == 1 and "没有要改的字段" in err
+
+    code, out, err = await cli("tasks", "complete", task, "名单已放进共享表", "--as", "bob")
+    assert code == 0 and "done" in out, err
+    code, out, err = await cli("tasks", "reopen", task, "漏了两家", "--as", "alice")
+    assert code == 0 and "done" not in out, err
+    code, _, err = await cli("tasks", "cancel", task, "--as", "alice")
+    assert code == 1 and "--yes" in err
+    code, out, err = await cli("tasks", "cancel", task, "不需要了", "--yes", "--as", "alice")
+    assert code == 0 and "cancelled" in out, err
+
+    code, out, _ = await cli("tasks", "show", task, "--as", "alice")
+    assert "推荐 A 供应商" in out and "卡罗尔" in out
+    code, out, err = await cli("tasks", "stats", "--days", "7", "--as", "alice")
+    assert code == 0 and "按来源" in out and "web" in out, err
+
+
+async def test_tasks_hand_to_an_agent_and_resolve_assignee(cli, db_session):
+    bot, _, _ = await seed_bot(db_session)
+    bot.platform = "feishu"
+    await add_user(db_session, "alice", display_name="爱丽丝")
+    # 和 AI 员工同名的成员：不带前缀时要求写清楚。
+    await add_user(db_session, "sales", display_name="销售")
+    db_session.add(
+        WorkTask(title="试运行", status="shadow", platform="feishu", assignee_bot_id=bot.id)
+    )
+    await db_session.commit()
+
+    code, _, err = await cli("tasks", "create", "查退货率", "--assignee", "销售", "--as", "alice")
+    assert code == 1 and "bot:销售" in err
+    code, _, err = await cli("tasks", "create", "查退货率", "--assignee", "nobody", "--as", "alice")
+    assert code == 1 and "找不到 AI 员工或成员" in err
+    code, out, err = await cli(
+        "tasks", "create", "查退货率", "--assignee", "sales_bot", "--json", "--as", "alice"
+    )
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["assignee"]["type"] == "bot" and data["needs_drive"] is True
+
+    code, out, _ = await cli("tasks", "list", "--assignee", "bot:销售", "--as", "alice")
+    assert data["code"] in out and "待叫开工" in out and "试运行" not in out
+    code, out, _ = await cli("tasks", "list", "--include-shadow", "--as", "alice")
+    assert "试运行" in out
+
+    code, out, err = await cli(
+        "tasks", "assign", data["code"], "user:sales", "--note", "改人做", "--as", "alice"
+    )
+    assert code == 0 and "等销售回答" in out, err
