@@ -118,6 +118,8 @@ ENTITY_SELECTS = {
 }
 # 文件 → 语句里直接引用内容列（`<模型>.<内容列>`）的次数：过滤只能用留明文的键，取值要还原。
 COLUMN_REFERENCES = {
+    # 群承接任务的写操作：按明文载荷键 api_task_id 筛群主会话里的轮次；群承接不用于个人助理
+    "coreman/core/api_tasks/writes.py": 1,
     # 引用的是哪个 API 任务：只按明文键 _feishu_message_id 找出站项，取的是 dedupe_key
     "coreman/core/api_tasks/recall.py": 1,
     "coreman/api/routers/chat_logs.py": 2,  # 关键词 ILIKE：助理记录搜不到，接受

@@ -16,6 +16,7 @@ from coreman.core.bots.secrets import encrypt_json
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     ApiClient,
+    ApiClientGroupRoute,
     AuditLog,
     ChatLog,
     EnvPreset,
@@ -23,6 +24,7 @@ from coreman.core.db.models import (
     Setting,
     Skill,
     SkillSource,
+    User,
     UserIdentity,
     WorkTask,
     WorkTaskEvent,
@@ -300,6 +302,49 @@ async def test_api_clients_and_jwt_keys(cli, db_session):
     assert code == 0 and "是" in out
     code, out, _ = await cli("clients", "token-providers", "--as", "bob")
     assert code == 0 and "builtin" in out
+
+
+async def test_api_client_group_routes(cli, db_session):
+    await add_user(db_session, "ops", "platform_admin")
+    await add_user(db_session, "svc-ops", display_name="运维服务账号")
+    svc = await db_session.scalar(select(User).where(User.login_name == "svc-ops"))
+    svc.source = "service"
+    bot, _, _ = await seed_bot(db_session)
+    bot.platform = "feishu"
+    db_session.add(
+        ApiClient(
+            app_key="monitor",
+            name="监控系统",
+            scopes=["tasks"],
+            bot_ids=[bot.id],
+            secret_enc=CIPHER.encrypt("client-secret", "api_clients.secret_enc"),
+        )
+    )
+    await db_session.commit()
+    code, out, err = await cli("clients", "group-options", "--bot", "sales_bot", "--as", "ops")
+    assert code == 0 and "svc-ops" in out, err
+    code, _, err = await cli(
+        "clients", "group-add", "monitor", "--bot", "sales_bot", "--chat", "oc_ops",
+        "--service-user", "ops", "--as", "ops",
+    )  # fmt: skip
+    assert code == 1 and "服务账号" in err
+    code, out, err = await cli(
+        "clients", "group-add", "monitor", "--bot", "sales_bot", "--chat", "oc_ops",
+        "--service-user", "svc-ops", "--as", "ops",
+    )  # fmt: skip
+    assert code == 0 and "oc_ops" in out, err
+    route = await db_session.scalar(select(ApiClientGroupRoute))
+    assert route is not None and route.service_user_id == svc.id
+    code, out, _ = await cli("clients", "groups", "monitor", "--as", "ops")
+    assert code == 0 and str(route.id) in out and "运维服务账号" in out
+    code, _, err = await cli("clients", "group-remove", "monitor", str(route.id), "--as", "ops")
+    assert code == 1 and "--yes" in err
+    code, _, err = await cli(
+        "clients", "group-remove", "monitor", str(route.id), "--yes", "--as", "ops"
+    )
+    assert code == 0, err
+    db_session.expire_all()
+    assert await db_session.scalar(select(ApiClientGroupRoute)) is None
 
 
 async def test_audit_stats_chats_and_tasks(cli, db_session):

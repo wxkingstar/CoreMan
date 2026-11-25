@@ -4,6 +4,10 @@ Only the asker of the turn that staged the writes counts, in the chat the card w
 confirm every staged write is checked again against today's grants and catalog; if any no longer
 passes, nothing runs. Then they run in order as the asker, stopping at the first failure, and the
 conversation continues with the results.
+
+A business system's group delivery (`api_tasks.groups`) staged the writes as its service account
+in a group: any group member allowed to use the bot may answer the card there, the writes run as
+whoever confirmed, and a later click by someone else is told the card was already answered.
 """
 
 from __future__ import annotations
@@ -16,8 +20,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks import writes
 from coreman.core.auth.system_access import SubjectUnavailable, granted_systems, token_subject
 from coreman.core.bus import outbox, tasks
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, BotSystemGrant, InboundEvent, InteractionState, Task, User
 from coreman.core.systems_catalog import confirm, proxy, service
 from coreman.core.systems_catalog.context import Context
@@ -29,14 +35,18 @@ RESULT_MAX = 1500
 
 
 async def _clicker(
-    session: AsyncSession, origin: Task, inbound: InboundEvent, chat_type: str
+    session: AsyncSession,
+    origin: Task,
+    inbound: InboundEvent,
+    chat_type: str,
+    cipher: Cipher,
 ) -> tuple[uuid.UUID, str] | None:
-    """(user_id, chat_id) of a click made by the asker of `origin` in its chat."""
+    """(user_id, chat_id) of a click made by the asker of `origin` in its chat (for a business
+    system's group delivery: by any group member allowed to use the bot)."""
     if (origin.payload or {}).get("api_client"):
-        # A business system started the turn for the member: the card is in their private chat.
-        from coreman.core.api_tasks import writes
-
-        return await writes.card_clicker(session, origin, inbound)
+        # A business system started the turn: the card is in the member's private chat, or in
+        # the group of a group delivery.
+        return await writes.card_clicker(session, origin, inbound, cipher)
     try:
         if chat_type == "group":
             group = await group_card_scope(session, origin, inbound)
@@ -45,6 +55,63 @@ async def _clicker(
         return (scope.user_id, scope.chat_id) if scope else None
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def _answerer(
+    staged: dict[str, Any],
+    status: str,
+    clicked: tuple[uuid.UUID, str] | None,
+    group: bool,
+    *,
+    anyone_while: tuple[str, ...],
+) -> tuple[uuid.UUID, str] | None:
+    """Who answers this card: (user_id, chat_id), or None when the click does not count.
+
+    Normally only the member who staged the writes, in the chat the card was sent to. A business
+    system's group delivery (`group`) staged them as its service account: while the card's status
+    is one of `anyone_while`, any group member allowed to use the bot may answer (`clicked` was
+    checked for that), and the writes run as them.
+    """
+    if clicked is None or clicked[1] != staged.get("chat_id"):
+        return None
+    if str(clicked[0]) == staged.get("user_id"):
+        return clicked
+    if group and status in anyone_while:
+        return clicked
+    return None
+
+
+async def taken(
+    session: AsyncSession,
+    bot: Bot,
+    inbound: InboundEvent,
+    state: InteractionState,
+    clicked: tuple[uuid.UUID, str] | None,
+    group: bool,
+) -> None:
+    """A group delivery's card that was already answered: tell the late clicker in the group.
+
+    Two people may press at once; the first wins (the batch row is locked) and the card shows its
+    answer, the other gets this. The card itself is left as the first answer made it."""
+    if (
+        not group
+        or clicked is None
+        or clicked[1] != state.state.get("chat_id")
+        or state.status not in ("submitted", "cancelled")
+    ):
+        return
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=f"{inbound.id}:card_taken",
+        target={"chat_id": inbound.chat_id},
+        payload={
+            "markdown": "这张确认卡已经有人处理过了，你的这次点击没有生效。",
+            "_mention_user_id": inbound.sender_platform_user_id,
+        },
+    )
 
 
 async def _context(
@@ -197,8 +264,12 @@ async def handle(
     staged = state.state if state else {}
     if state is None or staged.get("origin_task_id") != origin.id or not staged.get("sent"):
         return "ignored"
-    who = await _clicker(session, origin, inbound, str(staged.get("chat_type")))
-    if who is None or str(who[0]) != staged.get("user_id") or who[1] != staged.get("chat_id"):
+    clicked = await _clicker(session, origin, inbound, str(staged.get("chat_type")), ctx.cipher)
+    group = await writes.group_origin(session, origin)
+    who = _answerer(staged, state.status, clicked, group, anyone_while=("open", "expired"))
+    if who is None:
+        # 群承接模式：先到先得，后到的人在群里收到一句「已经有人处理过」。
+        await taken(session, bot, inbound, state, clicked, group)
         return "ignored"
     now = utcnow()
     where: dict[str, Any] = {

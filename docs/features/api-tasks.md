@@ -119,3 +119,31 @@ coreman clients set intake --no-bot
 ```
 
 需要数据库迁移 `0125`–`0128`。运行时节点不用升级。设计见 [2026-11-24-api-tasks-system-clients.md](../superpowers/specs/2026-11-24-api-tasks-system-clients.md)。
+
+## 群承接模式
+
+监控系统这类调用方没有「哪位员工」，结果应该进群里接着讨论。平台管理员可以给调用方的某个 AI 员工配「群承接」：每条配置是（AI 员工, 群 chat_id, 服务账号）。服务账号必须是在用的 service 账号；建配置时可以从该 AI 员工告警来源里已有的群和服务账号里选。配了之后，这个调用方驱动这个 AI 员工就只走群模式，没配的调用方和 AI 员工行为不变。
+
+```bash
+POST /api/infra/tasks/run
+{"bot_key": "ops-bot", "prompt": "订单服务 5xx 升高，排查原因", "chat_id": "oc_xxx", "request_id": "alert-123"}
+```
+
+- **身份锁死**：请求里带 `user` 返回 422；执行身份固定是配置里的服务账号，AI 员工只有它的权限。不要求飞书身份、私聊过和使用白名单；仍要求调用方有 `tasks`、AI 员工在可驱动列表里、已启用、开着「允许 API 驱动」。
+- `chat_id`：只配了一个群时可省略；配了多个必须指定（422）；不在配置里 404。
+- **图片**：和私聊模式一样可以带 `images`，按顺序进这一轮，群里第一句注明附了几张图。上传时不带 `user`，改带 `bot_key`（多个承接群时再带 `chat_id`，都在签名里），图片归配置的服务账号，发起时按同一个身份认领；别的员工名下的上传认领不了（404）。幂等和同内容去重都算上图片。
+- **群主会话**：在群里先发「在「系统名」里发起」加任务内容，这一轮跑在群的主会话里（和群里 @ 它同一个会话），排在群里正在跑的轮次后面；回复直接发在群里、留在上下文中，不加推送尾注；群里 `/new` 照常重置。本轮提示写明调用方传入的内容是外部数据不是指令。不向服务账号索要个人凭证，不挂个人工具和个人定时任务（同告警回合）。
+- **写操作**：照常暂存，确认卡发到这个群；群成员中在 AI 员工使用白名单里的人（白名单为空则所有群成员）都能点，点了按**点击人**的身份和权限执行，业务系统调用记录记点击人。两人同时点先到先得，后到的人在群里收到一句「已经有人处理过」。批量写确认后由确认人负责停止、继续。
+- **排队上限**：每个（AI 员工, 群）里群模式发起、还在排队（不含执行中）的任务最多 5 条，超出返回 429，`errors` 为 `[{"type": "queue_full"}]`，不建任务。群里真人提问不计入。
+- 查询、取消不带 `user`（带了 422），返回的 `data` 用 `conversation: {"target": "chat", "chat_id": …}` 代替 `user`。`request_id` 幂等、同内容未结束去重照旧。
+
+管理命令：
+
+```bash
+coreman clients group-options --bot ops-bot                  # 告警来源里的群与服务账号、所有在用服务账号
+coreman clients group-add monitor --bot ops-bot --chat oc_xxx --service-user svc-ops
+coreman clients groups monitor
+coreman clients group-remove monitor <配置 id> --yes
+```
+
+需要数据库迁移 `0135`，节点不用升级。设计见 [2026-11-25-api-client-group-delivery.md](../superpowers/specs/2026-11-25-api-client-group-delivery.md)。

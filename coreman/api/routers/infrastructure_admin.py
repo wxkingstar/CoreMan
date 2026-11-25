@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,12 +23,14 @@ from coreman.api.routers.systems_catalog import refresh_as
 from coreman.api.security import verify_csrf
 from coreman.api.system_grants import apply_grants, current_grants, lock_bot
 from coreman.api.versioning import require_if_match, set_etag
+from coreman.core.api_tasks import groups as api_groups
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, granted_systems
 from coreman.core.auth.tokens import active_key, public_keys
 from coreman.core.bots.permissions import is_bot_admin
 from coreman.core.db.models import (
     ApiClient,
+    ApiClientGroupRoute,
     Bot,
     BotSkill,
     BotSystemGrant,
@@ -729,7 +731,19 @@ async def list_clients(
     page: PageParams = Depends(),
 ) -> dict[str, Any]:
     data = await paginate(session, select(ApiClient).order_by(ApiClient.app_key), page)
-    data["items"] = [client_out(row) for row in data["items"]]
+    keys = [row.app_key for row in data["items"]]
+    counts: dict[str, int] = {
+        key: int(count)
+        for key, count in await session.execute(
+            select(ApiClientGroupRoute.client_key, func.count())
+            .where(ApiClientGroupRoute.client_key.in_(keys))
+            .group_by(ApiClientGroupRoute.client_key)
+        )
+    }
+    data["items"] = [
+        {**client_out(row), "group_routes": int(counts.get(row.app_key, 0))}
+        for row in data["items"]
+    ]
     return {"code": 0, "data": data}
 
 
@@ -795,6 +809,143 @@ async def rotate_client(
     await audit(session, request, user, "api_client.rotate", "api_client", key)
     await persist(session, commit=True)
     return {"code": 0, "data": {**client_out(row), "secret": secret}}
+
+
+class GroupRouteIn(BaseModel):
+    bot_id: uuid.UUID
+    chat_id: str = Field(min_length=1, max_length=128)
+    service_user_id: uuid.UUID
+
+    @field_validator("chat_id", mode="before")
+    @classmethod
+    def trim_chat(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
+async def group_route_out(session: AsyncSession, row: ApiClientGroupRoute) -> dict[str, Any]:
+    bot = await session.get(Bot, row.bot_id)
+    user = await session.get(User, row.service_user_id)
+    return {
+        "id": str(row.id),
+        "bot_id": str(row.bot_id),
+        "bot_key": bot.bot_key if bot else None,
+        "bot_name": bot.name if bot else None,
+        "chat_id": row.chat_id,
+        "service_user_id": str(row.service_user_id),
+        "service_user": (user.display_name or user.login_name) if user else None,
+        "created_at": row.created_at,
+    }
+
+
+async def _client(session: AsyncSession, key: str) -> ApiClient:
+    row = await session.get(ApiClient, key)
+    if row is None:
+        raise not_found("调用方不存在")
+    return row
+
+
+@router.get("/api-clients/group-route-options")
+async def group_route_options(
+    bot_id: uuid.UUID | None = None,
+    user: User = Depends(ADMINS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """建群承接配置时可选的群和服务账号：该 AI 员工告警来源里的，以及所有在用的服务账号。"""
+    return {"code": 0, "data": await api_groups.options(session, bot_id)}
+
+
+@router.get("/api-clients/{key}/group-routes")
+async def list_group_routes(
+    key: str,
+    user: User = Depends(ADMINS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    await _client(session, key)
+    rows = await session.scalars(
+        select(ApiClientGroupRoute)
+        .where(ApiClientGroupRoute.client_key == key)
+        .order_by(ApiClientGroupRoute.created_at, ApiClientGroupRoute.id)
+    )
+    return {"code": 0, "data": [await group_route_out(session, row) for row in rows]}
+
+
+@router.post("/api-clients/{key}/group-routes", status_code=201)
+async def create_group_route(
+    key: str,
+    body: GroupRouteIn,
+    request: Request,
+    user: User = Depends(ADMINS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """群承接配置：调用方驱动这个 AI 员工时，以这个服务账号在这个群里跑。"""
+    client = await _client(session, key)
+    bot = await session.get(Bot, body.bot_id)
+    if bot is None:
+        raise ApiError(422, 422, "AI 员工不存在")
+    if bot.platform != "feishu" or bot.kind == "assistant":
+        raise ApiError(422, 422, "群承接只支持飞书 AI 员工")
+    if bot.id not in (client.bot_ids or []):
+        raise ApiError(422, 422, "先把这个 AI 员工加进调用方「可驱动的 AI 员工」")
+    service_user = await session.get(User, body.service_user_id)
+    if not api_groups.service_usable(service_user):
+        raise ApiError(422, 422, "执行身份必须是在用的服务账号")
+    exists = await session.scalar(
+        select(ApiClientGroupRoute.id).where(
+            ApiClientGroupRoute.client_key == key,
+            ApiClientGroupRoute.bot_id == bot.id,
+            ApiClientGroupRoute.chat_id == body.chat_id,
+        )
+    )
+    if exists is not None:
+        raise ApiError(409, 409, "这个群已经配置过群承接")
+    row = ApiClientGroupRoute(
+        id=uuid.uuid4(),
+        client_key=key,
+        bot_id=bot.id,
+        chat_id=body.chat_id,
+        service_user_id=body.service_user_id,
+        created_by=user.id,
+    )
+    session.add(row)
+    await persist(session)
+    await audit(
+        session,
+        request,
+        user,
+        "api_client.group_route.create",
+        "api_client",
+        key,
+        {
+            "bot_id": str(bot.id),
+            "chat_id": body.chat_id,
+            "service_user_id": str(body.service_user_id),
+        },
+    )
+    await persist(session, commit=True)
+    await session.refresh(row)
+    return {"code": 0, "data": await group_route_out(session, row)}
+
+
+@router.delete("/api-clients/{key}/group-routes/{route_id}")
+async def delete_group_route(
+    key: str,
+    route_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(ADMINS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    row = await session.get(ApiClientGroupRoute, route_id)
+    if row is None or row.client_key != key:
+        raise not_found("群承接配置不存在")
+    diff = {
+        "bot_id": str(row.bot_id),
+        "chat_id": row.chat_id,
+        "service_user_id": str(row.service_user_id),
+    }
+    await session.delete(row)
+    await audit(session, request, user, "api_client.group_route.delete", "api_client", key, diff)
+    await persist(session, commit=True)
+    return {"code": 0, "data": None}
 
 
 @router.get("/jwt-keys")

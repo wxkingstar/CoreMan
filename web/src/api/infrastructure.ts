@@ -34,6 +34,17 @@ export interface SystemCatalog {
 export interface CatalogSkipped { status: 'skipped'; error: string }
 export interface ApiClient {
   app_key: string; name: string; scopes: string[]; bot_ids: string[]; enabled: boolean; version: number; last_used_at: string | null; has_secret: boolean
+  /** 群承接配置条数（列表里给出）。 */
+  group_routes?: number
+}
+/** 群承接：调用方驱动这个 AI 员工时，以服务账号身份在这个群的主会话里跑。 */
+export interface ApiClientGroupRoute {
+  id: string; bot_id: string; bot_key: string | null; bot_name: string | null; chat_id: string
+  service_user_id: string; service_user: string | null; created_at: string
+}
+export interface GroupRouteOptions {
+  alert_sources: { chat_id: string; service_user_id: string }[]
+  service_users: { id: string; login_name: string; display_name: string | null }[]
 }
 // external：部署配置的外部签发方密钥（BOT_JWT_*），没有创建时间，也不参与轮换。
 export interface JwtKey { kid: string; is_active: boolean; created_at: string | null; retired_at: string | null; external?: boolean }
@@ -96,6 +107,10 @@ export const credentials = {
   create: (body: { app_key: string; name: string; scopes: string[]; bot_ids: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),
   update: (row: ApiClient) => call<ApiClient>(http.put(`/api/admin/api-clients/${row.app_key}`, { name: row.name, scopes: row.scopes, bot_ids: row.bot_ids, enabled: row.enabled }, { headers: { 'If-Match': String(row.version) } })),
   rotate: (row: ApiClient) => call<ApiClient & { secret: string }>(http.post(`/api/admin/api-clients/${row.app_key}/rotate-secret`, {}, { headers: { 'If-Match': String(row.version) } })),
+  groupRoutes: (key: string) => call<ApiClientGroupRoute[]>(http.get(`/api/admin/api-clients/${key}/group-routes`)),
+  groupRouteOptions: (botId?: string) => call<GroupRouteOptions>(http.get('/api/admin/api-clients/group-route-options', { params: { bot_id: botId } })),
+  addGroupRoute: (key: string, body: { bot_id: string; chat_id: string; service_user_id: string }) => call<ApiClientGroupRoute>(http.post(`/api/admin/api-clients/${key}/group-routes`, body)),
+  removeGroupRoute: (key: string, id: string) => call<null>(http.delete(`/api/admin/api-clients/${key}/group-routes/${id}`)),
   keys: () => call<JwtKey[]>(http.get('/api/admin/jwt-keys')),
   rotateKey: () => call<{ kid: string }>(http.post('/api/admin/jwt-keys/rotate')),
 }

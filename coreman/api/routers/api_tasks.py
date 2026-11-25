@@ -20,7 +20,7 @@ from coreman.api.errors import ApiError, not_found
 from coreman.api.infra_auth import require_scope
 from coreman.api.routers.feishu_personal import interactive_user
 from coreman.api.security import verify_csrf
-from coreman.core.api_tasks import service, tokens, uploads
+from coreman.core.api_tasks import groups, service, tokens, uploads
 from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.audit import record_audit
 from coreman.core.db.models import (
@@ -37,7 +37,8 @@ router = APIRouter(tags=["api-tasks"])
 
 
 def _error(exc: TokenError) -> ApiError:
-    return ApiError(exc.status, exc.status, exc.message)
+    errors = [{"type": exc.error}] if exc.error else None
+    return ApiError(exc.status, exc.status, exc.message, errors)
 
 
 async def _caller(request: Request, session: AsyncSession) -> tuple[PersonalAccessToken, User]:
@@ -150,8 +151,11 @@ async def cancel_task(
 
 class ClientTaskIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    user: str = Field(min_length=1, max_length=128)
+    # 员工邮箱前缀。调用方为这个 AI 员工配了群承接时不能带（执行身份固定为服务账号）。
+    user: str | None = Field(default=None, min_length=1, max_length=128)
     bot_key: str = Field(min_length=1, max_length=50)
+    # 群承接模式在哪个群发起；只配了一个群时可省略。
+    chat_id: str | None = Field(default=None, min_length=1, max_length=128)
     prompt: str = Field(min_length=1, max_length=service.PROMPT_MAX)
     request_id: str | None = Field(default=None, min_length=1, max_length=service.REQUEST_ID_MAX)
     # 先用 /api/infra/tasks/uploads 逐张上传拿到的 upload_id，按顺序；张数不限。
@@ -160,7 +164,8 @@ class ClientTaskIn(BaseModel):
 
 class ClientUserIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    user: str = Field(min_length=1, max_length=128)
+    # 群承接模式的任务不带。
+    user: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 tasks_client = require_scope(service.CLIENT_SCOPE)
@@ -173,11 +178,21 @@ async def upload_client_image(
     client: ApiClient = Depends(tasks_upload_client),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """一次一张：表单字段 `user`、`sha256`（都在签名里）和文件 `file`。"""
+    """一次一张：表单字段 `user`、`sha256`（都在签名里）和文件 `file`。
+
+    群承接模式不带 `user`，改带 `bot_key`（多个承接群时再带 `chat_id`）：图片归配置里的服务
+    账号，发起时按同一个身份认领。"""
     form = await request.form()
     subject, digest, upload = form.get("user"), form.get("sha256"), form.get("file")
-    if not isinstance(subject, str) or not isinstance(digest, str) or isinstance(upload, str):
-        raise ApiError(422, 422, "需要表单字段 user、sha256 和文件 file")
+    bot_key, chat_id = form.get("bot_key"), form.get("chat_id")
+    group = subject is None and isinstance(bot_key, str) and bool(bot_key)
+    if (
+        not (isinstance(subject, str) or group)
+        or not isinstance(digest, str)
+        or isinstance(upload, str)
+        or (chat_id is not None and not isinstance(chat_id, str))
+    ):
+        raise ApiError(422, 422, "需要表单字段 user（群承接模式为 bot_key）、sha256 和文件 file")
     if upload is None:
         raise ApiError(422, 422, "需要文件 file")
     data = await upload.read(uploads.MAX_BYTES + 1)
@@ -187,7 +202,18 @@ async def upload_client_image(
     if hashlib.sha256(data).hexdigest() != digest.strip().lower():
         raise ApiError(401, 401, "接口签名无效或已过期")
     try:
-        user = await service.resolve_member(session, subject)
+        if group:
+            assert isinstance(bot_key, str)
+            user = await groups.upload_owner(
+                session, client, bot_key, chat_id if isinstance(chat_id, str) else None
+            )
+        else:
+            assert isinstance(subject, str)
+            if isinstance(bot_key, str) and await groups.routes_for(
+                session, client.app_key, (await service.bot_by_key(session, bot_key)).id
+            ):
+                raise TokenError(422, "这个 AI 员工走群承接模式，上传图片不能带 user")
+            user = await service.resolve_member(session, subject)
         row = await uploads.save(session, client_key=client.app_key, user_id=user.id, data=data)
     except TokenError as exc:
         await session.rollback()
@@ -240,22 +266,28 @@ async def create_client_task(
             prompt=body.prompt,
             request_id=body.request_id,
             images=body.images,
+            chat_id=body.chat_id,
         )
     except TokenError as exc:
         await session.rollback()
         raise _error(exc) from None
     if created:
+        group = groups.is_group_row(row)
+        actor = await session.get(User, row.user_id) if group else None
         await record_audit(
             session,
             action="api_task.create",
             actor_id=row.user_id,
-            actor_login=body.user.strip().lower(),
+            actor_login=(
+                actor.login_name if actor is not None else (body.user or "").strip().lower()
+            ),
             target_type="bot",
             target_id=str(row.bot_id),
             diff={
                 "api_task_id": str(row.id),
                 "api_client": client.app_key,
                 "images": len(row.image_ids),
+                **({"chat_id": row.chat_id} if group else {}),
             },
             ip=client_ip(request),
         )
@@ -267,12 +299,18 @@ async def create_client_task(
 
 
 async def _client_task(
-    session: AsyncSession, client: ApiClient, task_id: uuid.UUID, subject: str
+    session: AsyncSession, client: ApiClient, task_id: uuid.UUID, subject: str | None
 ) -> ApiTask:
-    """只看得到这个调用方自己为这位员工发起的任务。"""
+    """只看得到这个调用方自己发起的任务：私聊模式还要是为这位员工发起的。"""
     row = await session.get(ApiTask, task_id)
     if row is None or row.client_key != client.app_key:
         raise not_found("任务不存在")
+    if groups.is_group_row(row):
+        if subject is not None:
+            raise ApiError(422, 422, "群承接模式的任务不带 user")
+        return row
+    if subject is None:
+        raise ApiError(422, 422, "需要 user（员工邮箱前缀）")
     user = await session.get(User, row.user_id)
     prefix = (user.email or "").split("@", 1)[0].lower() if user else ""
     if not prefix or prefix != subject.strip().lower():
@@ -283,7 +321,7 @@ async def _client_task(
 @router.get("/api/infra/tasks/run/{task_id}")
 async def get_client_task(
     task_id: uuid.UUID,
-    user: str = Query(min_length=1, max_length=128),
+    user: str | None = Query(default=None, min_length=1, max_length=128),
     client: ApiClient = Depends(tasks_client),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
