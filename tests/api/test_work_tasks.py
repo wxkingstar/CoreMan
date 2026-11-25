@@ -271,3 +271,19 @@ async def test_changing_the_reviewer_moves_the_question(
         f"/api/admin/work-tasks/{code}", json={"reviewer_user_id": str(carol.id)}
     )
     assert moved.json()["data"]["ask"]["to"]["id"] == str(carol.id)
+
+
+async def test_stats_show_backlog_and_first_pass_rate(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    bob = await _member(db_session, "bob")
+    await login_as(client, db_session, display_name="alice")
+    for title in ("写周报", "订场地"):
+        await client.post(
+            "/api/admin/work-tasks",
+            json={"title": title, "assignee": {"type": "human", "id": str(bob.id)}},
+        )
+    stats = (await client.get("/api/admin/work-tasks/stats", params={"days": 7})).json()["data"]
+    assert stats["backlog"][0]["assignee"]["name"] == "bob" and stats["backlog"][0]["open"] == 2
+    assert {s["source"]: s["created"] for s in stats["by_source"]} == {"web": 2}
+    assert stats["agent_first_pass_rate"] is None

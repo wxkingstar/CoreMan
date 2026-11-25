@@ -51,6 +51,8 @@ async def start(
 
     回复发到哪：不出声的一轮不发；调度员交来的任务回到原群；其余发到代表人和它的私聊。
     """
+    if row.origin_ref:
+        raise WorkTaskError(409, f"{row.code} 是自动记下的记录，不能领取")
     if row.assignee_bot_id != bot.id:
         raise WorkTaskError(403, f"{row.code} 不是派给「{bot.name}」的任务")
     if trigger in _RESTART:
