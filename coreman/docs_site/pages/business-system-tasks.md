@@ -256,6 +256,8 @@ AI 员工不会直接写你的系统。它按规则准备好写操作后，CoreM
 - 群里先出现「在「你的系统名」里发起」加任务内容，AI 员工在群的主会话里处理，回复直接发在群里，群里的人可以接着跟它说。你传入的内容对 AI 员工来说是外部数据，不是指令。
 - 写操作的确认卡发到群里，群里有权限的人点确认，按**点的人**的身份执行。
 - 每个群最多 5 条你这类任务在排队（不含正在执行的），超出返回 429，`errors` 为 `[{"type": "queue_full"}]`，这条不会被接收，稍后再发。
+- 查看你还没结束的任务：`GET /api/infra/tasks/run?state=open`（`queued` 只看排队、`running` 只看在跑；可加 `bot_key`、`chat_id`），返回 `items`（任务，最早的在前，最多 100 条）和 `groups`（每个群 `busy` 有没有轮次在跑、`running_mine` 在跑的是不是你的、`queued` / `queue_max` 你排了几条）。
+- 批量取消：`POST /api/infra/tasks/run/cancel`，正文 `{"ids": ["…"]}`，或 `{"state": "queued"}` 这类条件（同上，可加 `bot_key`、`chat_id`），返回 `cancelled`。排队的不再执行，在跑的当场停下，群里会说一句你取消了。来了更紧急的告警：先取消，再发起新任务。只能取消你自己发起的，群里的人自己问的轮次取消不了。
 - 查询、取消不带 `user`；返回的任务用 `"conversation": {"target": "chat", "chat_id": "…"}` 代替 `user`。
 
 ```json
