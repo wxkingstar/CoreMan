@@ -91,6 +91,9 @@ class WorkerService(Service):
         from coreman.core.chat.transcribe import from_settings as transcriber_from_settings
 
         self._transcriber = transcriber_from_settings(settings)
+        from coreman.core.assistants.approvals import attachments
+
+        self._tmp_store = attachments.store(settings)
         self._engine = make_engine(settings.database_url)
         self._factory = make_session_factory(self._engine)
         self._store = SettingsStore(self._factory)
@@ -272,6 +275,7 @@ class WorkerService(Service):
             openuserid=self._openuserid,
             media_fetcher=self._media_fetcher,
             transcriber=self._transcriber,
+            tmp_store=self._tmp_store,
         )
         run = asyncio.create_task(self._run(ctx), name=f"task-{task.id}")
         self._running[task.id] = (run, ctx)

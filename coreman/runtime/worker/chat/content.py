@@ -60,6 +60,7 @@ class ContentStage(ChatStageBase):
                 cipher=ctx.cipher,
                 base_url=ctx.public_base_url,
                 now=utcnow(),
+                store=ctx.tmp_store,
             )
             await session.commit()
         return found

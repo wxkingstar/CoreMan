@@ -2,13 +2,15 @@
 
 一次一张、单张不超过 10MB，按文件头认 JPEG / PNG / WebP。上传属于「调用方 + 员工」，别人的
 任务引用不到。没被任务引用的 24 小时后清掉；被引用的跟着任务保留 30 天，引用回复时还能再看。
-前 `INLINE` 张直接放进这一轮给模型看，更多的给 AI 员工限时下载链接，让它分批下载、逐张打开。
+前 `INLINE` 张直接放进这一轮给模型看，更多的给 AI 员工限时下载链接（优先放进文件中转站的临时桶），
+让它分批下载、逐张打开。
 见 docs/superpowers/specs/2026-11-24-api-tasks-system-clients.md 第 5.1、6.2 节。
 """
 
 from __future__ import annotations
 
 import hashlib
+import secrets
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -20,6 +22,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.api_tasks.tokens import TokenError
+from coreman.core.assistants.approvals import attachments
+from coreman.core.assistants.approvals.attachments import Store
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import ApiTaskUpload
 from coreman.core.timeutils import utcnow
@@ -160,22 +164,69 @@ def turn_parts(
     return parts
 
 
-def split_for_turn(
-    parts: list[dict[str, Any]], *, cipher: Cipher, base_url: str, now: datetime
+async def links(
+    session: AsyncSession,
+    ids: Sequence[uuid.UUID],
+    *,
+    store: Store | None,
+    cipher: Cipher,
+    base_url: str,
+    now: datetime,
+) -> tuple[list[str], str]:
+    """多出来的图片的下载链接和有效期说明。
+
+    配了文件中转站的临时桶（`ASSISTANT_TMP_S3_*`）：把图片复制过去，给 7 天的预签名链接，节点走
+    对象存储的公网地址下载，不用能访问管理台；桶的自动清理兜底删除。没配，或复制失败的那张，
+    用平台自己的 24 小时链接。
+    """
+    rows = {
+        row.id: row
+        for row in await session.scalars(select(ApiTaskUpload).where(ApiTaskUpload.id.in_(ids)))
+    }
+    found: list[str] = []
+    all_tmp = store is not None
+    for index, identity in enumerate(ids, INLINE + 1):
+        row = rows.get(identity)
+        url = None
+        if store is not None and row is not None:
+            ref = {
+                "key": f"{store.prefix}api-tasks/{secrets.token_urlsafe(32)}",
+                "filename": _filename(row, index),
+            }
+            try:
+                await attachments.put(store, ref["key"], bytes(row.data))
+                url = attachments.link(store, ref, attachments.MAX_LINK_SECONDS)
+            except attachments.Unavailable:
+                # 桶连不上：剩下的不再逐张等超时，都用平台链接。
+                store = None
+        if url is None:
+            all_tmp = False
+            url = link(cipher, base_url, identity, now)
+        found.append(url)
+    return found, ("7 天" if all_tmp else "24 小时")
+
+
+async def split_for_turn(
+    session: AsyncSession,
+    parts: list[dict[str, Any]],
+    *,
+    store: Store | None,
+    cipher: Cipher,
+    base_url: str,
+    now: datetime,
 ) -> list[dict[str, Any]]:
-    """开轮时：前 `INLINE` 张留给模型直接看，其余换成一段下载清单（链接这时才签，24 小时有效）。"""
+    """开轮时：前 `INLINE` 张留给模型直接看，其余换成一段下载清单（链接这时才签）。"""
     images = [p for p in parts if p.get("type") == "image"]
     if len(images) <= INLINE:
         return parts
-    rest = images[INLINE:]
+    rest = [uuid.UUID(str(p["ref"]["file_key"])) for p in images[INLINE:]]
+    urls, ttl = await links(session, rest, store=store, cipher=cipher, base_url=base_url, now=now)
     lines = [
         f"本次共 {len(images)} 张图片：前 {INLINE} 张已直接附在这条消息里；"
-        f"其余 {len(rest)} 张请用下面的链接下载到工作目录 api-inputs/ 下（链接 24 小时内有效），"
+        f"其余 {len(rest)} 张请用下面的链接下载到工作目录 api-inputs/ 下（链接 {ttl}内有效），"
         "分批逐张打开查看，全部看完再给结论，不要跳过："
     ]
-    for index, part in enumerate(rest, INLINE + 1):
-        identity = uuid.UUID(str(part["ref"]["file_key"]))
-        lines.append(f"{index}. {link(cipher, base_url, identity, now)}")
+    lines += [f"{index}. {url}" for index, url in enumerate(urls, INLINE + 1)]
     kept = [p for p in parts if p.get("type") != "image"] + images[:INLINE]
     return [*kept, {"type": "text", "text": "\n".join(lines)}]
 
