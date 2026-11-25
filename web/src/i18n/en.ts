@@ -452,6 +452,7 @@ const en = {
     assignee: 'Assignee', requester: 'Requester', dispatcher: 'Dispatcher', created: 'Created', updated: 'Updated',
     summary: 'One line', related: 'Related tasks', timeline: 'History', noEvents: 'Nothing recorded yet',
     agentLayer: 'Details for agents', agentLayerHint: 'Folded by default. The full background given to AI employees and the details of every run; anyone can expand it.',
+    report: 'Full report', artifacts: 'Deliverables',
     brief: 'Background and requirements', digest: 'Task digest', decision: 'Dispatch basis',
     probability: 'Decision probability', dispatchRaw: 'Raw dispatcher output', recentMessages: 'Group messages at the time', detail: 'Details',
     notFound: 'Task not found', unassigned: 'Unassigned', empty: 'No tasks yet',
@@ -470,8 +471,8 @@ const en = {
     confirmAssign: 'Confirm', principal: 'Acting for', reviewer: 'Reviewer', noReview: 'No review', parent: 'Parent', children: 'Subtasks',
     commentPlaceholder: 'Comment: visible to everyone and passed to the AI employee working on it', comment: 'Comment',
     runs: 'AI employee runs ({n})', fullEvents: 'All events and details',
-    triggers: { dispatch: 'Dispatcher handoff', chat: 'Told to start in chat', cron: 'Scheduled claim', rerun: 'Sent back to redo', web: 'Started from the web', followup: 'Follow-up', api: 'API' },
-    runStatuses: { running: 'Running', done: 'Delivered', confirm: 'Needs confirmation', failed: 'Stuck', cancelled: 'Cancelled' },
+    triggers: { subtask: 'Subtask from another employee', resume: 'Resumed with subtask results', comment: 'Resumed after a comment', handoff: 'Handed over', dispatch: 'Dispatcher handoff', chat: 'Told to start in chat', cron: 'Scheduled claim', rerun: 'Sent back to redo', web: 'Started from the web', followup: 'Follow-up', api: 'API' },
+    runStatuses: { running: 'Running', done: 'Delivered', confirm: 'Needs confirmation', failed: 'Stuck', cancelled: 'Cancelled', waiting: 'Waiting on subtasks' },
     deliverPrompt: 'The result in one line (for people, up to 60 characters)', cancelPrompt: 'Why cancel?', reopenPrompt: 'Why reopen? (optional)',
   },
   groupObserve: {

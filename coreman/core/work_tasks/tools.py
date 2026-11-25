@@ -280,6 +280,14 @@ async def get_task(session: AsyncSession, bot: Bot, args: dict[str, Any]) -> dic
         "for_agents": {
             "brief": row.brief,
             "digest": row.digest,
+            "report": row.report,
+            "artifacts": row.artifacts,
+            "children": [
+                {"code": c.code, "title": c.title, "status": c.status, "summary": c.summary}
+                for c in await session.scalars(
+                    select(WorkTask).where(WorkTask.parent_id == row.id).order_by(WorkTask.id)
+                )
+            ],
             "waiting_on": row.waiting_on,
             "details": [
                 {

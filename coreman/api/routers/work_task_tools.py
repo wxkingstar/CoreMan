@@ -6,17 +6,29 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.api import mcp_rpc
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
 from coreman.core.bus import tasks
-from coreman.core.db.models import Bot, Task
-from coreman.core.work_tasks import tools
+from coreman.core.db.models import WORK_TASK_OPEN, Bot, Task, WorkTask
+from coreman.core.work_tasks import agent_tools, tools
 
 router = APIRouter(tags=["work-tasks"])
 MAX_BODY = 65_536
+
+
+async def _current(session: AsyncSession, task: Task, bot: Bot, *, lock: bool) -> WorkTask | None:
+    session_key = task.session_key or ""
+    if not session_key.startswith("work:"):
+        return None
+    stmt = select(WorkTask).where(WorkTask.code == session_key.removeprefix("work:"))
+    row = await session.scalar(stmt.with_for_update() if lock else stmt)
+    if row is None or row.assignee_bot_id != bot.id or row.status not in WORK_TASK_OPEN:
+        return None
+    return row
 
 
 @router.post(tools.API_PATH)
@@ -45,13 +57,18 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
+    # 任务会话（work:<编号>）里、这件事此刻在这位员工手上而且没结束：另有做任务用的工具。
+    # 只有调用这些工具时才锁任务行，列工具、领取别的任务都不锁。
+    locking = method == "tools/call" and params.get("name") in agent_tools.NAMES
+    current = await _current(session, task, bot, lock=locking)
     if method == "initialize":
         return mcp_rpc.initialize(rid, params, "coreman-tasks")
     result: dict[str, Any]
     if method in ("ping", "tools/list"):
         if params:
             return mcp_rpc.error(rid, -32602, "Invalid params")
-        result = {} if method == "ping" else {"tools": tools.definitions()}
+        listed = tools.definitions() + (agent_tools.definitions() if current else [])
+        result = {} if method == "ping" else {"tools": listed}
     elif method == "tools/call":
         if (
             set(params) - {"name", "arguments"}
@@ -59,9 +76,23 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             or not isinstance(params.get("arguments", {}), dict)
         ):
             return mcp_rpc.error(rid, -32602, "Invalid params")
-        value = await tools.invoke(
-            session, capability, bot, params["name"], params.get("arguments", {})
-        )
+        name, arguments = params["name"], params.get("arguments", {})
+        if name in agent_tools.NAMES:
+            value = (
+                await agent_tools.invoke(
+                    session,
+                    current,
+                    bot,
+                    name,
+                    arguments,
+                    chat_task_id=task.id,
+                    base_url=request.app.state.settings.public_base_url,
+                )
+                if current is not None
+                else {"error": "not_in_task", "stop": True, "message": "这一轮不在做任务"}
+            )
+        else:
+            value = await tools.invoke(session, capability, bot, name, arguments)
         await session.commit()
         result = {
             "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],

@@ -577,9 +577,12 @@ class OpenStage(ChatStageBase):
                 public_base_url=ctx.public_base_url,
                 mcp_supported=mcp_ok and not unattended,
             ):
+                from coreman.core.work_tasks import agent_tools
                 from coreman.core.work_tasks import tools as work_task_tools
 
                 extra += work_task_tools.POLICY
+                if intake.session_key.startswith("work:"):
+                    extra += agent_tools.TASK_POLICY
             from coreman.runtime.worker.chat import credentials
 
             if unattended:
@@ -758,6 +761,9 @@ class OpenStage(ChatStageBase):
             ),
         )
         self._after_supervisor(pre)
+        if ctx.task.payload.get("work_silent"):
+            # 子任务这样不出声的一轮：进度与超时通知也不推（回复上下文里的会话是假的）。
+            pre.supervisor.silent = True
         return pre
 
     def _joinable(self, ctx: TaskContext, intake: Intake) -> bool:
@@ -944,7 +950,9 @@ class OpenStage(ChatStageBase):
 
     def _structured_reply(self, ctx: TaskContext) -> bool:
         """这一轮的回答是不是交给平台按固定格式解析、不给人看。默认只有协作的 helper 阶段。"""
-        return ctx.task.payload.get("collaboration_phase") == "helper"
+        return ctx.task.payload.get("collaboration_phase") == "helper" or bool(
+            ctx.task.payload.get("work_silent")
+        )
 
     def _stream_kwargs(self, ctx: TaskContext, intake: Intake) -> dict[str, Any]:
         """覆盖 `open_stream` 的关键字参数（流 id、投递模式、回复上下文）。默认不覆盖。"""
@@ -952,6 +960,9 @@ class OpenStage(ChatStageBase):
             return {
                 "reply_context": {**intake.inbound.reply_context, "_collaboration_helper": True}
             }
+        if ctx.task.payload.get("work_silent"):
+            # 子任务：结果由平台交回上级任务，这条流不发到飞书。
+            return {"reply_context": {**intake.inbound.reply_context, "_silent": True}}
         if ctx.task.payload.get("origin") == "observe":
             # 插话回合不推流式卡片：网关等终稿出来再发，终稿是「不说话」就什么也不发。
             return {"reply_context": {**intake.inbound.reply_context, "_observe": True}}

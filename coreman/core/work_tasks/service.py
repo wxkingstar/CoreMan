@@ -398,6 +398,12 @@ async def answer(
     line = f"{who}：{label}" + (f"，{text}" if text else "")
     result = Answered()
     kind = ask["kind"]
+    if kind == "question":
+        # AI 员工问的问题：选项和「其他」都是答复，这件小事就此完成，答复原文交回问的员工。
+        row.ask, row.status, row.closed_at, row.waiting_on = None, "done", now(), None
+        row.summary = clip(f"{label}" + (f"：{text}" if text else ""), SUMMARY_MAX)
+        human_event(session, row, user, "answer", line, detail)
+        return result
     if option == OTHER:
         # 平台的选择题里选「其他」：当作写一句话回给对方，问题还留着，之后照样可以选。
         human_event(session, row, user, "answer", line, detail)

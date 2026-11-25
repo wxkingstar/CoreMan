@@ -23,6 +23,8 @@ export interface WorkTask {
   /** 现在在谁手上、等什么：一句话。 */
   now: string
   ask: WorkTaskAsk | null; can_manage: boolean; related_codes: string[]
+  /** 产出物（给人看）。 */
+  artifacts: { title: string; url: string }[]
   created_at: string; updated_at: string; closed_at: string | null
 }
 export interface WorkTaskEvent {
@@ -40,7 +42,8 @@ export interface WorkTaskDetail extends WorkTask {
   events: WorkTaskEvent[]
   /** 给 Agent 看的那一层：页面上默认折叠。 */
   agent: {
-    brief: string; digest: string; waiting_on: Record<string, unknown> | null; runs: WorkTaskRun[]
+    brief: string; digest: string; report: string
+    waiting_on: Record<string, unknown> | null; runs: WorkTaskRun[]
     decision: {
       id: number; probability: number | null; outcome: string
       recent_messages: { sender: string; sender_kind: string; text: string }[]
