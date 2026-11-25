@@ -13,6 +13,7 @@ from coreman.core.chat.card_replies import REPLY_BUTTON
 from coreman.core.crypto import Cipher
 from coreman.core.feishu_cards.reply_buttons import ReplyClick, parse_form, parse_reply
 from coreman.core.personal_credentials.policy import parse_card_task_id, sealed_aad
+from coreman.core.systems_catalog.member_writes import parse_card_ref as parse_member_write
 from coreman.core.wecom.cards import parse_task_id
 from coreman.core.wecom.messages import (
     AudioPart,
@@ -173,6 +174,7 @@ def _normalize_event(
             and topics.parse_card_task_id(task_id) is None
             and stream_stop.parse_card_task_id(task_id) is None
             and background_runs.parse_card_task_id(task_id) is None
+            and parse_member_write(task_id) is None
         ) or not header.get("event_id"):
             return None
         user_id = str(operator.get("user_id") or "")

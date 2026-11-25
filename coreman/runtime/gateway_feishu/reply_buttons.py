@@ -26,7 +26,14 @@ from coreman.core.bus import tasks
 from coreman.core.chat import busy_choice, stream_stop
 from coreman.core.chat.card_replies import REPLY_BUTTON, clicked
 from coreman.core.chat.reachability import private_chat_of
-from coreman.core.db.models import FeishuDelivery, InboundEvent, OutboxItem, Task, TaskStream
+from coreman.core.db.models import (
+    FeishuDelivery,
+    InboundEvent,
+    InteractionState,
+    OutboxItem,
+    Task,
+    TaskStream,
+)
 from coreman.core.feishu_cards.reply_buttons import (
     UsedRow,
     batch_actions,
@@ -36,6 +43,7 @@ from coreman.core.feishu_cards.reply_buttons import (
 )
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuError
+from coreman.core.systems_catalog import member_writes
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import InboundBot, enqueue_inbound
 
@@ -154,7 +162,14 @@ def _busy_click(message: InboundMessage) -> Outcome | None:
 # 卡片回调 value 里的 event_key。网关不引入这些卡片所在的模块（有的在 worker 里），
 # 写成字面值；测试核对它们与各模块的常量一致。
 WRITE_CARD_EVENTS = frozenset(
-    {"feishu_group_write", "assistant_write", "cloud_write", "systems_write", "systems_batch"}
+    {
+        "feishu_group_write",
+        "assistant_write",
+        "cloud_write",
+        "systems_write",
+        "systems_batch",
+        "member_write",
+    }
 )
 SCHEDULE_EVENT = "personal_schedule"
 TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
@@ -210,7 +225,8 @@ def _card_click(message: InboundMessage) -> Outcome | None:
     return None
 
 
-# 只有发起人能点的确认卡：按钮 value 的 task_id 是 `personal:<发起那条消息的任务>`。
+# 只有发起人能点的确认卡：按钮 value 的 task_id 是 `personal:<发起那条消息的任务>`；
+# 成员本机发起的写操作是 `personal:member-write:<待确认记录>`，发起人记在那条记录里。
 _INITIATOR_ONLY = frozenset(
     {"write_confirm", "write_cancel", "write_resend", "schedule_confirm", "schedule_cancel"}
 )
@@ -220,7 +236,17 @@ async def _initiator_clicked(
     session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage
 ) -> bool | None:
     """点的人是不是发起那条消息的人。只为选 toast：真正的校验在 worker，这里认不出返回 None。"""
-    kind, _, raw_id = str((message.card_action or {}).get("task_id") or "").partition(":")
+    task_id = str((message.card_action or {}).get("task_id") or "")
+    state_id = member_writes.parse_card_ref(task_id)
+    if state_id is not None:
+        state = await session.get(InteractionState, state_id)
+        if state is None or state.bot_id != bot_id or state.kind != member_writes.KIND:
+            return None
+        owner = state.state.get("platform_user_id")
+        if not owner:
+            return None
+        return bool(owner == message.sender.platform_user_id)
+    kind, _, raw_id = task_id.partition(":")
     if kind != "personal" or not raw_id.isdigit():
         return None
     origin = await session.get(Task, int(raw_id))

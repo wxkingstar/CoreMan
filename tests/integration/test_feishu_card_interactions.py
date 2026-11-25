@@ -2,6 +2,7 @@
 
 import json
 import time
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -16,6 +17,7 @@ from coreman.core.db.models import (
     ChatLog,
     FeishuDelivery,
     InboundEvent,
+    InteractionState,
     OutboxItem,
     Task,
     TaskStream,
@@ -531,6 +533,45 @@ async def test_confirm_card_toast_knows_whether_the_initiator_clicked(db_session
         (await click(factory, bot, confirm("confirm", "e4", task_id="personal:999999")))[0],
     ]
     assert outcomes == ["write_confirm", "write_cancel", "not_initiator", None]
+
+
+async def test_member_write_card_click_lands_and_toast_knows_the_member(db_session, db_engine):
+    bot, _cipher = await feishu_worker_bot(db_session)
+    state_id = uuid.uuid4()
+    db_session.add(
+        InteractionState(
+            id=state_id,
+            bot_id=bot.id,
+            kind="member_write",
+            scope_key=str(state_id),
+            state={"platform_user_id": ASKER},
+        )
+    )
+    await db_session.commit()
+    factory = make_session_factory(db_engine)
+
+    def confirm(verb, event_id, user_id=ASKER, ref=state_id):
+        value = {
+            "task_id": f"personal:member-write:{ref}",
+            "event_key": "member_write",
+            "level": f"{verb}:{ref}",
+        }
+        return click_event(value, "om_member", user_id=user_id, event_id=event_id)
+
+    outcomes = [
+        (await click(factory, bot, confirm("confirm", "e1")))[0],
+        (await click(factory, bot, confirm("cancel", "e2")))[0],
+        (await click(factory, bot, confirm("confirm", "e3", user_id="someone")))[0],
+        # 待确认记录不存在：回兜底。
+        (await click(factory, bot, confirm("confirm", "e4", ref=uuid.uuid4())))[0],
+    ]
+    assert outcomes == ["write_confirm", "write_cancel", "not_initiator", None]
+    # 点击都落了库、排了任务，worker 才收得到。
+    async with factory() as session:
+        events = list(await session.scalars(select(InboundEvent).order_by(InboundEvent.id)))
+        queued = list(await session.scalars(select(Task).where(Task.kind == "card_action")))
+    assert len(events) == 4
+    assert all(e.kind == "card_action" for e in events) and len(queued) == 4
 
 
 async def test_stop_button_toast_knows_whether_the_requester_clicked(db_session, db_engine):
