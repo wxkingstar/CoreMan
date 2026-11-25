@@ -61,8 +61,7 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/work-tasks', name: 'work-tasks', component: WorkTasksView },
-      { path: '/work-tasks/:code', name: 'work-task', component: WorkTasksView },
+      { path: '/work-tasks/:code?', name: 'work-tasks', component: WorkTasksView },
     ],
   })
 }
@@ -136,5 +135,37 @@ describe('WorkTasksView', () => {
     const panel = wrapper.find('[data-test="work-task-stats"]')
     expect(panel.text()).toContain('韩梅梅')
     expect(panel.text()).toContain(i18n.global.t('workTasks.sources.api'))
+  })
+
+  it('shows the creation time and opens a task in a dialog without reloading the list', async () => {
+    const router = makeRouter()
+    await router.push('/work-tasks')
+    await router.isReady()
+    const wrapper = mount(
+      { template: '<router-view />' },
+      { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body },
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain(i18n.global.t('workTasks.created'))
+    const listed = vi.mocked(workTasks.list).mock.calls.length
+    vi.mocked(workTasks.get).mockClear()
+    await wrapper.find('.tasks-table .el-table__row').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.params.code).toBe('T-7')
+    expect(workTasks.get).toHaveBeenCalledWith('T-7')
+    // 点开详情不重新加载列表。
+    expect(vi.mocked(workTasks.list).mock.calls.length).toBe(listed)
+    const dialog = document.body.querySelector('.task-dialog')
+    expect(dialog).not.toBeNull()
+    // 关掉弹窗（Esc 与右上角关闭走同一个 close 事件），回到列表，同样不重新加载。
+    // Esc、右上角关闭都会让弹窗发出 close（jsdom 不跑过渡动画，这里直接发）。
+    const detail = wrapper
+      .findAllComponents({ name: 'ElDialog' })
+      .find(d => d.attributes('data-test') === 'work-task-detail' || d.props('modelValue') === true)
+    detail?.vm.$emit('close')
+    await flushPromises()
+    expect(router.currentRoute.value.params.code ?? '').toBe('')
+    expect(vi.mocked(workTasks.list).mock.calls.length).toBe(listed)
+    wrapper.unmount()
   })
 })

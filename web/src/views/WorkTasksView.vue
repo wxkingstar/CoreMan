@@ -124,8 +124,9 @@ function startTag(row: WorkTask): { text: string; type: 'warning' | 'info' | 'su
   if (row.start_mode === 'auto') return { text: t('workTasks.autoStart'), type: 'info' }
   return { text: t('workTasks.claimed'), type: 'success' }
 }
-function show(row: WorkTask): void { void router.push({ name: 'work-task', params: { code: row.code } }) }
-function close(): void { void router.push({ name: 'work-tasks' }) }
+// 列表和详情是同一个路由（`/work-tasks/:code?`）：打开、关闭详情只换参数，列表不重新加载。
+function show(row: WorkTask): void { void router.push({ name: 'work-tasks', params: { code: row.code } }) }
+function close(): void { void router.push('/work-tasks') }
 function pretty(value: unknown): string { return JSON.stringify(value, null, 2) }
 function actorLabel(actor: { type: string; name: string } | null): string {
   if (!actor) return t('workTasks.unassigned')
@@ -426,6 +427,15 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           {{ row.due_at ? formatDateTime(row.due_at) : '—' }}
         </template>
       </el-table-column>
+      <el-table-column
+        :label="t('workTasks.created')"
+        width="170"
+        data-test="col-created"
+      >
+        <template #default="{ row }">
+          {{ formatDateTime(row.created_at) }}
+        </template>
+      </el-table-column>
     </el-table>
     <div
       v-if="more && view !== 'stats'"
@@ -444,9 +454,14 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
       @created="d => { updated(d); show(d) }"
     />
 
-    <el-drawer
+    <el-dialog
       :model-value="!!code"
-      size="min(760px, 100%)"
+      width="96vw"
+      top="2vh"
+      class="task-dialog"
+      append-to-body
+      destroy-on-close
+      close-on-press-escape
       :title="detail ? `${detail.code} · ${detail.title}` : code"
       data-test="work-task-detail"
       @close="close"
@@ -626,7 +641,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           >
             <router-link
               v-if="detail.parent"
-              :to="{ name: 'work-task', params: { code: detail.parent.code } }"
+              :to="{ name: 'work-tasks', params: { code: detail.parent.code } }"
               class="related"
             >
               {{ t('workTasks.parent') }} {{ detail.parent.code }}
@@ -634,7 +649,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
             <router-link
               v-for="item in detail.related_codes"
               :key="item"
-              :to="{ name: 'work-task', params: { code: item } }"
+              :to="{ name: 'work-tasks', params: { code: item } }"
               class="related"
             >
               {{ item }}
@@ -669,7 +684,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
               v-for="child in detail.children"
               :key="child.code"
             >
-              <router-link :to="{ name: 'work-task', params: { code: child.code } }">
+              <router-link :to="{ name: 'work-tasks', params: { code: child.code } }">
                 {{ child.code }} {{ child.title }}
               </router-link>
               <span class="muted"> · {{ child.now }}</span>
@@ -817,7 +832,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           </el-collapse-item>
         </el-collapse>
       </div>
-    </el-drawer>
+    </el-dialog>
   </section>
 </template>
 
@@ -832,6 +847,8 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
 .title-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .now-line { margin-top: 2px; }
 .task-detail { display: flex; flex-direction: column; gap: 12px; }
+:global(.task-dialog) { max-width: 1600px; margin-bottom: 2vh; }
+:global(.task-dialog .el-dialog__body) { max-height: calc(96vh - 64px); overflow-y: auto; }
 .task-detail h4 { margin: 8px 0 0; }
 .task-detail pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
 .now :deep(.el-alert__content) { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
