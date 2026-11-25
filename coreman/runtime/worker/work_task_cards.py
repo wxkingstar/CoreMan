@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -13,8 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
 from coreman.core.db.models import Bot, InboundEvent, User, UserIdentity, WorkTask
-from coreman.core.work_tasks import cards, execute, flow
-from coreman.core.work_tasks.service import WorkTaskError, current_line
+from coreman.core.work_tasks import cards, due, execute, flow
+from coreman.core.work_tasks.service import (
+    WorkTaskError,
+    can_manage,
+    current_line,
+    human_event,
+    name_of,
+)
 from coreman.runtime.worker.context import TaskContext
 
 
@@ -59,6 +66,8 @@ async def handle(
         return "ignored"
     row = await session.get(WorkTask, task_pk, with_for_update=True)
     user = await _clicker(session, inbound)
+    if action.get("event_key") == due.EVENT_KEY:
+        return await _postpone(session, ctx, bot, inbound, row, user, option)
     if row is None or user is None or not ask_id or not option:
         return "ignored"
     selected = action.get("selected") or {}
@@ -95,3 +104,45 @@ async def handle(
         # 选了「其他」：话记下了，问题还在，卡片不动。
         return "noted"
     return "answered"
+
+
+async def _postpone(
+    session: AsyncSession,
+    ctx: TaskContext,
+    bot: Bot,
+    inbound: InboundEvent,
+    row: WorkTask | None,
+    user: User | None,
+    option: str,
+) -> str:
+    """截止提醒卡片上的「延期 N 天」：能管这件事的人点了才算。"""
+    try:
+        days = int(option)
+    except ValueError:
+        return "ignored"
+    if row is None or user is None or days not in due.POSTPONE_DAYS:
+        return "ignored"
+    if not can_manage(row, user) or row.status in ("done", "cancelled", "shadow"):
+        await _show(
+            session, bot, inbound, row, f"没有延期：{current_line(row, {})}", ctx.public_base_url
+        )
+        return "refused"
+    due.postpone(row, days, datetime.now(UTC))
+    assert row.due_at is not None
+    human_event(
+        session,
+        row,
+        user,
+        "updated",
+        f"{name_of(user)}延期 {days} 天，截止改为 {row.due_at:%m-%d %H:%M} UTC",
+        {"due_at": row.due_at.isoformat()},
+    )
+    await _show(
+        session,
+        bot,
+        inbound,
+        row,
+        f"已延期 {days} 天，截止 {row.due_at:%m-%d %H:%M} UTC",
+        ctx.public_base_url,
+    )
+    return "postponed"

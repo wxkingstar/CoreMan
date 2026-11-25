@@ -15,6 +15,8 @@ export interface WorkTaskAsk {
 /** 给人看的那一层。 */
 export interface WorkTask {
   code: string; title: string; summary: string; status: WorkTaskStatus; source: string
+  /** 自动记下的账本记录（API 任务、求助）：只读。 */
+  mirror: boolean
   platform: string | null; chat_id: string | null; requester_name: string
   requester: WorkTaskActor | null; principal: WorkTaskActor | null
   assignee: WorkTaskActor | null; reviewer: WorkTaskActor | null; dispatcher: WorkTaskBot | null
@@ -64,6 +66,12 @@ export interface WorkTaskPatch {
   title?: string; summary?: string; brief?: string; priority?: string; due_at?: string | null
   reviewer_user_id?: string | null; review_required?: boolean
 }
+export interface WorkTaskStats {
+  days: number
+  backlog: { assignee: WorkTaskActor | null; open: number; overdue: number }[]
+  by_source: { source: string; created: number; done: number; avg_hours: number | null }[]
+  handoffs_per_task: number | null; agent_first_pass_rate: number | null; agent_reviewed: number
+}
 const base = '/api/admin/work-tasks'
 const one = (code: string) => `${base}/${encodeURIComponent(code)}`
 export const workTasks = {
@@ -72,6 +80,7 @@ export const workTasks = {
       http.get(base, { params }),
     ),
   get: (code: string) => call<WorkTaskDetail>(http.get(one(code))),
+  stats: (days = 30) => call<WorkTaskStats>(http.get(`${base}/stats`, { params: { days } })),
   create: (body: WorkTaskCreate) => call<WorkTaskDetail>(http.post(base, body)),
   assign: (code: string, body: { assignee: AssigneeIn; note?: string; review_required?: boolean | null }) =>
     call<WorkTaskDetail>(http.post(`${one(code)}/assign`, body)),

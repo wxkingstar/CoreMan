@@ -155,6 +155,7 @@ class CardActionHandler:
                 from coreman.core.systems_catalog import batch as systems_batch
                 from coreman.core.systems_catalog import confirm as systems_confirm
                 from coreman.core.work_tasks import cards as work_task_cards_core
+                from coreman.core.work_tasks import due as work_task_due
                 from coreman.runtime.worker import (
                     assistant_range,
                     assistant_scope,
@@ -184,6 +185,7 @@ class CardActionHandler:
                     cold_start.EVENT_KEY: cold_start_cards.handle,
                     request_cards.EVENT_KEY: gap_request_cards.handle,
                     work_task_cards_core.EVENT_KEY: work_task_cards.handle,
+                    work_task_due.EVENT_KEY: work_task_cards.handle,
                 }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)
                 await tasks.finish(

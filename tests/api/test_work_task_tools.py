@@ -69,6 +69,7 @@ async def test_agent_lists_and_claims_tasks_as_the_principal(
     assert {t["name"] for t in listed.json()["result"]["tools"]} == {
         "list_my_tasks",
         "start_task",
+        "search_tasks",
         "get_task",
     }
     response = await client.post(URL, json=_call("list_my_tasks", {}), headers=auth)
