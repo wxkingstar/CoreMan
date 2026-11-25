@@ -15,7 +15,7 @@ import { useAuthStore } from '@/stores/auth'
 
 const ERROR_KEYS = [
   'invalid_state', 'code_replayed', 'wecom_error', 'feishu_error', 'feishu_not_configured', 'not_member',
-  'user_not_found', 'user_disabled', 'rate_limited', 'wecom_not_configured',
+  'user_not_found', 'user_disabled', 'rate_limited', 'wecom_not_configured', 'oidc_error', 'oidc_not_configured',
 ] as const
 
 const { t } = useI18n()
@@ -64,6 +64,10 @@ function goWecom(mode: 'qr' | 'oauth') {
 
 function goFeishu() {
   window.location.assign(`/api/auth/feishu/start?redirect=${encodeURIComponent(wecomRedirect())}`)
+}
+
+function goOidc() {
+  window.location.assign(`/api/auth/oidc/start?redirect=${encodeURIComponent(wecomRedirect())}`)
 }
 
 onMounted(async () => {
@@ -156,6 +160,16 @@ function changeLocale(l: Locale) {
           :closable="false"
           class="login-alert"
         />
+        <el-button
+          v-if="providers.oidc"
+          type="primary"
+          plain
+          class="oidc-login"
+          data-test="oidc-login"
+          @click="goOidc"
+        >
+          {{ t('login.useOidc', { name: providers.oidc }) }}
+        </el-button>
         <el-segmented
           v-if="platformOptions.length > 1 && !usePassword"
           :model-value="scanPlatform ?? undefined"
@@ -256,4 +270,5 @@ function changeLocale(l: Locale) {
 @media(min-width:1600px) { .login-story { padding: 48px 70px 30px; }.story-copy { margin-top: 80px; } }
 @media(max-width:1023px) { .login-page { grid-template-columns: minmax(0,1fr) minmax(360px,1fr); }.login-story { padding: 32px 24px 24px; }.story-copy { margin-top: 70px; }.story-copy h1 { font-size: 38px; }.login-entry { padding: 100px 30px 64px; } }
 @media(max-width:767px) { .login-page { grid-template-columns: 1fr; }.login-story { min-height: auto; padding: 24px 24px 0; }.story-brand { font-size: 22px; }.story-brand :deep(img) { width: 36px; height: 36px; }.story-copy { margin: 26px 0 0; }.story-copy h1 { font-size: 33px; white-space: pre-line; letter-spacing: -1px; max-width: 12em; }.story-copy p { font-size: 13px; margin-bottom: 0; }.companion-scene { max-width: 430px; margin-top: -6px; }.story-footer { display: none; }.login-entry { padding: 88px 24px 64px; }.login-tools { top: 22px; right: 24px; }.login-header { margin-bottom: 28px; }.login-title { font-size: 26px; margin-top: 0; } }
+.oidc-login { width: 100%; margin-bottom: 16px; }
 </style>

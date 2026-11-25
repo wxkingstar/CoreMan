@@ -25,6 +25,17 @@ export const apiTokens = {
   revoke: (id: string) => call<ApiToken>(http.delete(`${me}/api-tokens/${encodeURIComponent(id)}`)),
 }
 
+/** 本人授权过的本机应用（OAuth）。客户端名称是应用自报的。 */
+export interface OAuthGrant {
+  id: string; client_name: string; scope: string[]
+  created_at: string; last_used_at: string | null; expires_at: string
+}
+
+export const oauthGrants = {
+  list: () => call<OAuthGrant[]>(http.get(`${me}/oauth-grants`)),
+  revoke: (id: string) => call<null>(http.delete(`${me}/oauth-grants/${encodeURIComponent(id)}`)),
+}
+
 export const botApiAccess = {
   get: (id: string, signal?: AbortSignal) => call<BotApiAccess>(http.get(`${bot(id)}/api-access`, { signal })),
   set: (id: string, enabled: boolean) => call<BotApiAccess>(http.patch(`${bot(id)}/api-access`, { enabled })),

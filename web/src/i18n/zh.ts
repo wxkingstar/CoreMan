@@ -648,9 +648,11 @@ export default {
     usePassword: '没有{platform}？用账号密码登录',
     backToScan: '返回{platform}扫码登录',
 
+    useOidc: '使用 {name} 登录',
     required: '请输入{field}',
     failed: '登录失败',
     errors: {
+      oidc_error: '统一登录失败，请重试', oidc_not_configured: '尚未配置统一登录',
       feishu_error: '飞书登录失败，请重试', feishu_not_configured: '尚未配置飞书登录',
       invalid_state: '登录状态已失效，请重新登录',
       code_replayed: '登录凭证已被使用，请重新登录',

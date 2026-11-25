@@ -2,7 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiTokens, type ApiToken, type ApiTokenBot } from '@/api/apiAccess'
+import { apiTokens, oauthGrants, type ApiToken, type ApiTokenBot, type OAuthGrant } from '@/api/apiAccess'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
 
@@ -14,11 +14,28 @@ const busy = ref(false)
 const creating = ref(false)
 const plaintext = ref('')
 const form = reactive({ name: '', botIds: [] as string[], days: 90 })
+const grants = ref<OAuthGrant[]>([])
 
 async function load() {
   busy.value = true
-  try { rows.value = await apiTokens.list(); error.value = '' }
+  try {
+    const [tokens, authorized] = await Promise.all([apiTokens.list(), oauthGrants.list()])
+    rows.value = tokens
+    grants.value = authorized
+    error.value = ''
+  }
   catch (e) { error.value = errorMessage(e) }
+  finally { busy.value = false }
+}
+async function revokeGrant(row: OAuthGrant) {
+  try {
+    await ElMessageBox.confirm(t('apiAccess.grants.revokeConfirm', { name: row.client_name }), t('apiAccess.grants.revoke'), {
+      type: 'warning', confirmButtonText: t('apiAccess.tokens.confirm'), cancelButtonText: t('apiAccess.tokens.cancel'),
+    })
+  } catch { return }
+  busy.value = true
+  try { await oauthGrants.revoke(row.id); ElMessage.success(t('apiAccess.grants.revoked')); await load() }
+  catch (e) { ElMessage.error(errorMessage(e)) }
   finally { busy.value = false }
 }
 async function openCreate() {
@@ -162,6 +179,67 @@ onMounted(load)
         </template>
       </el-table-column>
     </el-table>
+    <section class="grants">
+      <h2>{{ t('apiAccess.grants.title') }}</h2>
+      <p class="intro">
+        {{ t('apiAccess.grants.intro') }}
+      </p>
+      <el-empty
+        v-if="!busy && !error && !grants.length"
+        :description="t('apiAccess.grants.empty')"
+        :image-size="60"
+      />
+      <el-table
+        v-if="grants.length"
+        :data="grants"
+        row-key="id"
+        data-test="oauth-grants"
+      >
+        <el-table-column
+          :label="t('apiAccess.grants.client')"
+          prop="client_name"
+          min-width="160"
+        />
+        <el-table-column
+          :label="t('apiAccess.grants.scope')"
+          min-width="140"
+        >
+          <template #default="{ row }">
+            <el-tag
+              v-for="name in row.scope"
+              :key="name"
+              size="small"
+              class="bot-tag"
+              type="info"
+            >
+              {{ t(`apiAccess.grants.scopes.${name}`) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('apiAccess.grants.createdAt')">
+          <template #default="{ row }">
+            {{ formatDateTime(row.created_at) }}
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('apiAccess.grants.lastUsedAt')">
+          <template #default="{ row }">
+            {{ row.last_used_at ? formatDateTime(row.last_used_at) : t('apiAccess.grants.never') }}
+          </template>
+        </el-table-column>
+        <el-table-column width="100">
+          <template #default="{ row }">
+            <el-button
+              link
+              type="danger"
+              :data-test="'revoke-grant-' + row.id"
+              @click="revokeGrant(row)"
+            >
+              {{ t('apiAccess.grants.revoke') }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
     <section class="usage">
       <h2>{{ t('apiAccess.tokens.usageTitle') }}</h2>
       <p>{{ t('apiAccess.tokens.usage') }}</p>
@@ -265,6 +343,8 @@ onMounted(load)
 .actions { display: flex; gap: 8px; margin: 16px 0; }
 .bot-tag { margin: 2px 4px 2px 0; }
 .usage { margin-top: 32px; max-width: 80ch; }
+.grants { margin-top: 32px; }
+.grants h2 { font-size: 16px; }
 .usage h2 { font-size: 16px; }
 .usage p { color: var(--el-text-color-secondary); line-height: 1.7; }
 .plaintext { display: block; margin-top: 16px; padding: 12px; word-break: break-all; background: var(--el-fill-color-light); border-radius: 4px; user-select: all; }

@@ -123,6 +123,22 @@ describe('LoginView', () => {
     expect(wrapper.find('[data-test="back-to-scan"]').exists()).toBe(false)
   })
 
+  it('offers single sign-on when the deployment configures OIDC', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { ...window.location, assign })
+    vi.mocked(authApi.providers).mockResolvedValueOnce({ wecom: false, feishu: false, oidc: '统一登录' })
+    const router = makeRouter()
+    await router.push('/login?redirect=%2Fbots')
+    const wrapper = mount(LoginView, { attachTo: document.body, global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    const button = wrapper.get('[data-test="oidc-login"]')
+    expect(button.text()).toBe('使用 统一登录 登录')
+    await button.trigger('click')
+    expect(assign).toHaveBeenCalledWith('/api/auth/oidc/start?redirect=%2Fbots')
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+  })
+
   it('leads with the embedded Feishu QR code and signs in with the tmp_code it posts back', async () => {
     const assign = vi.fn()
     vi.stubGlobal('location', { ...window.location, assign })

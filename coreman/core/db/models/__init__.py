@@ -145,6 +145,7 @@ from coreman.core.db.models.knowledge import (
     SkillSource,
 )
 from coreman.core.db.models.logs import CHAT_LOG_RUNNING, CHAT_LOG_STATUSES, CHAT_TYPES, ChatLog
+from coreman.core.db.models.oauth import OAuthAccessToken, OAuthClient, OAuthGrant
 from coreman.core.db.models.platform import CAPABILITIES, ContactSyncRun, PlatformApp
 from coreman.core.db.models.relay import (
     HEALTH_STATUSES,
@@ -408,3 +409,5 @@ __all__ += [
     "AssistantWatch",
     "FeishuRateUsage",
 ]
+
+__all__ += ["OAuthAccessToken", "OAuthClient", "OAuthGrant"]
