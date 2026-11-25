@@ -280,6 +280,28 @@ async def overview(client: FeishuClient, *, observe: bool = False) -> dict[str, 
     }
 
 
+async def missing(client: FeishuClient, *, observe: bool = False) -> list[str]:
+    """应用还没开通的清单权限（应用身份与用户身份合并），只读一次应用信息；读不到抛 FeishuError。"""
+    body = await client.call("GET", V6_APP, params={"lang": "zh_cn"})
+    app = _dict(_dict(body.get("data")).get("app"))
+    if not app:
+        raise FeishuError(-2, "app unavailable")
+    tenant: set[str] = set()
+    user: set[str] = set()
+    for item in app.get("scopes") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("scope"), str):
+            continue
+        token_types = _strings(item.get("token_types"))
+        if "tenant" in token_types:
+            tenant.add(item["scope"])
+        if "user" in token_types:
+            user.add(item["scope"])
+    return sorted(
+        set(manifest.missing_scopes(sorted(tenant), kind="tenant", observe=observe))
+        | set(manifest.missing_scopes(sorted(user), kind="user"))
+    )
+
+
 async def observe_permission(client: FeishuClient) -> str:
     """群聊旁听要的权限：granted；missing（应用没开通，需扫码补齐）；pending（待管理员审核）。"""
     return await scope_permission(client, manifest.OBSERVE_SCOPES)

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, Uuid, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from coreman.core.db.base import Base, TimestampMixin, enum_check
@@ -51,3 +53,6 @@ class FeishuAppRegistration(TimestampMixin, Base):
     secret_enc: Mapped[str | None] = mapped_column(Text)
     owner_open_id: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+    # 从私聊卡片发起的补齐：{"chat_id", "message_id", "task_id"}。scheduler 替发起人取回结果
+    # 并写回这张卡片；管理台发起的为空，由页面自己轮询。
+    notify_card: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

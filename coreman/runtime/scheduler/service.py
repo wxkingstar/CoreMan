@@ -132,6 +132,7 @@ class SchedulerService(Service):
                 ("scheduler-alerts", self._alerts_loop()),
                 ("scheduler-relay-health", self._relay_health_loop()),
                 ("scheduler-wecom-provisions", self._wecom_provisions_loop()),
+                ("scheduler-feishu-app-scopes", self._feishu_app_scopes_loop()),
                 ("scheduler-wecom-personal", self._wecom_personal_loop()),
                 ("scheduler-tower-reconcile", self._tower_reconcile_loop()),
                 ("scheduler-contact-sync", self._contact_sync_loop()),
@@ -560,6 +561,18 @@ class SchedulerService(Service):
             except Exception:
                 self._log.exception("wecom_provisions_sweep_failed")
             await self._sleep(provisions.POLL_SECONDS)
+
+    async def _feishu_app_scopes_loop(self) -> None:
+        """管理员在私聊卡片上点了「补齐权限」：替他取回飞书确认结果并写回卡片。"""
+        from coreman.core.feishu_apps import scope_prompt
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    await scope_prompt.sweep(self._factory, self._cipher)
+            except Exception:
+                self._log.exception("feishu_app_scopes_sweep_failed")
+            await self._sleep(scope_prompt.POLL_SECONDS)
 
     async def _wecom_personal_loop(self) -> None:
         """企业微信个人授权：替离开页面的本人取回扫码结果，并在授权估计到期前提醒本人。"""
