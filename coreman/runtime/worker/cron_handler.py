@@ -289,6 +289,23 @@ class CronRunHandler:
                     )
                     personal_prompt += CRON_POLICY
                     collaborating = True
+                if asked is None:
+                    from coreman.core.work_tasks import tools as work_task_tools
+                    from coreman.runtime.worker.chat import work_tools
+
+                    if work_tools.mount(
+                        env,
+                        cipher=ctx.cipher,
+                        bot=bot,
+                        task_id=ctx.task.id,
+                        actor_id=actor.id,
+                        kind="cron",
+                        public_base_url=ctx.public_base_url,
+                        mcp_supported=await mcp_runtime_supported(
+                            session, relay=relay, model=bot.model
+                        ),
+                    ):
+                        personal_prompt += work_task_tools.CRON_POLICY
                 personal_secrets: frozenset[str] = frozenset()
                 if asked is None:
                     # 本人创建的定时任务算本人触发：注入执行人的个人凭证并下发索取令牌。

@@ -565,6 +565,21 @@ class OpenStage(ChatStageBase):
             extra, env = await feishu_docs.configure(
                 session, ctx, intake, info.relay_session_id, extra, env
             )
+            from coreman.runtime.worker.chat import work_tools
+
+            if work_tools.mount(
+                env,
+                cipher=ctx.cipher,
+                bot=bot,
+                task_id=ctx.task.id,
+                actor_id=intake.speaker.user_id,
+                kind="chat",
+                public_base_url=ctx.public_base_url,
+                mcp_supported=mcp_ok and not unattended,
+            ):
+                from coreman.core.work_tasks import tools as work_task_tools
+
+                extra += work_task_tools.POLICY
             from coreman.runtime.worker.chat import credentials
 
             if unattended:
