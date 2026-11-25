@@ -8,7 +8,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { bots } from '@/api/admin'
 import { call, http } from '@/api/client'
-import { systems, type BusinessSystem, type SystemCatalog, type SystemInput, type TokenProvider } from '@/api/infrastructure'
+import { systems, type BusinessSystem, type SystemCatalog, type SystemEnvironment, type SystemInput, type TokenProvider } from '@/api/infrastructure'
 import { allSkills, type Skill } from '@/api/skills'
 import { formatBytes, formatDateTime } from '@/utils/format'
 import SystemBatchesPanel from '@/views/SystemBatchesPanel.vue'
@@ -41,7 +41,7 @@ const PROXY_LIMITS = [
   { field: 'proxy_calls_per_turn', label: 'infra.proxyCallsPerTurn', min: 1, max: 20000 },
   { field: 'batch_interval_ms', label: 'infra.batchIntervalMs', min: 0, max: 60000 },
 ] as const
-const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', mcp_url: '', companion_skill_id: null, token_audience: '', access_test_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [], ...PROXY_DEFAULTS })
+const empty = (): SystemInput => ({ key: '', name: '', description: '', base_url: '', openapi_url: '', token_provider: 'builtin', token_delivery: 'env', mcp_url: '', companion_skill_id: null, token_audience: '', access_test_url: '', enabled: true, environment: 'production', sort_order: 0, default_for_all_bots: false, allowed_bot_ids: [], ...PROXY_DEFAULTS })
 const form = reactive(empty())
 const deliveryHints = { env: 'infra.tokenDeliveryEnvHint', proxy: 'infra.tokenDeliveryProxyHint', mcp: 'infra.tokenDeliveryMcpHint' } as const
 // 配套技能要能在授权时直接装上：已启用、免审批、没有必填参数（后端同样校验）
@@ -68,11 +68,16 @@ async function copyContractLink() {
 const listLoading = ref(false), listError = ref('')
 // tab 也写进地址栏：刷新或分享链接时停在同一个 tab。
 const tab = ref('systems')
-const { persist: persistQuery } = useListQuery({ page, tab }, () => { void load() })
+// 系统列表默认只看真实环境，测试环境的系统在另一个标签里。
+const env = ref<string>('production')
+const ENVIRONMENTS: SystemEnvironment[] = ['production', 'test']
+const currentEnv = (): SystemEnvironment => env.value === 'test' ? 'test' : 'production'
+const { persist: persistQuery } = useListQuery({ page, tab, env }, () => { void load() })
+function switchEnv() { page.value = 1; void load() }
 async function load() {
   persistQuery(); listLoading.value = true; listError.value = ''
 
-  try { const data = await systems.list(page.value); rows.value = data.items; total.value = data.total }
+  try { const data = await systems.list(page.value, currentEnv()); rows.value = data.items; total.value = data.total }
   catch (e) { listError.value = errorMessage(e); fail(e) }
  finally { listLoading.value = false }
 }
@@ -96,7 +101,8 @@ async function edit(row: BusinessSystem | null) {
   editing.value = row
   catalog.value = null
   if (row?.openapi_url) void loadCatalog(row.key)
-  Object.assign(form, row ? { ...empty(), ...row, allowed_bot_ids: row.allowed_bot_ids ? [...row.allowed_bot_ids] : null } : empty())
+  // 新建时环境默认取当前所在的标签
+  Object.assign(form, row ? { ...empty(), ...row, allowed_bot_ids: row.allowed_bot_ids ? [...row.allowed_bot_ids] : null } : { ...empty(), environment: currentEnv() })
   // 新建默认限定且名单为空：发言者令牌会注入 AI 员工的运行环境，对全部员工开放须管理员主动关闭限定
   restricted.value = !row || row.allowed_bot_ids !== null
   visible.value = true
@@ -120,7 +126,7 @@ async function save() {
   try {
     // MCP 系统不用操作目录，其他方式不用 MCP 地址：隐藏的字段不提交旧值
     const mcp = form.token_delivery === 'mcp'
-    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: mcp ? '' : form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, mcp_url: mcp ? form.mcp_url : '', companion_skill_id: form.companion_skill_id || null, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null, batch_write_max: form.batch_write_max, batch_destructive_max: form.batch_destructive_max, proxy_calls_per_turn: form.proxy_calls_per_turn, batch_interval_ms: form.batch_interval_ms }
+    const body = { key: form.key, name: form.name, description: form.description, base_url: form.base_url, openapi_url: mcp ? '' : form.openapi_url, token_provider: form.token_provider, token_delivery: form.token_delivery, mcp_url: mcp ? form.mcp_url : '', companion_skill_id: form.companion_skill_id || null, token_audience: form.token_audience, access_test_url: form.access_test_url, enabled: form.enabled, environment: form.environment, sort_order: form.sort_order, default_for_all_bots: form.default_for_all_bots, allowed_bot_ids: restricted.value ? (form.allowed_bot_ids ?? []) : null, batch_write_max: form.batch_write_max, batch_destructive_max: form.batch_destructive_max, proxy_calls_per_turn: form.proxy_calls_per_turn, batch_interval_ms: form.batch_interval_ms }
     let saved: BusinessSystem
     if (editing.value) {
       if (restricted.value) await ElMessageBox.confirm(t('infra.reclaimWarning'), t('common.confirm'))
@@ -164,6 +170,18 @@ onMounted(load)
         name="systems"
         :label="t('infra.systemsTab')"
       >
+        <el-tabs
+          v-model="env"
+          data-test="environment-tabs"
+          @tab-change="switchEnv"
+        >
+          <el-tab-pane
+            v-for="item in ENVIRONMENTS"
+            :key="item"
+            :name="item"
+            :label="t(`infra.environments.${item}`)"
+          />
+        </el-tabs>
         <LoadState
           :loading="listLoading"
           :error="listError"
@@ -283,6 +301,21 @@ onMounted(load)
             v-model="form.description"
             type="textarea"
           />
+        </el-form-item>
+        <el-form-item :label="t('infra.environment')">
+          <el-radio-group
+            v-model="form.environment"
+            data-test="system-environment"
+          >
+            <el-radio
+              v-for="item in ENVIRONMENTS"
+              :key="item"
+              :value="item"
+            >
+              {{ t(`infra.environments.${item}`) }}
+            </el-radio>
+          </el-radio-group>
+          <small>{{ t('infra.environmentHint') }}</small>
         </el-form-item>
         <el-form-item :label="t('infra.baseUrl')">
           <el-input v-model="form.base_url" />

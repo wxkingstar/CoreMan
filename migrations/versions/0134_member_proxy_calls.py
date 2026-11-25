@@ -8,8 +8,8 @@ the previous version never reads the new columns or kind during a rolling upgrad
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0133"
-down_revision = "0132"
+revision = "0134"
+down_revision = "0133"
 branch_labels = None
 depends_on = None
 

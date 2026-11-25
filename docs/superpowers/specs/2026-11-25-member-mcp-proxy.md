@@ -59,7 +59,7 @@
 - 代理预算：每位成员对每个系统每小时最多 `systems.proxy_calls_per_turn` 次，按 `system_calls` 里本人最近一小时的记录计数（跨进程准确），超出返回 `catalog_budget_exhausted`。
 - 审计：`system_calls` 新增 `oauth_grant_id` 列和 `(user_id, called_at)` 索引；成员调用的 `task_id`、`bot_id` 为空，被拒的调用同样记一行，暂存记 `proposed`。
 
-迁移 `0133`：上述两列与索引，`interaction_states.kind` 增加 `member_write`。
+迁移 `0134`：上述两列与索引，`interaction_states.kind` 增加 `member_write`。
 
 ## 不做
 

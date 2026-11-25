@@ -13,6 +13,8 @@ from coreman.admin_cli.base import add_yes, changed, group, leaf, on_off, requir
 from coreman.admin_cli.client import AdminClient, CliError, one
 
 SYSTEMS = "/api/admin/systems"
+ENVIRONMENTS = ("production", "test")
+ENVIRONMENT_LABELS = {"production": "真实环境", "test": "测试环境"}
 DELIVERY = "/api/admin/system-delivery"
 BATCHES = "/api/admin/system-batches"
 BATCH_PHASES = {
@@ -55,6 +57,7 @@ OPTIONS = {
     "audience": "token_audience",
     "test_url": "access_test_url",
     "sort": "sort_order",
+    "environment": "environment",
     "default_for_all": "default_for_all_bots",
     "batch_write_max": "batch_write_max",
     "batch_destructive_max": "batch_destructive_max",
@@ -82,6 +85,11 @@ def system_options(p: argparse.ArgumentParser, *, create: bool) -> None:
     p.add_argument("--test-url", help="访问测试地址（须与系统地址同源）")
     p.add_argument("--sort", type=int, help="排序")
     p.add_argument(
+        "--environment",
+        choices=ENVIRONMENTS,
+        help="production 真实环境（新登记默认）；test 测试环境",
+    )
+    p.add_argument(
         "--default-for-all", type=on_off, metavar="on|off", help="新员工默认获得此系统授权"
     )
     # 以下只对平台代理（--delivery proxy）生效。
@@ -97,7 +105,9 @@ def system_options(p: argparse.ArgumentParser, *, create: bool) -> None:
 
 def register(sub: Any) -> None:
     ops = group(sub, "systems", "业务系统")
-    leaf(ops, "list", "列出业务系统", list_systems)
+    leaf(ops, "list", "列出业务系统", list_systems).add_argument(
+        "--environment", choices=ENVIRONMENTS, help="只看这个环境的系统，默认全部"
+    )
     leaf(ops, "show", "查看业务系统与操作目录", show).add_argument("key", help="系统标识")
     p = leaf(ops, "create", "登记业务系统（默认不开放给任何员工）", create)
     p.add_argument("key", help="系统标识：小写字母开头，字母数字下划线")
@@ -137,13 +147,19 @@ def proxy_batch_text(row: dict[str, Any]) -> str | None:
     return f"{row['batch_write_max']} / {row['batch_destructive_max']}"
 
 
+def environment_text(row: dict[str, Any]) -> str:
+    # 旧后端不返回 environment，按真实环境显示。
+    value = str(row.get("environment") or "production")
+    return ENVIRONMENT_LABELS.get(value, value)
+
+
 def scope_text(row: dict[str, Any]) -> str:
     ids = row["allowed_bot_ids"]
     return "全部员工" if ids is None else f"{len(ids)} 个员工"
 
 
 async def list_systems(c: AdminClient, args: argparse.Namespace) -> int:
-    rows = await c.collect(SYSTEMS)
+    rows = await c.collect(SYSTEMS, environment=args.environment)
     if args.json:
         output.dump(rows)
     else:
@@ -153,6 +169,7 @@ async def list_systems(c: AdminClient, args: argparse.Namespace) -> int:
                 ("标识", "key"),
                 ("名称", "name"),
                 ("状态", output.enabled),
+                ("环境", environment_text),
                 ("令牌下发", "token_delivery"),
                 ("签发方", "token_provider"),
                 ("开放范围", scope_text),
@@ -180,6 +197,7 @@ async def show(c: AdminClient, args: argparse.Namespace) -> int:
             ("标识", "key"),
             ("名称", "name"),
             ("状态", output.enabled),
+            ("环境", environment_text),
             ("系统地址", "base_url"),
             ("OpenAPI 地址", "openapi_url"),
             ("令牌下发", "token_delivery"),

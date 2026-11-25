@@ -275,7 +275,7 @@ L0 的操作数是未隐藏的操作总数，不按权限过滤：开场不为�
 - 只读已存的目录，不为这些请求去拉取或复查：目录随 AI 员工的调用（每 10 分钟带 ETag 复查）和管理员「刷新目录」更新。从未拉取过的系统返回 `catalog_unavailable`。
 - 按本人权限过滤：声明了权限查询的系统，用平台按成员签发的令牌（用途 `proxy`，签发记录带 `oauth_grant_id`，15 分钟，缓存在各 API 进程内存里）查一次权限码，过滤规则与任务内相同；`permission_check` 取 `filtered` / `unknown` / `not_declared`。成员算不出业务系统主体（缺邮箱、邮箱前缀重复）时退回匿名目录的样子（不过滤、直连），`systems_call` 返回 `subject_unavailable`。
 - `token_delivery = proxy` 的系统自动对成员开放代理调用（`call_mode = proxy`）：`tools/list` 多出 `systems_call` 与 `systems_call_result`。校验、请求、响应截断与脱敏和任务内相同；读操作直接执行；`financial` 不代理；上传文件和 `batch` 返回 `unsupported_for_member`；大结果截断、不转存。每位成员对每个系统每小时最多 `proxy_calls_per_turn` 次（按 `system_calls` 计，含被拒和暂存的），超出返回 `catalog_budget_exhausted`。
-- 写操作（`write`、`destructive`）只暂存（`interaction_states`，`kind = member_write`，请求按确认单与成员加密，迁移 `0133`），由系统设置里的「公共机器人」（`work_task_notifier_bot_id`，原「任务通知员工」）私聊成员一张与 AI 员工写操作确认卡同样式的卡片，另注明来自哪个本机客户端（自报名称）；返回 `pending_confirmation` 与 `confirmation_id`。没有可用的公共机器人或成员没有飞书身份时不暂存，返回 `confirmation_unavailable`；每人同时待确认最多 20 张。只有成员本人在那个私聊里点才算：确认后先记已提交，再复查（成员启用、OAuth 授权未吊销、系统仍代理、操作定义与可见性不变），以成员身份按暂存的请求执行一次（幂等键暂存时生成），审计结局 `confirmed_*`，卡片更新为结果。`systems_call_result(confirmation_id)` 最多等 20 秒，返回 `pending` / `ok` / `failed` / `unknown` / `refused` / `cancelled` / `expired`；只有同一授权能查。卡片 60 分钟有效，过期不能重新发起；清理与其他确认卡相同。
+- 写操作（`write`、`destructive`）只暂存（`interaction_states`，`kind = member_write`，请求按确认单与成员加密，迁移 `0134`），由系统设置里的「公共机器人」（`work_task_notifier_bot_id`，原「任务通知员工」）私聊成员一张与 AI 员工写操作确认卡同样式的卡片，另注明来自哪个本机客户端（自报名称）；返回 `pending_confirmation` 与 `confirmation_id`。没有可用的公共机器人或成员没有飞书身份时不暂存，返回 `confirmation_unavailable`；每人同时待确认最多 20 张。只有成员本人在那个私聊里点才算：确认后先记已提交，再复查（成员启用、OAuth 授权未吊销、系统仍代理、操作定义与可见性不变），以成员身份按暂存的请求执行一次（幂等键暂存时生成），审计结局 `confirmed_*`，卡片更新为结果。`systems_call_result(confirmation_id)` 最多等 20 秒，返回 `pending` / `ok` / `failed` / `unknown` / `refused` / `cancelled` / `expired`；只有同一授权能查。卡片 60 分钟有效，过期不能重新发起；清理与其他确认卡相同。
 - 审计：`system_calls` 的 `task_id`、`bot_id` 为空，带 `user_id` 与 `oauth_grant_id`。
 - 匿名：部署设置 `SYSTEMS_CATALOG_PUBLIC=true` 时不带令牌也能读：不按权限过滤、没有 `systems_call`，系统地址和接口说明会对能访问 CoreMan 的所有人可见，只在入口限定内网的部署里开启；端点不在 `/api/runtime/` 下，按前缀对外开放运行时路径的入口不会顺带放出它。
 - 直连（匿名，以及成员模式下非代理的系统）：`call_mode` 为 `direct`；`systems_describe` 的 curl 模板引用调用方本机的环境变量（`Authorization: Bearer`），放调用方自己在该系统可用的令牌，例如统一登录的个人访问令牌。变量名默认 `SYSTEMS_TOKEN`，可在接入地址上用 `?token_env=<变量名>` 指定（字母、数字、下划线，不以数字开头，最长 64 字符，否则 400），只传变量名，不传令牌。系统只认平台自签令牌（`builtin`）时，本机通常没有可用的令牌。
@@ -297,6 +297,13 @@ https://coreman.example.com/api/systems/mcp?token_env=SSO_TOKEN
 | 其他（JSON 配置） | `{"mcpServers": {"coreman-systems": {"type": "http", "url": "<地址>"}}}`，字段名以客户端文档为准 |
 
 Codex 的 `--bearer-token-env-var` 这类认证参数不要配：CoreMan 的登录由客户端按 MCP 授权规范自己完成，业务系统令牌不应发给 CoreMan。
+
+## 环境
+
+迁移 `0133` 给 `systems` 加了 `environment`：`production`（真实环境，已有系统和新登记的默认值）或 `test`（测试环境，连测试数据，常常免登录）。同一个业务往往真实、测试各登记一个系统，测试环境的标识惯例为 `<真实环境标识>_test`，名称带「（测试环境）」。
+
+- 管理台：业务系统列表和 AI 员工的「系统权限」都分「真实环境 / 测试环境」两个标签，默认在真实环境；系统权限里的勾选跨标签保留、一起保存，标签上的数字是该环境已勾选的系统数。`GET /api/admin/systems?environment=production|test` 按环境筛选，不带时列全部（旧管理台照旧）；更新时不传 `environment` 沿用库里的值。
+- AI 员工：环境不影响授权和可访问的系统集合，测试环境的系统要像别的系统一样单独授权才会出现。L0 提示词里测试环境的系统标为 `(<key>，测试环境)`，本轮有这类系统时追加一句：只在发言者明确要求在测试环境操作时使用，没说时用真实环境的系统。`systems_browse` 不带参数时测试环境的系统带 `environment: "test"`。
 
 ## 管理台
 
