@@ -392,7 +392,8 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     if row.tracked:
         link = task_link(row.code, ctx.public_base_url)
         reply += (
-            f"做完了，第一行写「{link} 完成：」加一句话结果（这一句会写进任务，"
+            "做完了用 submit_result 交付；没有这个工具时，"
+            f"第一行写「{link} 完成：」加一句话结果（这一句会写进任务，"
             "给人看，要直击要害，不超过 60 字）；"
             f"做不了或卡住了，第一行写「{link} 卡住了：」并写清卡在哪里、需要谁做什么。"
         )
