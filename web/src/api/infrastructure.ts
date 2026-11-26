@@ -43,6 +43,8 @@ export interface SilentWriteOption {
 }
 export interface ApiClientGroupRoute {
   id: string; bot_id: string; bot_key: string | null; bot_name: string | null; chat_id: string
+  /** 群名：按 AI 员工所在的飞书群查，取不到时为 null。 */
+  chat_name?: string | null
   service_user_id: string; service_user: string | null; created_at: string
 }
 export interface GroupRouteOptions {

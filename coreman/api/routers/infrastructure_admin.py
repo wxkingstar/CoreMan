@@ -914,7 +914,9 @@ class GroupRouteIn(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-async def group_route_out(session: AsyncSession, row: ApiClientGroupRoute) -> dict[str, Any]:
+async def group_route_out(
+    session: AsyncSession, row: ApiClientGroupRoute, chat_name: str | None = None
+) -> dict[str, Any]:
     bot = await session.get(Bot, row.bot_id)
     user = await session.get(User, row.service_user_id)
     return {
@@ -923,6 +925,7 @@ async def group_route_out(session: AsyncSession, row: ApiClientGroupRoute) -> di
         "bot_key": bot.bot_key if bot else None,
         "bot_name": bot.name if bot else None,
         "chat_id": row.chat_id,
+        "chat_name": chat_name,
         "service_user_id": str(row.service_user_id),
         "service_user": (user.display_name or user.login_name) if user else None,
         "created_at": row.created_at,
@@ -951,16 +954,27 @@ async def group_route_options(
 @router.get("/api-clients/{key}/group-routes")
 async def list_group_routes(
     key: str,
+    request: Request,
     user: User = Depends(ADMINS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    """群承接配置列表；群名按各 AI 员工所在的飞书群查，取不到时为 null。"""
     await _client(session, key)
-    rows = await session.scalars(
-        select(ApiClientGroupRoute)
-        .where(ApiClientGroupRoute.client_key == key)
-        .order_by(ApiClientGroupRoute.created_at, ApiClientGroupRoute.id)
+    rows = list(
+        await session.scalars(
+            select(ApiClientGroupRoute)
+            .where(ApiClientGroupRoute.client_key == key)
+            .order_by(ApiClientGroupRoute.created_at, ApiClientGroupRoute.id)
+        )
     )
-    return {"code": 0, "data": [await group_route_out(session, row) for row in rows]}
+    names: dict[tuple[uuid.UUID, str], str] = {}
+    for bot_id in dict.fromkeys(row.bot_id for row in rows):
+        for chat in await api_groups.bot_chats(session, bot_id, request.app.state.cipher):
+            names[(bot_id, chat["chat_id"])] = chat["name"]
+    data = [
+        await group_route_out(session, row, names.get((row.bot_id, row.chat_id))) for row in rows
+    ]
+    return {"code": 0, "data": data}
 
 
 @router.post("/api-clients/{key}/group-routes", status_code=201)

@@ -234,7 +234,7 @@ async def upload_owner(
     return user
 
 
-async def _bot_chats(
+async def bot_chats(
     session: AsyncSession, bot_id: uuid.UUID, cipher: Cipher
 ) -> list[dict[str, str]]:
     """AI 员工所在的飞书群（群名 + chat_id）。取不到（凭证、权限、网络）就返回空，页面仍可手填。"""
@@ -275,7 +275,7 @@ async def options(
         )
     )
     return {
-        "bot_chats": await _bot_chats(session, bot_id, cipher) if bot_id is not None else [],
+        "bot_chats": await bot_chats(session, bot_id, cipher) if bot_id is not None else [],
         "alert_sources": [
             {"chat_id": s.chat_id, "service_user_id": str(s.service_user_id)} for s in sources
         ],
