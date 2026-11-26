@@ -19,7 +19,7 @@ vi.mock('@/api/admin', () => ({
   catalog: { list: vi.fn().mockResolvedValue([]) },
 }))
 
-import { bots, catalog } from '@/api/admin'
+import { bots, catalog, relays } from '@/api/admin'
 import { i18n } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
 import BotsView from '@/views/BotsView.vue'
@@ -58,6 +58,33 @@ describe('BotsView', () => {
     expect(bots.list).toHaveBeenCalled()
     expect(router.currentRoute.value.path).toBe('/')
     expect(wrapper.find('[data-test="switch-dialog"]').exists()).toBe(false)
+  })
+
+  it('shows backend logo, device icon, health dot and quota alerts >= 90% only', async () => {
+    const future = new Date(Date.now() + 86400_000).toISOString()
+    const studio = { ...bot, id: 'b2', relay_server_id: 'r2', relay_name: 'MacStudio-A / claude' }
+    vi.mocked(bots.list).mockResolvedValueOnce({ items: [bot, studio] as never, total: 2, page: 1, per_page: 50 })
+    vi.mocked(relays.list).mockResolvedValueOnce({ items: [
+      { id: 'r1', model_provider: 'claude', health_status: 'healthy', runtime_online: true, rate_limit_5h_used_pct: 95, rate_limit_5h_resets_at: new Date(Date.now() - 60_000).toISOString(), rate_limit_7d_used_pct: 50, rate_limit_7d_resets_at: future },
+      { id: 'r2', model_provider: 'claude', health_status: 'healthy', runtime_online: false, rate_limit_5h_used_pct: 10, rate_limit_5h_resets_at: future, rate_limit_7d_used_pct: '98.0', rate_limit_7d_resets_at: future },
+    ] as never, total: 2, page: 1, per_page: 200 })
+    vi.mocked(catalog.list).mockResolvedValueOnce([{ provider: 'claude', model: 'vllm/claude-sonnet-4-6', display_name: 'Sonnet 4.6', is_default: false, retired: false, supports_xhigh: false, supports_max: false, sort_order: 1, backend: 'claude' }])
+    useAuthStore().user = { id: 'me', login_name: 'u', display_name: 'U', role: 'member', locale: 'zh', email: null, avatar_url: null, source: 'sync', team_id: 't1' }
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: BotsView }, { path: '/bots/:id', name: 'bot-detail', component: { template: '<div />' } }] })
+    const wrapper = mount(BotsView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(wrapper.get('[data-test="backend-b1"]').text()).toBe('Claude Code')
+    expect(wrapper.get('[data-test="backend-b1"] img').attributes('src')).toBe('/providers/claude.svg')
+    expect(wrapper.text()).toContain('Sonnet 4.6')
+    expect(wrapper.findAll('[data-device]').map((e) => e.attributes('data-device'))).toEqual(['server', 'mac-studio'])
+    expect(wrapper.get('[data-test="health-b1"]').classes()).toContain('health-healthy')
+    expect(wrapper.get('[data-test="health-b2"]').classes()).toContain('health-down')
+    // b1 的 5h 已经重置过，不提醒；b2 的 7d 98% 提醒。
+    expect(wrapper.findAll('[data-test="quota-alert-b1"]')).toHaveLength(0)
+    const alerts = wrapper.findAll('[data-test="quota-alert-b2"]')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].text()).toContain('7d')
+    expect(alerts[0].text()).toContain('98%')
   })
 
   it('model filter lists only models that are not retired', async () => {

@@ -8,6 +8,10 @@ import { useRouter } from 'vue-router'
 import { bots, catalog, relays } from '@/api/admin'
 import type { BotOut, CatalogOut, Platform, RelayOut, SwitchRelayOut } from '@/api/types'
 import { usePaged } from '@/composables/usePaged'
+import QuotaBar from '@/components/QuotaBar.vue'
+import RuntimeDeviceIcon from '@/components/RuntimeDeviceIcon.vue'
+import { providerIcon, providerLabel } from '@/utils/models'
+import { quotaWindows } from '@/utils/runtimeTelemetry'
 import { useAuthStore } from '@/stores/auth'
 import BotForm from '@/views/BotForm.vue'
 import SwitchRelayDialog from '@/views/SwitchRelayDialog.vue'
@@ -53,6 +57,32 @@ const hasTeam = computed(() => !!auth.user?.team_id)
 const visibleScopes = computed(() => SCOPES.filter((s) => s !== 'team' || hasTeam.value))
 // 筛选只列目录里还在用的模型，已停用的不列。
 const modelOptions = computed(() => [...new Set(catalogRows.value.filter((r) => !r.retired).map((r) => r.model))])
+
+const relayById = computed(() => new Map(relayList.value.map((r) => [r.id, r])))
+const catalogByModel = computed(() => new Map(catalogRows.value.map((r) => [r.model, r])))
+
+/** 目录里有展示名就用展示名（如 Claude Opus 5.5），原始模型 ID 放到悬停提示。 */
+function modelLabel(model: string): string {
+  return catalogByModel.value.get(model)?.display_name || model
+}
+
+/** 运行时健康：节点心跳断了按离线算；运行时不在可见列表里时返回 null，不画状态点。 */
+function relayHealth(row: BotOut): string | null {
+  const relay = row.relay_server_id ? relayById.value.get(row.relay_server_id) : undefined
+  if (!relay) return null
+  return relay.runtime_online === false ? 'down' : relay.health_status
+}
+
+// 额度用到 90% 及以上、且窗口还没重置的，才在运行时下方画进度条提醒。
+const QUOTA_ALERT_PCT = 90
+function quotaAlerts(row: BotOut) {
+  const relay = row.relay_server_id ? relayById.value.get(row.relay_server_id) : undefined
+  if (!relay) return []
+  const now = Date.now()
+  return quotaWindows(relay, relay.model_provider, now).filter((w) =>
+    w.pct !== null && w.pct >= QUOTA_ALERT_PCT && !!w.resetsAt && Date.parse(w.resetsAt) > now
+    && !['not_applicable', 'unsupported'].includes(w.state))
+}
 
 // 列表打开时取一次，不轮询；时长按服务端给的开始时间算。
 function activeDuration(since: string | null): string {
@@ -334,11 +364,37 @@ onMounted(async () => {
         </template>
       </el-table-column>
       <el-table-column
-        min-width="140"
+        min-width="230"
         :label="t('bots.relay')"
       >
         <template #default="{ row }: { row: BotOut }">
-          <div>{{ row.relay_name ?? '—' }}</div>
+          <div class="cell-line">
+            <RuntimeDeviceIcon
+              v-if="row.relay_name"
+              :name="row.relay_name"
+            />
+            <span>{{ row.relay_name ?? '—' }}</span>
+            <el-tooltip
+              v-if="relayHealth(row)"
+              :content="t('relays.health.' + relayHealth(row))"
+              placement="top"
+            >
+              <span
+                class="health-dot"
+                :class="'health-' + relayHealth(row)"
+                :data-test="'health-' + row.id"
+              />
+            </el-tooltip>
+          </div>
+          <QuotaBar
+            v-for="w in quotaAlerts(row)"
+            :key="w.label"
+            :data-test="'quota-alert-' + row.id"
+            :pct="w.pct"
+            :resets-at="w.resetsAt"
+            :label="w.label"
+            inline
+          />
           <!-- pending / failed 的员工任务不会被认领，列表里也要看得出来。 -->
           <el-tag
             v-if="['pending', 'failed'].includes(row.workspace_state)"
@@ -351,17 +407,26 @@ onMounted(async () => {
         </template>
       </el-table-column>
       <el-table-column
-        min-width="140"
+        min-width="170"
         :label="t('bots.model')"
       >
         <template #default="{ row }: { row: BotOut }">
-          <div>{{ row.model }}</div>
-          <el-tag
-            size="small"
-            type="info"
+          <div :title="row.model">
+            {{ modelLabel(row.model) }}
+          </div>
+          <span
+            class="backend-badge"
+            :class="'backend-' + row.backend"
+            :data-test="'backend-' + row.id"
           >
-            {{ t(`bots.backend.${row.backend}`) }}
-          </el-tag>
+            <img
+              :src="providerIcon(row.backend)"
+              alt=""
+              width="14"
+              height="14"
+            >
+            {{ providerLabel(row.backend) }}
+          </span>
         </template>
       </el-table-column>
       <el-table-column
@@ -493,4 +558,16 @@ onMounted(async () => {
 <style scoped>
 .scope { margin-bottom: 12px; }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
+.cell-line { display: flex; align-items: center; gap: 6px; }
+.health-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--el-color-info-light-5); }
+.health-healthy { background: var(--el-color-success); }
+.health-down { background: var(--el-color-danger); }
+.health-auth_fail, .health-timeout { background: var(--el-color-warning); }
+.backend-badge {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 2px; padding: 1px 6px;
+  border-radius: 4px; font-size: 12px; line-height: 18px; white-space: nowrap;
+  background: var(--el-fill-color-light); color: var(--el-text-color-regular);
+}
+.backend-claude { background: rgb(217 119 87 / 12%); color: #b5573a; }
+.backend-codex { background: var(--el-fill-color); }
 </style>
