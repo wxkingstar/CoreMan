@@ -93,6 +93,20 @@ async def _groups(client: FeishuClient) -> dict[str, str]:
     raise ValueError("飞书群列表过大或分页异常，请缩小应用群范围后重试")
 
 
+async def bot_groups(bot: Bot, cipher: Cipher) -> list[dict[str, str]]:
+    """这个 AI 员工的飞书应用所在的群，按群名排序。"""
+    config = credentials(bot, cipher)
+    client = FeishuClient(config["app_id"], config["app_secret"])
+    try:
+        groups = await _groups(client)
+    finally:
+        await client.aclose()
+    return [
+        {"chat_id": cid, "name": name}
+        for cid, name in sorted(groups.items(), key=lambda kv: (kv[1], kv[0]))
+    ]
+
+
 async def common_groups(source: Bot, target: Bot, cipher: Cipher) -> list[dict[str, str]]:
     left, right = credentials(source, cipher), credentials(target, cipher)
     if left["app_id"] == right["app_id"]:

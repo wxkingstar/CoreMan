@@ -12,12 +12,18 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import httpx
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks.tokens import TokenError
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import ApiClient, ApiClientGroupRoute, ApiTask, Bot, Task, User
+from coreman.core.logging import get_logger
+from coreman.core.platforms.feishu import FeishuError
 from coreman.core.prompting.system_prompt import Speaker
+
+log = get_logger(__name__)
 
 # 任务载荷里的标记：这一轮（及其续接轮）是群承接模式发起的。
 PAYLOAD_KEY = "api_group"
@@ -228,8 +234,26 @@ async def upload_owner(
     return user
 
 
-async def options(session: AsyncSession, bot_id: uuid.UUID | None) -> dict[str, Any]:
-    """建配置时可选的群和服务账号：该 AI 员工告警来源里已有的，以及所有在用的服务账号。"""
+async def _bot_chats(
+    session: AsyncSession, bot_id: uuid.UUID, cipher: Cipher
+) -> list[dict[str, str]]:
+    """AI 员工所在的飞书群（群名 + chat_id）。取不到（凭证、权限、网络）就返回空，页面仍可手填。"""
+    from coreman.core.chat.collaboration_setup import bot_groups
+
+    bot = await session.get(Bot, bot_id)
+    if bot is None or bot.platform != "feishu":
+        return []
+    try:
+        return await bot_groups(bot, cipher)
+    except (ValueError, FeishuError, httpx.HTTPError) as exc:
+        log.warning("group_route_bot_chats_failed", bot_id=str(bot_id), error=type(exc).__name__)
+        return []
+
+
+async def options(
+    session: AsyncSession, bot_id: uuid.UUID | None, cipher: Cipher
+) -> dict[str, Any]:
+    """建配置时可选的群和服务账号：AI 员工所在的群、告警来源的群、在用的服务账号。"""
     from coreman.core.db.models import BotAlertSource
 
     sources = (
@@ -251,6 +275,7 @@ async def options(session: AsyncSession, bot_id: uuid.UUID | None) -> dict[str, 
         )
     )
     return {
+        "bot_chats": await _bot_chats(session, bot_id, cipher) if bot_id is not None else [],
         "alert_sources": [
             {"chat_id": s.chat_id, "service_user_id": str(s.service_user_id)} for s in sources
         ],

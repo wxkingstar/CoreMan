@@ -2,7 +2,7 @@
 import { errorMessage } from '@/utils/errors'
 import LoadState from '@/components/LoadState.vue'
 import { useListQuery } from '@/composables/useListQuery'
-import { nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { credentials, type ApiClient, type ApiClientGroupRoute, type GroupRouteOptions, type JwtKey, type SilentWriteOption } from '@/api/infrastructure'
@@ -67,7 +67,12 @@ async function rotateKey() {
 // 群承接：配了之后调用方驱动这个 AI 员工时以服务账号在群里跑，不再指定员工。
 const groupClient = ref<ApiClient | null>(null)
 const groupRows = ref<ApiClientGroupRoute[]>([])
-const groupOptions = ref<GroupRouteOptions>({ alert_sources: [], service_users: [] })
+const groupOptions = ref<GroupRouteOptions>({ bot_chats: [], alert_sources: [], service_users: [] })
+// 告警来源里、但不在 AI 员工所在群列表中的群（多半是机器人已退群或群列表取不到时）。
+const extraAlertChats = computed(() => {
+  const known = new Set(groupOptions.value.bot_chats.map((c) => c.chat_id))
+  return [...new Set(groupOptions.value.alert_sources.map((s) => s.chat_id))].filter((c) => !known.has(c))
+})
 const groupForm = reactive({ bot_id: '', chat_id: '', service_user_id: '' })
 const groupBusy = ref(false)
 async function loadBotOptions() {
@@ -475,12 +480,31 @@ onMounted(load)
             data-test="group-chat"
             @change="onGroupChat"
           >
-            <el-option
-              v-for="s in groupOptions.alert_sources"
-              :key="s.chat_id + s.service_user_id"
-              :value="s.chat_id"
-              :label="s.chat_id"
-            />
+            <el-option-group
+              v-if="groupOptions.bot_chats.length"
+              :label="t('infra.groupRouteBotChats')"
+            >
+              <el-option
+                v-for="c in groupOptions.bot_chats"
+                :key="c.chat_id"
+                :value="c.chat_id"
+                :label="c.name"
+              >
+                <span>{{ c.name }}</span>
+                <span class="chat-id-suffix">{{ c.chat_id }}</span>
+              </el-option>
+            </el-option-group>
+            <el-option-group
+              v-if="extraAlertChats.length"
+              :label="t('infra.groupRouteAlertChats')"
+            >
+              <el-option
+                v-for="chat in extraAlertChats"
+                :key="chat"
+                :value="chat"
+                :label="chat"
+              />
+            </el-option-group>
           </el-select>
         </el-form-item>
         <el-form-item :label="t('infra.groupRouteUser')">
@@ -539,4 +563,4 @@ onMounted(load)
 <style scoped>
 :deep(.el-form-item__error) { position: static; width: 100%; padding-top: 6px; line-height: 1.5 }
 .scope-tags { display: flex; flex-wrap: wrap; gap: 6px }
-.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px } .group-add { margin-top: 20px }</style>
+.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px } .group-add { margin-top: 20px } .chat-id-suffix { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px }</style>

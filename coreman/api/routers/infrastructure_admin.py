@@ -938,12 +938,14 @@ async def _client(session: AsyncSession, key: str) -> ApiClient:
 
 @router.get("/api-clients/group-route-options")
 async def group_route_options(
+    request: Request,
     bot_id: uuid.UUID | None = None,
     user: User = Depends(ADMINS),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """建群承接配置时可选的群和服务账号：该 AI 员工告警来源里的，以及所有在用的服务账号。"""
-    return {"code": 0, "data": await api_groups.options(session, bot_id)}
+    """建群承接配置时可选的群和服务账号：AI 员工所在的群、告警来源的群、在用的服务账号。"""
+    data = await api_groups.options(session, bot_id, request.app.state.cipher)
+    return {"code": 0, "data": data}
 
 
 @router.get("/api-clients/{key}/group-routes")

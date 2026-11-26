@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from coreman.core.api_tasks import groups
 from coreman.core.auth.signatures import sign_request
+from coreman.core.chat import collaboration_setup
 from coreman.core.db.models import (
     ApiClient,
     ApiClientGroupRoute,
@@ -49,14 +50,23 @@ async def _setup(client, session):  # type: ignore[no-untyped-def]
     return bot, svc, person
 
 
-async def test_admin_configures_group_routes_with_service_accounts_only(client, db_session):
+async def test_admin_configures_group_routes_with_service_accounts_only(
+    client, db_session, monkeypatch
+):
     bot, svc, person = await _setup(client, db_session)
     await login_as(client, db_session, role="platform_admin")
+
+    async def fake_bot_groups(target, cipher):  # type: ignore[no-untyped-def]
+        assert target.id == bot.id
+        return [{"chat_id": "oc_ops", "name": "运维群"}]
+
+    monkeypatch.setattr(collaboration_setup, "bot_groups", fake_bot_groups)
     options = await client.get(
         "/api/admin/api-clients/group-route-options", params={"bot_id": str(bot.id)}
     )
     assert options.status_code == 200, options.text
     data = options.json()["data"]
+    assert data["bot_chats"] == [{"chat_id": "oc_ops", "name": "运维群"}]
     assert data["alert_sources"] == [{"chat_id": "oc_alerts", "service_user_id": str(svc.id)}]
     assert [u["id"] for u in data["service_users"]] == [str(svc.id)]
 
@@ -79,6 +89,15 @@ async def test_admin_configures_group_routes_with_service_accounts_only(client, 
     assert [r["id"] for r in listed.json()["data"]] == [route["id"]]
     clients = await client.get("/api/admin/api-clients")
     assert clients.json()["data"]["items"][0]["group_routes"] == 1
+
+    async def broken_bot_groups(target, cipher):  # type: ignore[no-untyped-def]
+        raise ValueError("飞书群列表返回异常，请检查应用权限后重试")
+
+    monkeypatch.setattr(collaboration_setup, "bot_groups", broken_bot_groups)
+    fallback = await client.get(
+        "/api/admin/api-clients/group-route-options", params={"bot_id": str(bot.id)}
+    )
+    assert fallback.status_code == 200 and fallback.json()["data"]["bot_chats"] == []
     removed = await client.delete(f"{url}/{route['id']}")
     assert removed.status_code == 200
     assert await db_session.scalar(select(ApiClientGroupRoute)) is None
