@@ -321,6 +321,12 @@ async def submit(ctx: Context, args: proxy.Call) -> dict[str, Any]:
         "confirmation_unavailable",
         "批量写操作只能在提问人本人发来消息、能当场点确认卡的回合里提交。" + confirm.UNAVAILABLE,
     )
+    if ctx.silent_writes:
+        await proxy.record(ctx, system, args.operation_id, op, "denied")
+        return _error(
+            "batch_unavailable",
+            "业务系统静默执行的任务不支持批量提交：没有人能确认整批。请逐项调用 systems_call。",
+        )
     if ctx.writes_preapproved or proxy.policy_error(ctx, system, op) == proxy.OWNER_APPROVAL:
         await proxy.record(ctx, system, args.operation_id, op, "denied")
         return unavailable

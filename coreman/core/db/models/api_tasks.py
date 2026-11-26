@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -92,6 +93,10 @@ class ApiTask(Base):
     # 运行时额度用完、排队等恢复：第一次进入等待的时间（满 7 天放弃）与预计重跑时间。
     quota_waiting_since: Mapped[datetime | None] = _ts()
     resume_at: Mapped[datetime | None] = _ts()
+    # 业务系统要求静默执行：不往员工私聊发任何消息，名单里的写操作不发确认卡直接执行。
+    silent: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # 业务系统限定这次能做的写操作（`<业务系统标识>.<operationId>`）；NULL 表示不限。
+    allowed_writes: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 

@@ -254,12 +254,13 @@ async def start_turn(
     bot: Bot,
     user: User,
     pid: str,
-    trigger: str,
+    trigger: str | None,
     session_key: str,
     extra: dict[str, Any],
     images: list[uuid.UUID] | None = None,
 ) -> ApiTask:
-    """任务行已写入：写合成入站事件、在承接会话里发触发消息、入队 chat 任务。"""
+    """任务行已写入：写合成入站事件、在承接会话里发触发消息（`trigger` 为 None 时不发）、
+    入队 chat 任务。"""
     target, chat_id, prompt = row.target, row.chat_id, row.prompt
     chat_type = "single" if target == "p2p" else "group"
     message = InboundMessage(
@@ -307,15 +308,16 @@ async def start_turn(
     if target == "p2p":
         # 私聊带上收件人：网关发送前复核这个私聊还是本人的。
         target_info |= {"recipient_user_id": str(user.id), "recipient_platform_user_id": pid}
-    await outbox.add(
-        session,
-        bot_id=bot.id,
-        platform="feishu",
-        kind="send",
-        dedupe_key=f"api-task:{row.id}:trigger",
-        target=target_info,
-        payload={"markdown": trigger},
-    )
+    if trigger is not None:
+        await outbox.add(
+            session,
+            bot_id=bot.id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"api-task:{row.id}:trigger",
+            target=target_info,
+            payload={"markdown": trigger},
+        )
     task = await tasks.enqueue(
         session,
         tasks.NewTask(
@@ -345,6 +347,11 @@ async def start_turn(
 # ---- 业务系统代员工发起（API 调用方 + `tasks` 接口组） ----------------------------------------
 
 CLIENT_SCOPE = "tasks"
+# 静默执行的业务系统任务（含续接轮）在 chat 任务载荷里的标记：这一轮不往飞书发任何东西。
+SILENT_KEY = "api_silent"
+# 静默执行的一轮想向员工提问、发表单（会进入 waiting_user）：按失败结束，用这个错误码。
+SILENT_ASK_CODE = "user_input_required"
+SILENT_ASK_MESSAGE = "静默执行时不能向员工提问或请员工填写，AI 员工需要的信息不够"
 MAX_OPEN_PER_CLIENT_USER = 20
 # 独立会话的会话键：每个任务一个，不读不写员工私聊的会话，私聊里的消息也替代不了它。
 CLIENT_SESSION_PREFIX = "api:"
@@ -373,6 +380,72 @@ async def resolve_member(session: AsyncSession, subject: str) -> User:
     raise TokenError(403, f"无法按邮箱前缀「{subject[:64]}」认出唯一一位在职员工")
 
 
+# 一次请求里 `allowed_writes` 最多几项。
+ALLOWED_WRITES_MAX = 100
+WRITE_REF_MAX = 200
+
+
+def write_ref(system_key: str, operation_id: str) -> str:
+    """写操作在调用方静默清单和 `allowed_writes` 里的写法。"""
+    return f"{system_key}.{operation_id}"
+
+
+def parse_write_ref(raw: str) -> str:
+    """`<业务系统标识>.<operationId>`：两边都不能为空，按第一个点拆开；不合格就 422。"""
+    ref = raw.strip()
+    system_key, dot, operation_id = ref.partition(".")
+    if not dot or not system_key or not operation_id or len(ref) > WRITE_REF_MAX:
+        raise TokenError(422, f"「{ref[:80]}」格式不对，应为 <业务系统标识>.<operationId>")
+    return ref
+
+
+def normalize_writes(raw: list[str] | None) -> list[str] | None:
+    """请求里的 `allowed_writes`：去重保序。不带是 None（不限）；带了就不能为空。
+
+    空列表不参与签名，和不带签出来一样：允许它表示「一个都不许写」，中间人删掉它就成了不限，
+    所以直接拒绝。"""
+    if raw is None:
+        return None
+    if not raw:
+        raise TokenError(422, "allowed_writes 不能为空列表；不限制写操作时不要带这个字段")
+    if len(raw) > ALLOWED_WRITES_MAX:
+        raise TokenError(422, f"allowed_writes 最多 {ALLOWED_WRITES_MAX} 项")
+    return list(dict.fromkeys(parse_write_ref(item) for item in raw))
+
+
+def writes_key(allowed: list[str] | None) -> tuple[str, ...] | None:
+    """幂等与同内容去重时比较 `allowed_writes`：不看顺序。"""
+    return None if allowed is None else tuple(sorted(set(allowed)))
+
+
+def check_silent(client: ApiClient, silent: bool, allowed: list[str] | None) -> None:
+    """静默执行要列明写操作，且每一项都在平台管理员给这个调用方登记的静默清单里。"""
+    if not silent:
+        return
+    if not allowed:
+        raise TokenError(422, "silent 为 true 时必须带 allowed_writes，列出这次允许执行的写操作")
+    registered = set(client.silent_writes or [])
+    for ref in allowed:
+        if ref not in registered:
+            raise TokenError(
+                422,
+                f"allowed_writes 里的「{ref}」不在这个调用方的静默写接口清单里，"
+                "请平台管理员在「API 调用方」里登记后再静默调用",
+                "write_not_registered",
+            )
+
+
+def fingerprint_of(row: ApiTask) -> tuple[Any, ...]:
+    return (
+        row.user_id,
+        row.bot_id,
+        row.prompt,
+        list(row.image_ids or []),
+        bool(row.silent),
+        writes_key(row.allowed_writes),
+    )
+
+
 async def client_replay(
     session: AsyncSession,
     client: ApiClient,
@@ -386,19 +459,16 @@ async def client_replay(
     )
     if row is None:
         return None
-    if (row.user_id, row.bot_id, row.prompt, list(row.image_ids or [])) != fingerprint:
+    if fingerprint_of(row) != fingerprint:
         raise TokenError(409, "request_id 已用于内容不同的任务")
     return row
 
 
 async def open_duplicate(
-    session: AsyncSession,
-    client: ApiClient,
-    user_id: uuid.UUID,
-    bot_id: uuid.UUID,
-    prompt: str,
-    image_ids: list[uuid.UUID],
+    session: AsyncSession, client: ApiClient, fingerprint: tuple[Any, ...]
 ) -> ApiTask | None:
+    """同样内容（员工、AI 员工、prompt、图片、静默与写操作范围）还没结束的任务。"""
+    user_id, bot_id, prompt = fingerprint[:3]
     rows = await session.scalars(
         select(ApiTask)
         .join(Task, Task.id == ApiTask.task_id)
@@ -412,7 +482,7 @@ async def open_duplicate(
         )
         .order_by(ApiTask.created_at)
     )
-    return next((row for row in rows if list(row.image_ids or []) == image_ids), None)
+    return next((row for row in rows if fingerprint_of(row) == fingerprint), None)
 
 
 async def create_for_client(
@@ -425,18 +495,26 @@ async def create_for_client(
     request_id: str | None,
     images: list[uuid.UUID] | None = None,
     chat_id: str | None = None,
+    silent: bool = False,
+    allowed_writes: list[str] | None = None,
 ) -> tuple[ApiTask, bool]:
     """业务系统发起一轮。调用方负责提交。
 
     调用方为这个 AI 员工配了群承接，就以配置的服务账号在群里跑（`groups.create`）；否则代员工
-    发起：独立会话，结果发在员工和 AI 员工的私聊里。"""
+    发起：独立会话，结果发在员工和 AI 员工的私聊里。`silent` 时什么都不往私聊发，结果只经查询
+    接口返回（见 docs/superpowers/specs/2026-11-26-api-tasks-silent-writes.md）。"""
     if not prompt.strip() or len(prompt) > PROMPT_MAX:
         raise TokenError(422, f"prompt 须非空且不超过 {PROMPT_MAX} 个字符")
     from coreman.core.api_tasks import groups
 
+    allowed = normalize_writes(allowed_writes)
     target_bot = await bot_by_key(session, bot_key)
     routes = await groups.routes_for(session, client.app_key, target_bot.id)
     if routes:
+        if silent:
+            raise TokenError(
+                422, "这个 AI 员工走群承接模式：结果本来就发在群里，不支持 silent", "silent_group"
+            )
         return await groups.create(
             session,
             client=client,
@@ -447,6 +525,7 @@ async def create_for_client(
             request_id=request_id,
             chat_id=chat_id,
             images=images,
+            allowed_writes=allowed,
         )
     if chat_id is not None:
         raise TokenError(422, "调用方没有为这个 AI 员工配置群承接，不能指定 chat_id")
@@ -454,8 +533,9 @@ async def create_for_client(
         raise TokenError(422, "需要 user（员工邮箱前缀）")
     user = await resolve_member(session, subject)
     bot = await check_bot(session, client.bot_ids, target_bot, user, "调用方没有授权驱动该 AI 员工")
+    check_silent(client, silent, allowed)
     wanted = list(dict.fromkeys(images or []))
-    fingerprint = (user.id, bot.id, prompt, wanted)
+    fingerprint = (user.id, bot.id, prompt, wanted, silent, writes_key(allowed))
     if request_id is not None:
         replay = await client_replay(session, client, request_id, fingerprint)
         if replay is not None:
@@ -485,7 +565,7 @@ async def create_for_client(
             Task.cancel_requested_at.is_(None),
         )
     )
-    same = await open_duplicate(session, client, user.id, bot.id, prompt, wanted)
+    same = await open_duplicate(session, client, fingerprint)
     if same is not None:
         # 同样的内容上一条还没做完（排队、等额度、执行中）：不再建一条。
         return same, False
@@ -504,6 +584,8 @@ async def create_for_client(
         prompt=prompt,
         target="p2p",
         chat_id=reached.platform_chat_id,
+        silent=silent,
+        allowed_writes=allowed,
     )
     session.add(row)
     await session.flush()
@@ -513,9 +595,10 @@ async def create_for_client(
         bot=bot,
         user=user,
         pid=pid,
-        trigger=client_trigger_text(user, client.name, prompt, len(image_ids)),
+        # 静默：私聊里连「在某系统里发起」这句也不发。
+        trigger=None if silent else client_trigger_text(user, client.name, prompt, len(image_ids)),
         session_key=client_session_key(row.id),
-        extra={"api_client": client.app_key},
+        extra={"api_client": client.app_key, **({SILENT_KEY: True} if silent else {})},
         images=image_ids,
     ), True
 
@@ -633,6 +716,9 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
             "resume_at": row.resume_at.isoformat() if waiting and row.resume_at else None,
             # 写操作要员工在私聊里点确认卡：任务结束不等于数据已经写进业务系统。
             "writes": await writes.view(session, row),
+            # 发起时带的静默与写操作范围，原样回报。
+            "silent": bool(row.silent),
+            "allowed_writes": row.allowed_writes,
         }
     return {
         "id": str(row.id),

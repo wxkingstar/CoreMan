@@ -125,8 +125,11 @@ async def create(
     request_id: str | None,
     chat_id: str | None,
     images: list[uuid.UUID] | None,
+    allowed_writes: list[str] | None = None,
 ) -> tuple[ApiTask, bool]:
-    """群模式发起一轮；返回 (任务, 是否新建)。调用方负责提交。"""
+    """群模式发起一轮；返回 (任务, 是否新建)。调用方负责提交。
+
+    `allowed_writes` 照样限定能做的写操作（名单外的直接拒绝），名单里的照常发确认卡到群里。"""
     from coreman.core.api_tasks import service
 
     if subject is not None:
@@ -141,7 +144,14 @@ async def create(
     await service.check_bot(session, client.bot_ids, bot, None, "调用方没有授权驱动该 AI 员工")
     # 和私聊模式同一口径：图片按顺序去重后算进幂等指纹和同内容去重。
     wanted = list(dict.fromkeys(images or []))
-    fingerprint: tuple[Any, ...] = (user.id, bot.id, prompt, wanted)
+    fingerprint: tuple[Any, ...] = (
+        user.id,
+        bot.id,
+        prompt,
+        wanted,
+        False,
+        service.writes_key(allowed_writes),
+    )
     if request_id is not None:
         replay = await service.client_replay(session, client, request_id, fingerprint)
         if replay is not None:
@@ -158,7 +168,7 @@ async def create(
         replay = await service.client_replay(session, client, request_id, fingerprint)
         if replay is not None:
             return replay, False
-    same = await service.open_duplicate(session, client, user.id, bot.id, prompt, wanted)
+    same = await service.open_duplicate(session, client, fingerprint)
     if same is not None and same.chat_id == route.chat_id and is_group_row(same):
         return same, False
     if await queued(session, bot.id, route.chat_id) >= QUEUE_MAX:
@@ -181,6 +191,7 @@ async def create(
         prompt=prompt,
         target="chat",
         chat_id=route.chat_id,
+        allowed_writes=allowed_writes,
     )
     session.add(row)
     await session.flush()

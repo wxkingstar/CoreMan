@@ -13,7 +13,7 @@ vi.mock('@/api/skills', () => ({ allSkills: vi.fn().mockResolvedValue([]) }))
 const guide = { id: 'sk1', name: 'lookup-guide', enabled: true, security_level: 'public', user_env_vars: {} }
 vi.mock('@/api/infrastructure', () => ({
   systems: { providers: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), grants: vi.fn(), saveGrants: vi.fn(), catalog: vi.fn(), refreshCatalog: vi.fn() },
-  credentials: { clients: vi.fn(), keys: vi.fn(), create: vi.fn(), update: vi.fn(), rotate: vi.fn(), rotateKey: vi.fn() },
+  credentials: { clients: vi.fn(), keys: vi.fn(), create: vi.fn(), update: vi.fn(), rotate: vi.fn(), rotateKey: vi.fn(), silentWriteOptions: vi.fn() },
   systemBatches: { list: vi.fn(), stop: vi.fn() },
 }))
 const erp = { key: 'erp', name: 'ERP', description: '', base_url: 'https://erp.example', openapi_url: '', enabled: true, sort_order: 0, default_for_all_bots: false, allowed_bot_ids: null, version: 1 }
@@ -27,6 +27,7 @@ describe('Infrastructure management', () => {
     vi.mocked(systemBatches.list).mockResolvedValue({ items: [], total: 0, page: 1, per_page: 20 })
     vi.mocked(credentials.clients).mockResolvedValue({ items: [], total: 0, page: 1, per_page: 50 })
     vi.mocked(credentials.keys).mockResolvedValue([])
+    vi.mocked(credentials.silentWriteOptions).mockResolvedValue([])
   })
   it('preserves an intentionally empty bot whitelist when creating a system', async () => {
     vi.mocked(systems.create).mockResolvedValue(erp)
@@ -136,7 +137,7 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('shows a new client secret once and clears it when the dialog closes', async () => {
-    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], bot_ids: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })
+    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'client', name: 'Client', scopes: ['org'], bot_ids: [], silent_writes: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'synthetic-one-time-secret' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     await wrapper.get('[data-test="create-client"]').trigger('click'); await flushPromises()
@@ -150,7 +151,7 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('explains invalid client identifiers and allows correction before saving', async () => {
-    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'test-client', name: '测试', scopes: ['push'], bot_ids: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'test-secret' })
+    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'test-client', name: '测试', scopes: ['push'], bot_ids: [], silent_writes: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 'test-secret' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     await wrapper.get('[data-test="create-client"]').trigger('click'); await flushPromises()
@@ -161,7 +162,27 @@ describe('Infrastructure management', () => {
     expect(document.body.textContent).toContain(i18n.global.t('infra.clientKeyHint'))
     vm.form.app_key = 'test-client'
     await vm.save(); await flushPromises()
-    expect(credentials.create).toHaveBeenCalledWith({ app_key: 'test-client', name: '测试', scopes: ['push'], bot_ids: [], enabled: true })
+    expect(credentials.create).toHaveBeenCalledWith({ app_key: 'test-client', name: '测试', scopes: ['push'], bot_ids: [], silent_writes: [], enabled: true })
+    wrapper.unmount()
+  })
+  it('saves the writes a tasks client may run silently', async () => {
+    const client = { app_key: 'intake', name: '录入', scopes: ['tasks'], bot_ids: [], silent_writes: ['profile_admin.saveDraft'], enabled: true, version: 3, last_used_at: null, has_secret: true }
+    vi.mocked(credentials.clients).mockResolvedValue({ items: [client], total: 1, page: 1, per_page: 50 })
+    vi.mocked(credentials.silentWriteOptions).mockResolvedValue([
+      { ref: 'profile_admin.saveDraft', system: 'profile_admin', system_name: '资料录入', operation_id: 'saveDraft', summary: '保存草稿', method: 'POST', path: '/drafts', risk: 'write' },
+      { ref: 'profile_admin.saveAudit', system: 'profile_admin', system_name: '资料录入', operation_id: 'saveAudit', summary: '保存审稿', method: 'POST', path: '/audits', risk: 'write' },
+    ])
+    vi.mocked(credentials.update).mockResolvedValue({ ...client, version: 4 })
+    const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { form: { silent_writes: string[] }; save: () => Promise<void>; edit: (row: typeof client) => Promise<void> }
+    await vm.edit(client); await flushPromises()
+    expect(document.querySelector('[data-test="client-silent-writes"]')).not.toBeNull()
+    expect(vm.form.silent_writes).toEqual(['profile_admin.saveDraft'])
+    vm.form.silent_writes = ['profile_admin.saveDraft', 'profile_admin.saveAudit']
+    await vm.save(); await flushPromises()
+    expect(credentials.update).toHaveBeenCalledWith(expect.objectContaining({ app_key: 'intake', silent_writes: ['profile_admin.saveDraft', 'profile_admin.saveAudit'] }))
+    expect(client.silent_writes).toEqual(['profile_admin.saveDraft'])
     wrapper.unmount()
   })
   it('clears validation on reopening and rejects whitespace-only names', async () => {
@@ -208,7 +229,7 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('uses translated scope labels in the client list', async () => {
-    vi.mocked(credentials.clients).mockResolvedValue({ items: [{ app_key: 'client', name: 'Client', scopes: ['org', 'push'], bot_ids: [], enabled: true, version: 1, last_used_at: null, has_secret: true }], total: 1, page: 1, per_page: 50 })
+    vi.mocked(credentials.clients).mockResolvedValue({ items: [{ app_key: 'client', name: 'Client', scopes: ['org', 'push'], bot_ids: [], silent_writes: [], enabled: true, version: 1, last_used_at: null, has_secret: true }], total: 1, page: 1, per_page: 50 })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     expect(wrapper.find('.scope-tags').text()).toContain(i18n.global.t('infra.scopeNames.org'))
@@ -218,7 +239,7 @@ describe('Infrastructure management', () => {
   it('asks which AI employees a tasks client may drive and saves them', async () => {
     const { bots } = await import('@/api/admin')
     vi.mocked(bots.list).mockResolvedValueOnce({ items: [{ id: 'b1', name: '录入助手', bot_key: 'intake', platform: 'feishu' }, { id: 'b2', name: '企微', bot_key: 'wx', platform: 'wecom' }], total: 2 } as never)
-    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'intake', name: '录入', scopes: ['tasks'], bot_ids: ['b1'], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 's' })
+    vi.mocked(credentials.create).mockResolvedValue({ app_key: 'intake', name: '录入', scopes: ['tasks'], bot_ids: ['b1'], silent_writes: [], enabled: true, version: 1, last_used_at: null, has_secret: true, secret: 's' })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })
     await flushPromises()
     await wrapper.get('[data-test="create-client"]').trigger('click'); await flushPromises()
@@ -233,7 +254,7 @@ describe('Infrastructure management', () => {
     wrapper.unmount()
   })
   it('offers no retired cron scope and drops it when editing an old client', async () => {
-    const old = { app_key: 'old', name: 'Old', scopes: ['cron', 'org'], bot_ids: [] as string[], enabled: true, version: 3, last_used_at: null, has_secret: true }
+    const old = { app_key: 'old', name: 'Old', scopes: ['cron', 'org'], bot_ids: [] as string[], silent_writes: [] as string[], enabled: true, version: 3, last_used_at: null, has_secret: true }
     vi.mocked(credentials.clients).mockResolvedValue({ items: [old], total: 1, page: 1, per_page: 50 })
     vi.mocked(credentials.update).mockResolvedValue({ ...old, scopes: ['org'], version: 4 })
     const wrapper = mount(CredentialsView, { global: { plugins }, attachTo: document.body })

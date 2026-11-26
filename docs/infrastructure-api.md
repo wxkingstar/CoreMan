@@ -14,7 +14,7 @@
 | systems | POST `/api/infra/systems/test-access` | — |
 | tasks | POST `/api/infra/tasks/uploads`，POST `/api/infra/tasks/run`，GET `/api/infra/tasks/run/{id}`，POST `/api/infra/tasks/run/{id}/cancel`，GET `/api/infra/tasks/run`，POST `/api/infra/tasks/run/cancel`（配了群承接的 AI 员工不带 `user`，见 [群承接模式](features/api-tasks.md#群承接模式)） | — |
 
-`tasks` 让业务系统代员工给 AI 员工下任务：请求里的 `user` 是员工邮箱前缀，只能驱动调用方「可驱动的 AI 员工」里的 AI 员工，任务在独立会话里运行、结果发到员工私聊，见 [通过 API 驱动 AI 员工](features/api-tasks.md#业务系统代员工发起)。
+`tasks` 让业务系统代员工给 AI 员工下任务：请求里的 `user` 是员工邮箱前缀，只能驱动调用方「可驱动的 AI 员工」里的 AI 员工，任务在独立会话里运行、结果发到员工私聊，见 [通过 API 驱动 AI 员工](features/api-tasks.md#业务系统代员工发起)。带 `silent: true` 和 `allowed_writes` 可以静默执行：不往员工私聊发任何消息，调用方静默清单里的写操作不发确认卡直接执行，见 [静默执行](features/api-tasks.md#静默执行)。
 
 `/api/infra/tasks`（给 AI 员工下任务、查结果）不用签名，而用成员的个人 API 令牌（`Authorization: Bearer`），任务以令牌所有人的身份在飞书会话里运行，见 [通过 API 驱动 AI 员工](features/api-tasks.md)。
 

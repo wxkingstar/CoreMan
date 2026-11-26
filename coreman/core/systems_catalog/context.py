@@ -61,6 +61,10 @@ class Context:
     writable: frozenset[str] = frozenset()
     # The owner approved writes for this turn in the approval system: they run without a card.
     writes_preapproved: bool = False
+    # A business system's task (`api_tasks`): the writes it allows (`<system>.<operationId>`;
+    # None = any), and whether those run at once as the member without a card (`silent`).
+    caller_writes: frozenset[str] | None = None
+    silent_writes: bool = False
     # A personal assistant's turn with the owner absent (`kinds.unattended`): reads only.
     owner_absent: bool = False
     # Owner absent, but the turn may submit approvals (`approvals.proxied.may_stage`): writes to

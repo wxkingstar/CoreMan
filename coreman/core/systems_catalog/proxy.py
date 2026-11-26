@@ -512,6 +512,26 @@ def _spills(response: httpx.Response, head: bytes, whole: bool) -> bool:
 
 # Not a refusal: the owner is absent and the write is staged for the owner's approval.
 OWNER_APPROVAL = "owner_approval_required"
+# A business system's task listed the writes it allows; this one is not among them.
+CALLER_REFUSED = "write_not_allowed_by_caller"
+# Recorded outcome of such a refusal (the task's `writes` shows it as `not_allowed`).
+NOT_ALLOWED = "not_allowed"
+# Recorded outcomes of a write a business system's silent task ran without a card, like
+# `confirmed_` for cards: `silent_ok`, `silent_http_error`, `silent_unreachable`.
+SILENT_PREFIX = "silent_"
+
+
+def caller_refused(ctx: Context, system_key: str, operation_id: str, op: dict[str, Any]) -> bool:
+    """A write the business system that started this task did not list in `allowed_writes`."""
+    from coreman.core.api_tasks.service import write_ref
+
+    return (
+        op["risk"] in CONFIRMED_RISKS
+        and ctx.caller_writes is not None
+        and write_ref(system_key, operation_id) not in ctx.caller_writes
+    )
+
+
 # Recorded outcomes of a write run after the owner approved it, like `confirmed_` for cards.
 APPROVED_PREFIX = "approved_"
 
@@ -546,6 +566,8 @@ DENIALS = {
     "preapproved_writes_exhausted": "这一轮已经执行了 {limit} 个写操作，达到所有者一次批准"
     "能做的上限。停止写入，把已经完成和还没做的部分如实写进答复里；更多的修改请所有者"
     "在私聊里让助理去做（走确认卡，可以整批提交）。",
+    CALLER_REFUSED: "发起这次任务的业务系统没有允许这个写操作，平台已拒绝，没有执行。不要换别的"
+    "方式做同一件事；在回复里写明这一步没做、需要做什么。",
     OWNER_APPROVAL: "这一轮是个人助理在所有者不在场时跑的：写操作调用后不会当场执行，平台自动"
     "提交给所有者审批，批准后按原样执行并把结果交回本会话。不要重试，也不要换别的方式做同一件事。",
 }
@@ -582,6 +604,15 @@ async def denial(
     ctx: Context, system: BusinessSystem, operation_id: str, op: dict[str, Any]
 ) -> dict[str, Any] | None:
     """The refusal of a call policy does not allow (recorded), or None; `OWNER_APPROVAL` passes."""
+    if caller_refused(ctx, system.key, operation_id, op):
+        await record(ctx, system, operation_id, op, NOT_ALLOWED)
+        return {
+            "error": CALLER_REFUSED,
+            "system": system.key,
+            "operation_id": operation_id,
+            "risk": op["risk"],
+            "message": DENIALS[CALLER_REFUSED],
+        }
     denied = policy_error(ctx, system, op)
     if denied is None or denied == OWNER_APPROVAL:
         return None
@@ -827,6 +858,11 @@ async def call(ctx: Context, args: Call) -> dict[str, Any]:
                 "message": DENIALS["owner_turn_required"],
             }
         return await _stage(ctx, prepared, args)
+    if prepared.op["risk"] in CONFIRMED_RISKS and ctx.silent_writes:
+        # 业务系统静默执行的任务：这一项在它的 `allowed_writes` 里（不在的已被 `denial` 拒绝），
+        # 名单又是平台管理员给这个调用方登记过的。人工复核在业务系统里做，这里不发确认卡，
+        # 以员工身份当场执行，记录带 `silent_` 前缀。
+        return await send(ctx, prepared, prefix=SILENT_PREFIX)
     if prepared.op["risk"] in CONFIRMED_RISKS and not ctx.writes_preapproved:
         from coreman.core.systems_catalog import confirm
 

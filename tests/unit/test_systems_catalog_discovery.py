@@ -340,10 +340,10 @@ def test_env_systems_mark_every_non_read_operation(
 ) -> None:
     env = described.ctx()
     system = env.systems[0]
-    assert tools.call_note(env, system, {"risk": risk}) == env_note
+    assert tools.call_note(env, system, {"risk": risk}, "op") == env_note
     assert "risk=read" in tools.call_rules(env, system)
     env.anonymous = True
-    assert tools.call_note(env, system, {"risk": risk}) == anonymous_note
+    assert tools.call_note(env, system, {"risk": risk}, "op") == anonymous_note
 
 
 async def test_refunds_show_queries_and_what_needs_a_person(described: Catalogs) -> None:

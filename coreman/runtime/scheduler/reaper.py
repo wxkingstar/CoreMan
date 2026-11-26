@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Executable
 
 from coreman.core.api_tasks import uploads as api_task_uploads
+from coreman.core.api_tasks.service import SILENT_KEY as API_SILENT_KEY
 from coreman.core.assistants import access_log, platform_turns, sealed
 from coreman.core.assistants.kinds import BOT_HELP_KIND, SILENT_KINDS
 from coreman.core.bots.workspace_transfer import release_fence
@@ -324,8 +325,9 @@ async def _tell_user(
             activity=liveness.interrupted_activity(stream.activity, liveness.REASON_WORKER_LOST),
             bot_id=task.bot_id,
         )
-    # 不出声的任务类型没有人在等这一轮，它的会话键也不一定是一个能发消息的会话。
-    if pushable or task.kind in SILENT_KINDS:
+    # 不出声的任务类型没有人在等这一轮，它的会话键也不一定是一个能发消息的会话；静默执行的
+    # 业务系统任务结果只经查询接口返回，同样不往私聊发。
+    if pushable or task.kind in SILENT_KINDS or (task.payload or {}).get(API_SILENT_KEY):
         return
     chat_id = _chat_id(task)
     if not chat_id:

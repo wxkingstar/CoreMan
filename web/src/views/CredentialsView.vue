@@ -5,7 +5,7 @@ import { useListQuery } from '@/composables/useListQuery'
 import { nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { credentials, type ApiClient, type ApiClientGroupRoute, type GroupRouteOptions, type JwtKey } from '@/api/infrastructure'
+import { credentials, type ApiClient, type ApiClientGroupRoute, type GroupRouteOptions, type JwtKey, type SilentWriteOption } from '@/api/infrastructure'
 import { bots as botsApi } from '@/api/admin'
 import { formatDateTime } from '@/utils/format'
 const { t } = useI18n()
@@ -13,7 +13,9 @@ const rows = ref<ApiClient[]>([]), keys = ref<JwtKey[]>([])
 const tab = ref('clients')
 const page = ref(1), total = ref(0), busy = ref(false), visible = ref(false), secret = ref('')
 const editing = ref<ApiClient | null>(null)
-const form = reactive({ app_key: '', name: '', scopes: [] as string[], bot_ids: [] as string[], enabled: true })
+const form = reactive({ app_key: '', name: '', scopes: [] as string[], bot_ids: [] as string[], silent_writes: [] as string[], enabled: true })
+// 允许静默执行的写操作：从经平台代理的业务系统目录里选，也可直接输入「系统标识.operationId」。
+const silentOptions = ref<SilentWriteOption[]>([])
 // `tasks` 接口组能驱动的 AI 员工：只有飞书 AI 员工能代员工下任务。
 const botOptions = ref<{ id: string; label: string }[]>([])
 const formRef = ref<FormInstance>()
@@ -34,8 +36,9 @@ async function edit(row: ApiClient | null) {
   formSession.value += 1
   editing.value = row
   // 已下线的接口组（如旧的 cron）不再提供勾选，编辑时丢弃，保存才不会被后端当作未知接口组拒绝。
-  Object.assign(form, row ? { ...row, scopes: row.scopes.filter((s) => scopes.includes(s)), bot_ids: [...(row.bot_ids ?? [])] } : { app_key: '', name: '', scopes: [], bot_ids: [], enabled: true })
+  Object.assign(form, row ? { ...row, scopes: row.scopes.filter((s) => scopes.includes(s)), bot_ids: [...(row.bot_ids ?? [])], silent_writes: [...(row.silent_writes ?? [])] } : { app_key: '', name: '', scopes: [], bot_ids: [], silent_writes: [], enabled: true })
   try { await loadBotOptions() } catch (e) { fail(e) }
+  try { silentOptions.value = await credentials.silentWriteOptions() } catch (e) { fail(e) }
   visible.value = true
   await nextTick()
   formRef.value?.clearValidate()
@@ -47,7 +50,7 @@ async function save() {
     form.name = form.name.trim()
     if (!await formRef.value?.validate().catch(() => false)) return
     if (editing.value) await credentials.update({ ...editing.value, ...form })
-    else secret.value = (await credentials.create({ app_key: form.app_key, name: form.name, scopes: form.scopes, bot_ids: form.bot_ids, enabled: form.enabled })).secret
+    else secret.value = (await credentials.create({ app_key: form.app_key, name: form.name, scopes: form.scopes, bot_ids: form.bot_ids, silent_writes: form.silent_writes, enabled: form.enabled })).secret
     visible.value = false; ElMessage.success(t('common.saved')); await load()
   } catch (e) { fail(e) } finally { busy.value = false }
 }
@@ -347,6 +350,27 @@ onMounted(load)
           </el-form-item>
           <p class="field-hint">
             {{ t('infra.taskBotsHint') }}
+          </p>
+          <el-form-item :label="t('infra.silentWrites')">
+            <el-select
+              v-model="form.silent_writes"
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              style="width:100%"
+              data-test="client-silent-writes"
+            >
+              <el-option
+                v-for="o in silentOptions"
+                :key="o.ref"
+                :value="o.ref"
+                :label="`${o.ref}${o.summary ? ' · ' + o.summary : ''}（${o.risk}）`"
+              />
+            </el-select>
+          </el-form-item>
+          <p class="field-hint">
+            {{ t('infra.silentWritesHint') }}
           </p>
         </template>
         <el-form-item :label="t('infra.enabled')">
