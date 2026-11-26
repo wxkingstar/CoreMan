@@ -107,7 +107,8 @@ async function addGroup() {
   groupBusy.value = true
   try {
     const row = await credentials.addGroupRoute(client.app_key, { bot_id: groupForm.bot_id, chat_id: groupForm.chat_id.trim(), service_user_id: groupForm.service_user_id })
-    groupRows.value = [...groupRows.value, row]
+    const chatName = row.chat_name ?? groupOptions.value.bot_chats.find((c) => c.chat_id === row.chat_id)?.name ?? null
+    groupRows.value = [...groupRows.value, { ...row, chat_name: chatName }]
     groupForm.chat_id = ''
     ElMessage.success(t('common.saved'))
     await load()
@@ -419,9 +420,20 @@ onMounted(load)
         </el-table-column>
         <el-table-column
           min-width="160"
-          prop="chat_id"
-          :label="t('infra.groupRouteChat')"
-        />
+          :label="t('infra.groupRouteChatName')"
+        >
+          <template #default="{ row }">
+            <template v-if="row.chat_name">
+              <div>{{ row.chat_name }}</div>
+              <div class="chat-id-suffix chat-id-line">
+                {{ row.chat_id }}
+              </div>
+            </template>
+            <template v-else>
+              {{ row.chat_id }}
+            </template>
+          </template>
+        </el-table-column>
         <el-table-column
           min-width="120"
           prop="service_user"
@@ -563,4 +575,4 @@ onMounted(load)
 <style scoped>
 :deep(.el-form-item__error) { position: static; width: 100%; padding-top: 6px; line-height: 1.5 }
 .scope-tags { display: flex; flex-wrap: wrap; gap: 6px }
-.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px } .group-add { margin-top: 20px } .chat-id-suffix { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px }</style>
+.el-table { margin-top:16px }  .secret { margin-top:16px } .field-hint { margin: 0 0 20px; color: var(--el-text-color-secondary); font-size: 12px } .group-add { margin-top: 20px } .chat-id-suffix { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px } .chat-id-line { margin-left: 0 }</style>

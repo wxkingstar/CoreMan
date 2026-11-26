@@ -87,6 +87,14 @@ async def test_admin_configures_group_routes_with_service_accounts_only(
     assert again.status_code == 409
     listed = await client.get(url)
     assert [r["id"] for r in listed.json()["data"]] == [route["id"]]
+    assert listed.json()["data"][0]["chat_name"] is None  # 机器人群列表里没有 oc_alerts
+
+    async def groups_with_alerts(target, cipher):  # type: ignore[no-untyped-def]
+        return [{"chat_id": "oc_alerts", "name": "告警群"}]
+
+    monkeypatch.setattr(collaboration_setup, "bot_groups", groups_with_alerts)
+    named = await client.get(url)
+    assert named.json()["data"][0]["chat_name"] == "告警群"
     clients = await client.get("/api/admin/api-clients")
     assert clients.json()["data"]["items"][0]["group_routes"] == 1
 
