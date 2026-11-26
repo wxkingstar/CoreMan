@@ -33,11 +33,14 @@ export interface SystemCatalog {
 /** 保存时没能拉取（例如操作者没有可用的业务系统身份），error 是给管理员看的原因。 */
 export interface CatalogSkipped { status: 'skipped'; error: string }
 export interface ApiClient {
-  app_key: string; name: string; scopes: string[]; bot_ids: string[]; enabled: boolean; version: number; last_used_at: string | null; has_secret: boolean
+  app_key: string; name: string; scopes: string[]; bot_ids: string[]; silent_writes: string[]; enabled: boolean; version: number; last_used_at: string | null; has_secret: boolean
   /** 群承接配置条数（列表里给出）。 */
   group_routes?: number
 }
 /** 群承接：调用方驱动这个 AI 员工时，以服务账号身份在这个群的主会话里跑。 */
+export interface SilentWriteOption {
+  ref: string; system: string; system_name: string; operation_id: string; summary: string; method: string; path: string; risk: string
+}
 export interface ApiClientGroupRoute {
   id: string; bot_id: string; bot_key: string | null; bot_name: string | null; chat_id: string
   service_user_id: string; service_user: string | null; created_at: string
@@ -104,9 +107,10 @@ export const systemAccess = {
 }
 export const credentials = {
   clients: (page = 1) => call<Page<ApiClient>>(http.get('/api/admin/api-clients', { params: { page } })),
-  create: (body: { app_key: string; name: string; scopes: string[]; bot_ids: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),
-  update: (row: ApiClient) => call<ApiClient>(http.put(`/api/admin/api-clients/${row.app_key}`, { name: row.name, scopes: row.scopes, bot_ids: row.bot_ids, enabled: row.enabled }, { headers: { 'If-Match': String(row.version) } })),
+  create: (body: { app_key: string; name: string; scopes: string[]; bot_ids: string[]; silent_writes: string[]; enabled: boolean }) => call<ApiClient & { secret: string }>(http.post('/api/admin/api-clients', body)),
+  update: (row: ApiClient) => call<ApiClient>(http.put(`/api/admin/api-clients/${row.app_key}`, { name: row.name, scopes: row.scopes, bot_ids: row.bot_ids, silent_writes: row.silent_writes, enabled: row.enabled }, { headers: { 'If-Match': String(row.version) } })),
   rotate: (row: ApiClient) => call<ApiClient & { secret: string }>(http.post(`/api/admin/api-clients/${row.app_key}/rotate-secret`, {}, { headers: { 'If-Match': String(row.version) } })),
+  silentWriteOptions: () => call<SilentWriteOption[]>(http.get('/api/admin/api-clients/silent-write-options')),
   groupRoutes: (key: string) => call<ApiClientGroupRoute[]>(http.get(`/api/admin/api-clients/${key}/group-routes`)),
   groupRouteOptions: (botId?: string) => call<GroupRouteOptions>(http.get('/api/admin/api-clients/group-route-options', { params: { bot_id: botId } })),
   addGroupRoute: (key: string, body: { bot_id: string; chat_id: string; service_user_id: string }) => call<ApiClientGroupRoute>(http.post(`/api/admin/api-clients/${key}/group-routes`, body)),

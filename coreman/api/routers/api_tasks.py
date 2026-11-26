@@ -233,6 +233,10 @@ class ClientTaskIn(BaseModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=service.REQUEST_ID_MAX)
     # 先用 /api/infra/tasks/uploads 逐张上传拿到的 upload_id，按顺序；张数不限。
     images: list[uuid.UUID] = Field(default_factory=list)
+    # 静默执行：不往员工私聊发任何消息，`allowed_writes` 里的写操作不发确认卡直接执行。
+    silent: bool = False
+    # 这次允许的写操作 `<业务系统标识>.<operationId>`；不带表示不限，名单外的写操作直接拒绝。
+    allowed_writes: list[str] | None = Field(default=None, max_length=service.ALLOWED_WRITES_MAX)
 
 
 class ClientUserIn(BaseModel):
@@ -339,6 +343,8 @@ async def create_client_task(
             request_id=body.request_id,
             images=body.images,
             chat_id=body.chat_id,
+            silent=body.silent,
+            allowed_writes=body.allowed_writes,
         )
     except TokenError as exc:
         await session.rollback()
@@ -360,6 +366,15 @@ async def create_client_task(
                 "api_client": client.app_key,
                 "images": len(row.image_ids),
                 **({"chat_id": row.chat_id} if group else {}),
+                **({"silent": True} if row.silent else {}),
+                **(
+                    {"silent_unregistered": row.silent_unregistered}
+                    if row.silent_unregistered is not None
+                    else {}
+                ),
+                **(
+                    {"allowed_writes": row.allowed_writes} if row.allowed_writes is not None else {}
+                ),
             },
             ip=client_ip(request),
         )

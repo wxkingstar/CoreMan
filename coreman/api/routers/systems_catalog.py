@@ -21,6 +21,7 @@ from coreman.api.permissions import require_roles
 from coreman.api.routers.infra_system_test import SUBJECT_UNAVAILABLE_MESSAGES
 from coreman.api.routers.objects import serve
 from coreman.api.security import verify_csrf
+from coreman.core.api_tasks import writes as api_writes
 from coreman.core.assistants import kinds
 from coreman.core.assistants.approvals import proxied, tower
 from coreman.core.audit import record_audit
@@ -191,6 +192,8 @@ async def call_tool(
     )
     # 个人助理无人在场、又能提交审批的一轮：授权允许写的系统，写操作改为提交所有者审批。
     stage = proxied.may_stage(task, scope.bot, scope.user)
+    # 业务系统发起的任务（含续接轮）：它列出的写操作才能做，静默执行时这些写不发确认卡。
+    api_row = await api_writes.client_task(session, task)
     ctx = context.Context(
         session=session,
         issuance=await issuance(request),
@@ -200,6 +203,12 @@ async def call_tool(
         systems=await granted_systems(session, scope.bot.id),
         writable=policy.writable_for(task, writable),
         writes_preapproved=policy.writes_preapproved(task),
+        caller_writes=(
+            frozenset(api_row.allowed_writes)
+            if api_row is not None and api_row.allowed_writes is not None
+            else None
+        ),
+        silent_writes=api_row is not None and api_row.silent,
         owner_absent=kinds.unattended(task.kind),
         stageable=writable if stage else frozenset(),
         approval_cfg=tower.config(request.app.state.settings) if stage else None,

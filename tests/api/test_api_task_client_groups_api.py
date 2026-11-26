@@ -304,3 +304,24 @@ async def test_a_client_cannot_see_or_cancel_another_clients_tasks(client, db_se
     db_session.expire_all()
     still = await db_session.scalar(select(Task).where(Task.cancel_requested_at.is_not(None)))
     assert still is None
+
+
+async def test_group_mode_rejects_silent_but_keeps_allowed_writes(client, db_session):
+    bot, svc, _ = await _setup(client, db_session)
+    db_session.add(
+        ApiClientGroupRoute(
+            client_key="monitor", bot_id=bot.id, chat_id="oc_alerts", service_user_id=svc.id
+        )
+    )
+    monitor = await db_session.get(ApiClient, "monitor")
+    monitor.silent_writes = ["ops.restart"]
+    await db_session.commit()
+    client.auth = Signed("monitor", "client-secret")
+    body = {"bot_key": "sales_bot", "prompt": "查一下", "allowed_writes": ["ops.restart"]}
+    silent = await client.post("/api/infra/tasks/run", json={**body, "silent": True})
+    assert silent.status_code == 422, silent.text
+    assert silent.json()["errors"] == [{"type": "silent_group"}]
+    loud = await client.post("/api/infra/tasks/run", json=body)
+    assert loud.status_code == 202, loud.text
+    assert loud.json()["data"]["allowed_writes"] == ["ops.restart"]
+    assert loud.json()["data"]["silent"] is False

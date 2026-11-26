@@ -709,6 +709,12 @@ def register_clients(sub: Any) -> None:
     p.add_argument(
         "--bot", action="append", metavar="AI员工", help="tasks 接口组能驱动的 AI 员工，可重复"
     )
+    p.add_argument(
+        "--silent-write",
+        action="append",
+        metavar="系统.operationId",
+        help="允许静默执行（不发确认卡）的写操作，可重复",
+    )
     p = leaf(ops, "set", "修改接口调用方（只改给出的字段）", clients_set)
     p.add_argument("app_key")
     p.add_argument("--name")
@@ -718,7 +724,20 @@ def register_clients(sub: Any) -> None:
         "--bot", action="append", metavar="AI员工", help="替换 tasks 能驱动的 AI 员工，可重复"
     )
     p.add_argument("--no-bot", action="store_true", help="清空 tasks 能驱动的 AI 员工")
+    p.add_argument(
+        "--silent-write",
+        action="append",
+        metavar="系统.operationId",
+        help="替换允许静默执行的写操作，可重复",
+    )
+    p.add_argument("--no-silent-write", action="store_true", help="清空允许静默执行的写操作")
     p.add_argument("--enabled", type=on_off, metavar="on|off")
+    leaf(
+        ops,
+        "silent-write-options",
+        "登记静默清单时可选的写操作（经平台代理的业务系统目录里的写操作）",
+        clients_silent_write_options,
+    )
     p = leaf(ops, "rotate-secret", "重新生成调用方密钥（旧密钥立即失效）", clients_rotate)
     p.add_argument("app_key")
     add_yes(p)
@@ -772,6 +791,7 @@ async def clients_list(c: AdminClient, args: argparse.Namespace) -> int:
                 ("状态", output.enabled),
                 ("接口组", "scopes"),
                 ("可驱动 AI 员工", lambda r: len(r.get("bot_ids") or [])),
+                ("静默写操作", lambda r: "、".join(r.get("silent_writes") or []) or "-"),
                 ("群承接", lambda r: r.get("group_routes") or 0),
                 ("最近调用", "last_used_at"),
             ],
@@ -789,6 +809,7 @@ async def clients_create(c: AdminClient, args: argparse.Namespace) -> int:
         "name": args.name,
         "scopes": args.scope or [],
         "bot_ids": [(await c.bot(ref))["id"] for ref in args.bot or []],
+        "silent_writes": args.silent_write or [],
         "enabled": not args.disabled,
     }
     if args.secret_file is not None:
@@ -810,15 +831,38 @@ async def clients_set(c: AdminClient, args: argparse.Namespace) -> int:
         updates["bot_ids"] = [(await c.bot(ref))["id"] for ref in args.bot]
     if args.no_bot:
         updates["bot_ids"] = []
+    if args.silent_write:
+        updates["silent_writes"] = args.silent_write
+    if args.no_silent_write:
+        updates["silent_writes"] = []
     if not updates:
         raise CliError("没有要修改的字段，见 --help")
     row = await find_client(c, args.app_key)
-    body = {key: row[key] for key in ("name", "scopes", "bot_ids", "enabled")} | updates
+    keep = ("name", "scopes", "bot_ids", "silent_writes", "enabled")
+    body = {key: row[key] for key in keep if key in row} | updates
     data = await c.request("PUT", f"{CLIENTS}/{args.app_key}", body=body, version=row["version"])
     if args.json:
         output.dump(data)
     else:
         print(f"已更新接口调用方 {args.app_key}：{'、'.join(updates)}")
+    return 0
+
+
+async def clients_silent_write_options(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(f"{CLIENTS}/silent-write-options")
+    if args.json:
+        output.dump(rows)
+    else:
+        output.table(
+            rows,
+            [
+                ("写法", "ref"),
+                ("系统", "system_name"),
+                ("操作", "summary"),
+                ("风险", "risk"),
+                ("请求", lambda r: f"{r.get('method')} {r.get('path')}"),
+            ],
+        )
     return 0
 
 

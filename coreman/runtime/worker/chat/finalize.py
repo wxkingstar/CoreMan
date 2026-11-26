@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks.service import SILENT_KEY
 from coreman.core.bots.permissions import can_switch_relay
 from coreman.core.bus import outbox, streams, tasks
 from coreman.core.chat import chat_logs, interactions, liveness, sessions
@@ -296,6 +297,9 @@ class FinalizeStage(ChatStageBase):
                 collaboration_silent = collaboration_silent or bool(
                     ctx.task.payload.get("work_silent")
                 )
+            # 静默执行的业务系统任务：结果只经查询接口返回，私聊里什么都不发。
+            api_silent = bool(ctx.task.payload.get(SILENT_KEY))
+            collaboration_silent = collaboration_silent or api_silent
             entry = (
                 log_entry(
                     ctx,
@@ -305,8 +309,11 @@ class FinalizeStage(ChatStageBase):
                     response_content=verdict.final_text,
                     tools_used=out.tools,
                 )
-                # 协作 helper 的回答只是交给平台解析的 JSON；子任务是完整的一轮，用量照常记。
-                if collaboration_silent and not ctx.task.payload.get("work_silent")
+                # 协作 helper 的回答只是交给平台解析的 JSON；子任务、静默的业务系统任务是完整的
+                # 一轮，用量照常记。
+                if collaboration_silent
+                and not ctx.task.payload.get("work_silent")
+                and not api_silent
                 else log_entry(
                     ctx,
                     intake,

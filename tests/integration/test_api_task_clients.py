@@ -480,3 +480,155 @@ async def test_recall_only_for_the_member_in_their_own_chat(db_engine, db_sessio
     await db_session.commit()
     fake = await _run(db_engine, task)
     assert "业务系统「资料录入」里发起" not in str(fake.requests[0]["messages"][1]["content"])
+
+
+async def _silent_setup(session):  # type: ignore[no-untyped-def]
+    bot, member, client = await _setup(session)
+    client.silent_writes = ["profile_admin.saveDraft", "profile_admin.saveAudit"]
+    await session.commit()
+    return bot, member, client
+
+
+async def test_silent_needs_allowed_writes(db_session):
+    _, _, client = await _silent_setup(db_session)
+    with pytest.raises(TokenError) as missing:
+        await _create(db_session, client, silent=True)
+    assert missing.value.status == 422 and "allowed_writes" in missing.value.message
+    with pytest.raises(TokenError) as empty:
+        await _create(db_session, client, allowed_writes=[])
+    assert empty.value.status == 422
+    with pytest.raises(TokenError) as malformed:
+        await _create(db_session, client, silent=True, allowed_writes=["saveDraft"])
+    assert malformed.value.status == 422 and "saveDraft" in malformed.value.message
+    # 非静默时 allowed_writes 只是收窄，不要求登记过。
+    row, created = await _create(db_session, client, allowed_writes=["profile_admin.updatePayout"])
+    assert created and not row.silent and row.allowed_writes == ["profile_admin.updatePayout"]
+
+
+async def test_silent_and_allowed_writes_count_as_content_for_request_id(db_session):
+    _, _, client = await _silent_setup(db_session)
+    first, created = await _create(
+        db_session,
+        client,
+        request_id="lead-1",
+        silent=True,
+        allowed_writes=["profile_admin.saveDraft", "profile_admin.saveAudit"],
+    )
+    # 顺序不同、重复的项不算改了内容。
+    again, replayed = await _create(
+        db_session,
+        client,
+        request_id="lead-1",
+        silent=True,
+        allowed_writes=[
+            "profile_admin.saveAudit",
+            "profile_admin.saveDraft",
+            "profile_admin.saveDraft",
+        ],
+    )
+    assert created and not replayed and again.id == first.id
+    for changed in (
+        {"silent": False, "allowed_writes": ["profile_admin.saveDraft", "profile_admin.saveAudit"]},
+        {"silent": True, "allowed_writes": ["profile_admin.saveDraft"]},
+    ):
+        with pytest.raises(TokenError) as conflict:
+            await _create(db_session, client, request_id="lead-1", **changed)
+        assert conflict.value.status == 409
+    # 不带 request_id 时同内容去重同样看这两项：换成非静默就是另一件事。
+    loud, made = await _create(db_session, client)
+    assert made and loud.id != first.id
+
+
+async def test_silent_task_sends_nothing_to_the_private_chat(db_engine, db_session):
+    _, _, client = await _silent_setup(db_session)
+    row, _ = await _create(
+        db_session, client, silent=True, allowed_writes=["profile_admin.saveDraft"]
+    )
+    # 连「在某系统里发起」也不发；没有触发消息要等，直接开轮。
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+    task = await _claim(db_session)
+    assert task.payload[service.SILENT_KEY] is True
+    fake = await _run(db_engine, task)
+    block = turn_block(fake.requests[0])
+    assert "静默执行" in block and "profile_admin.saveDraft" in block
+    stream = await db_session.scalar(select(TaskStream).where(TaskStream.task_id == task.id))
+    assert stream.reply_context.get("_silent") is True
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+    log = await db_session.scalar(select(ChatLog).where(ChatLog.task_id == task.id))
+    assert "不在当前对话上下文中" not in log.response_content
+    view = await service.view(db_session, row)
+    assert view["status"] == "succeeded" and "你好，世界" in view["reply"]
+    assert view["silent"] is True and view["allowed_writes"] == ["profile_admin.saveDraft"]
+
+
+async def test_silent_with_unregistered_writes_falls_back_to_confirmation(db_engine, db_session):
+    _, _, client = await _silent_setup(db_session)
+    wanted = ["profile_admin.saveDraft", "profile_admin.updatePayout"]
+    row, created = await _create(
+        db_session, client, request_id="lead-2", silent=True, allowed_writes=wanted
+    )
+    # 整个任务按普通模式跑：不按项拆成部分静默；写操作范围照常收窄。
+    assert created and not row.silent and row.silent_unregistered == ["profile_admin.updatePayout"]
+    assert row.allowed_writes == wanted
+    assert len(list(await db_session.scalars(select(OutboxItem)))) == 1
+    task = await _claim(db_session)
+    assert service.SILENT_KEY not in task.payload
+    view = await service.view(db_session, row)
+    assert view["silent"] is False
+    assert view["silent_fallback"] == {
+        "reason": "not_registered",
+        "unregistered": ["profile_admin.updatePayout"],
+    }
+    # 幂等按请求内容比较：请求里是 silent=true，重放还按 true 比。
+    again, replayed = await _create(
+        db_session, client, request_id="lead-2", silent=True, allowed_writes=wanted
+    )
+    assert not replayed and again.id == row.id
+    with pytest.raises(TokenError) as conflict:
+        await _create(db_session, client, request_id="lead-2", allowed_writes=wanted)
+    assert conflict.value.status == 409
+    # 没配静默清单的调用方同样回退。
+    client.silent_writes = []
+    await db_session.commit()
+    bare, made = await _create(
+        db_session, client, prompt="另一件", silent=True, allowed_writes=["profile_admin.saveDraft"]
+    )
+    assert made and not bare.silent and bare.silent_unregistered == ["profile_admin.saveDraft"]
+    # 静默生效的任务没有回退原因。
+    client.silent_writes = ["profile_admin.saveDraft"]
+    await db_session.commit()
+    quiet, _ = await _create(
+        db_session, client, prompt="第三件", silent=True, allowed_writes=["profile_admin.saveDraft"]
+    )
+    assert quiet.silent and quiet.silent_unregistered is None
+    assert (await service.view(db_session, quiet))["silent_fallback"] is None
+
+
+async def test_silent_task_that_asks_the_member_fails_instead_of_waiting(db_engine, db_session):
+    from tests.fakes.fake_relay import FakeRelay
+
+    _, _, client = await _silent_setup(db_session)
+    row, _ = await _create(
+        db_session, client, silent=True, allowed_writes=["profile_admin.saveDraft"]
+    )
+    task = await _claim(db_session)
+    await _run(db_engine, task, FakeRelay("ask_user"))
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+    view = await service.view(db_session, row)
+    assert view["status"] == "failed" and view["error_code"] == service.SILENT_ASK_CODE
+    assert "用哪个" in view["reply"]
+
+
+async def test_silent_task_refused_before_run_says_nothing_in_private_chat(db_engine, db_session):
+    _, _, client = await _silent_setup(db_session)
+    row, _ = await _create(
+        db_session, client, silent=True, allowed_writes=["profile_admin.saveDraft"]
+    )
+    client.scopes = []
+    await db_session.commit()
+    task = await _claim(db_session)
+    fake = await _run(db_engine, task)
+    assert fake.requests == []
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+    view = await service.view(db_session, row)
+    assert view["status"] == "failed" and view["error_code"] == "api_unavailable"

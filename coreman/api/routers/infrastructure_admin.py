@@ -24,6 +24,8 @@ from coreman.api.security import verify_csrf
 from coreman.api.system_grants import apply_grants, current_grants, lock_bot
 from coreman.api.versioning import require_if_match, set_etag
 from coreman.core.api_tasks import groups as api_groups
+from coreman.core.api_tasks import service as api_task_service
+from coreman.core.api_tasks.tokens import TokenError
 from coreman.core.audit import diff_dict, record_audit
 from coreman.core.auth.system_access import RESERVED_SYSTEM_KEYS, granted_systems
 from coreman.core.auth.tokens import active_key, public_keys
@@ -48,6 +50,7 @@ from coreman.core.relay.models import backend_of
 from coreman.core.systems_catalog import policy as catalog_policy
 from coreman.core.systems_catalog import service as catalog_service
 from coreman.core.systems_catalog.compiler import same_origin
+from coreman.core.systems_catalog.proxy import CONFIRMED_RISKS
 
 router = APIRouter(
     prefix="/api/admin", tags=["infrastructure"], dependencies=[Depends(verify_csrf)]
@@ -170,7 +173,19 @@ class ClientIn(BaseModel):
     scopes: list[str] = Field(default_factory=list, max_length=20)
     # `tasks` 接口组能驱动的 AI 员工；省略时保留原设置（旧前端不带这个字段）。
     bot_ids: list[uuid.UUID] | None = Field(default=None, max_length=200)
+    # `tasks` 接口组里允许静默执行的写操作（`<业务系统标识>.<operationId>`）；省略时保留原设置。
+    silent_writes: list[str] | None = Field(default=None, max_length=200)
     enabled: bool = True
+
+    @field_validator("silent_writes")
+    @classmethod
+    def valid_silent_writes(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        try:
+            return sorted({api_task_service.parse_write_ref(item) for item in value})
+        except TokenError as exc:
+            raise ValueError(exc.message) from None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -225,6 +240,7 @@ def client_out(row: ApiClient) -> dict[str, Any]:
         # 旧数据里可能还存着已下线的接口组，读取时不展示也不报错。
         "scopes": [scope for scope in row.scopes if scope in INFRA_SCOPES],
         "bot_ids": [str(bot_id) for bot_id in row.bot_ids or []],
+        "silent_writes": list(row.silent_writes or []),
         "enabled": row.enabled,
         "version": row.version,
         "last_used_at": row.last_used_at,
@@ -724,6 +740,64 @@ async def sync_companions(
     return installed, uninstalled
 
 
+async def check_silent_writes(session: AsyncSession, refs: list[str] | None) -> None:
+    """静默清单里的每一项：业务系统存在、经平台代理；目录可用时操作要在目录里且不是读操作。
+
+    目录暂时拉不到时不拦：目录恢复前这一项本来也调不到。"""
+    for ref in refs or []:
+        system_key, _, operation_id = ref.partition(".")
+        system = await session.get(BusinessSystem, system_key)
+        if system is None:
+            raise ApiError(422, 422, f"「{ref}」：业务系统「{system_key}」不存在")
+        if system.token_delivery != "proxy":
+            raise ApiError(
+                422, 422, f"「{ref}」：业务系统「{system_key}」不经平台代理，静默清单管不到它"
+            )
+        loaded = await catalog_service.load(session, system_key)
+        if loaded is None:
+            continue
+        op = (loaded.compiled.get("operations") or {}).get(operation_id)
+        if op is None:
+            raise ApiError(422, 422, f"「{ref}」：业务系统目录里没有这个操作")
+        if op.get("risk") not in CONFIRMED_RISKS:
+            raise ApiError(422, 422, f"「{ref}」是读操作，不需要登记")
+
+
+@router.get("/api-clients/silent-write-options")
+async def silent_write_options(
+    user: User = Depends(ADMINS),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """登记静默清单时可选的写操作：经平台代理的业务系统目录里的写、删除、资金类操作。"""
+    systems = list(
+        await session.scalars(
+            select(BusinessSystem)
+            .where(BusinessSystem.token_delivery == "proxy")
+            .order_by(BusinessSystem.sort_order, BusinessSystem.key)
+        )
+    )
+    items: list[dict[str, Any]] = []
+    for system in systems:
+        loaded = await catalog_service.load(session, system.key)
+        operations = (loaded.compiled.get("operations") or {}) if loaded else {}
+        for operation_id, op in sorted(operations.items()):
+            if op.get("risk") not in CONFIRMED_RISKS:
+                continue
+            items.append(
+                {
+                    "ref": api_task_service.write_ref(system.key, operation_id),
+                    "system": system.key,
+                    "system_name": system.name,
+                    "operation_id": operation_id,
+                    "summary": op.get("summary") or "",
+                    "method": op.get("method"),
+                    "path": op.get("path"),
+                    "risk": op.get("risk"),
+                }
+            )
+    return {"code": 0, "data": items}
+
+
 @router.get("/api-clients")
 async def list_clients(
     user: User = Depends(ADMINS),
@@ -757,15 +831,25 @@ async def create_client(
     if await session.get(ApiClient, body.app_key):
         raise ApiError(409, 409, "调用方标识已存在")
     await check_bots(session, body.bot_ids)
+    await check_silent_writes(session, body.silent_writes)
     secret = body.secret or secrets.token_urlsafe(48)
     row = ApiClient(
-        **body.model_dump(exclude={"secret", "bot_ids"}),
+        **body.model_dump(exclude={"secret", "bot_ids", "silent_writes"}),
         bot_ids=body.bot_ids or [],
+        silent_writes=body.silent_writes or [],
         secret_enc=request.app.state.cipher.encrypt(secret, "api_clients.secret_enc"),
     )
     session.add(row)
     await persist(session)
-    await audit(session, request, user, "api_client.create", "api_client", row.app_key)
+    await audit(
+        session,
+        request,
+        user,
+        "api_client.create",
+        "api_client",
+        row.app_key,
+        {"silent_writes": row.silent_writes} if row.silent_writes else None,
+    )
     await persist(session, commit=True)
     return {"code": 0, "data": {**client_out(row), "secret": secret}}
 
@@ -783,12 +867,20 @@ async def update_client(
         raise not_found("调用方不存在")
     require_if_match(request, row.version)
     await check_bots(session, body.bot_ids)
+    await check_silent_writes(session, body.silent_writes)
     before = [str(b) for b in row.bot_ids or []]
+    silent_before = list(row.silent_writes or [])
     for name, value in body.model_dump(exclude_none=True).items():
         setattr(row, name, value)
     after = [str(b) for b in row.bot_ids or []]
-    diff = {"bot_ids": {"before": before, "after": after}} if before != after else None
-    await audit(session, request, user, "api_client.update", "api_client", key, diff)
+    silent_after = list(row.silent_writes or [])
+    diff: dict[str, Any] = {}
+    if before != after:
+        diff["bot_ids"] = {"before": before, "after": after}
+    if silent_before != silent_after:
+        # 静默清单决定哪些写操作不经员工确认：每次改动都要在审计里看得到。
+        diff["silent_writes"] = {"before": silent_before, "after": silent_after}
+    await audit(session, request, user, "api_client.update", "api_client", key, diff or None)
     await persist(session, commit=True)
     return {"code": 0, "data": client_out(row)}
 

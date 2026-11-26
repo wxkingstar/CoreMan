@@ -173,6 +173,14 @@ async def group_origin(session: AsyncSession, origin: Task) -> bool:
 
 # 单个写操作在 API 查询里的状态。
 _ITEM = {"ok": "succeeded", "failed": "failed", "unknown": "unknown", "sending": "unknown"}
+# 不经确认卡的写操作（业务系统调用记录的结果）在 API 查询里的状态：名单外被拒，或静默执行。
+_DIRECT = {
+    "not_allowed": "not_allowed",
+    "silent_ok": "succeeded",
+    "silent_http_error": "failed",
+    # 连接中断时业务系统可能已经处理了：和确认后执行一样报「不确定」，请调用方核对。
+    "silent_unreachable": "unknown",
+}
 
 
 def _batch_status(state: InteractionState, now: Any) -> str:
@@ -214,16 +222,37 @@ async def view(session: AsyncSession, row: ApiTask) -> list[dict[str, Any]]:
     )
     # 个人助理的批次状态是密文：显式还原后再读（普通 AI 员工原样不动）。
     await sealed.open_rows(session, states)
-    proposed = list(
+    calls = list(
         await session.scalars(
             select(SystemCall)
-            .where(SystemCall.task_id.in_(task_ids), SystemCall.outcome == "proposed")
+            .where(
+                SystemCall.task_id.in_(task_ids),
+                SystemCall.outcome.in_(("proposed", *_DIRECT)),
+            )
             .order_by(SystemCall.id)
         )
     )
+    proposed = [c for c in calls if c.outcome == "proposed"]
     now = utcnow()
-    out: list[dict[str, Any]] = []
+    # 按发生先后排：确认卡按暂存时间，直接的（名单外被拒、静默执行）按调用时间。
+    timed: list[tuple[Any, list[dict[str, Any]]]] = [
+        (
+            call.called_at,
+            [
+                {
+                    "system": call.system_key,
+                    "operation": call.operation_id,
+                    "status": _DIRECT[call.outcome],
+                    **({"silent": True} if call.outcome.startswith("silent_") else {}),
+                }
+            ],
+        )
+        for call in calls
+        if call.outcome in _DIRECT
+    ]
     for state in states:
+        out: list[dict[str, Any]] = []
+        timed.append((state.created_at, out))
         staged = state.state or {}
         status = _batch_status(state, now)
         if state.kind == batch.KIND:
@@ -238,10 +267,10 @@ async def view(session: AsyncSession, row: ApiTask) -> list[dict[str, Any]]:
             out.append(entry)
             continue
         # 暂存时每一项记一行 proposed，顺序与暂存顺序一致。
-        calls = [c for c in proposed if str(c.task_id) == state.scope_key]
+        staged_calls = [c for c in proposed if str(c.task_id) == state.scope_key]
         run = staged.get(confirm.RUN) or {}
         progress = [str(s) for s in run.get("progress") or []]
-        for index, call in enumerate(calls):
+        for index, call in enumerate(staged_calls):
             item_status = status
             if status == "confirmed":
                 step = progress[index] if index < len(progress) else "pending"
@@ -249,4 +278,5 @@ async def view(session: AsyncSession, row: ApiTask) -> list[dict[str, Any]]:
             out.append(
                 {"system": call.system_key, "operation": call.operation_id, "status": item_status}
             )
-    return out
+    timed.sort(key=lambda pair: pair[0])
+    return [entry for _, entries in timed for entry in entries]

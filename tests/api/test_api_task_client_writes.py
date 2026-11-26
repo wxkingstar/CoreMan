@@ -10,9 +10,11 @@ from coreman.core.api_tasks import service
 from coreman.core.db.models import ApiClient, ApiTask, OutboxItem, Task, UserReached
 from coreman.core.systems_catalog import confirm
 from tests.api.test_systems_write_confirm import (  # noqa: F401  fixture
+    REFUND,
     batch,
     draft,
     fake,
+    outcomes,
     posts,
     press,
     release,
@@ -23,7 +25,9 @@ from tests.api.test_systems_write_confirm import (  # noqa: F401  fixture
 )
 
 
-async def api_turn(db_session, app, *, client_task=True):  # type: ignore[no-untyped-def]
+async def api_turn(  # type: ignore[no-untyped-def]
+    db_session, app, *, client_task=True, silent=False, allowed_writes=None
+):
     """把夹具里的私聊一轮改成业务系统代这位员工发起的 API 任务。"""
     bot, user, task = await turn(db_session, app)
     if await db_session.get(UserReached, (bot.id, user.id)) is None:
@@ -47,9 +51,13 @@ async def api_turn(db_session, app, *, client_task=True):  # type: ignore[no-unt
         target="p2p",
         chat_id="oc_private",
         task_id=task.id,
+        silent=silent,
+        allowed_writes=allowed_writes,
     )
     db_session.add(row)
     payload = {**task.payload, "api_task_id": str(row.id), "origin": "api"}
+    if silent:
+        payload[service.SILENT_KEY] = True
     if client_task:
         payload["api_client"] = "intake"
         task.session_key = service.client_session_key(row.id)
@@ -137,3 +145,61 @@ async def test_a_task_in_someone_elses_session_is_not_an_api_client_turn(
     await db_session.commit()
     (out,) = await stage(client, app, task, user, draft("SKU-1"))
     assert out["error"] == "confirmation_unavailable"
+
+
+async def test_silent_task_runs_listed_writes_at_once_without_a_card(
+    client,
+    app,
+    db_session,
+    fake,  # noqa: F811
+) -> None:
+    _, user, task, row = await api_turn(
+        db_session, app, silent=True, allowed_writes=["stock.createDraft"]
+    )
+    (out,) = await stage(client, app, task, user, draft("SKU-1"))
+    # 当场以员工身份执行，结果直接回给 AI 员工；没有暂存，也没有确认卡。
+    assert out.get("ok") is True, out
+    assert posts(fake) == ["/api/stock/documents"]
+    assert not await release(app, task)
+    assert list(await db_session.scalars(select(OutboxItem))) == []
+    assert await outcomes(db_session) == [("createDraft", "silent_ok")]
+    writes = (await service.view(db_session, row))["writes"]
+    assert writes == [
+        {"system": "stock", "operation": "createDraft", "status": "succeeded", "silent": True}
+    ]
+
+
+async def test_silent_task_refuses_writes_it_did_not_list(
+    client,
+    app,
+    db_session,
+    fake,  # noqa: F811
+) -> None:
+    _, user, task, row = await api_turn(
+        db_session, app, silent=True, allowed_writes=["stock.setPrice"]
+    )
+    (out,) = await stage(client, app, task, user, draft("SKU-1"))
+    assert out["error"] == "write_not_allowed_by_caller"
+    assert posts(fake) == [] and not await release(app, task)
+    assert await outcomes(db_session) == [("createDraft", "not_allowed")]
+    writes = (await service.view(db_session, row))["writes"]
+    assert writes == [{"system": "stock", "operation": "createDraft", "status": "not_allowed"}]
+
+
+async def test_allowed_writes_limit_a_normal_task_whose_listed_writes_still_need_a_card(
+    client,
+    app,
+    db_session,
+    fake,  # noqa: F811
+) -> None:
+    _, user, task, row = await api_turn(db_session, app, allowed_writes=["stock.createDraft"])
+    staged, refused = await stage(client, app, task, user, draft("SKU-1"), REFUND)
+    assert staged["status"] == "pending_confirmation"
+    assert refused["error"] == "write_not_allowed_by_caller"
+    assert posts(fake) == []
+    writes = (await service.view(db_session, row))["writes"]
+    assert [(w["operation"], w["status"]) for w in writes] == [
+        ("createDraft", "pending_confirm"),
+        ("refundSupplier", "not_allowed"),
+    ]
+    assert await release(app, task)

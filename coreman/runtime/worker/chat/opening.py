@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks import groups as api_groups
+from coreman.core.api_tasks.service import SILENT_KEY
 from coreman.core.assistants import platform_turns
 from coreman.core.assistants.approvals import batch as assistant_writes
 from coreman.core.assistants.kinds import BOT_HELP_KIND, COLD_START_KIND
@@ -529,6 +530,7 @@ class OpenStage(ChatStageBase):
         # 能力都不挂（个人工具、本人定时任务、群文档、向员工或同事求助、凭证索取）；只注入他在
         # 这位员工名下已保存的凭证，并在本轮块里写明这一轮怎么作答。
         bot_help = ctx.task.kind == BOT_HELP_KIND
+        api_silent = bool(ctx.task.payload.get(SILENT_KEY))
         if bot_help:
             from coreman.core.assistants import dispatch_prompt
             from coreman.runtime.worker.chat import credentials
@@ -536,6 +538,15 @@ class OpenStage(ChatStageBase):
             ctx.turn_notes.append(
                 dispatch_prompt.target_note(allow_write=ctx.task.payload.get("allow_write") is True)
             )
+            extra, env, personal_secrets = await credentials.stored_only(
+                session, ctx, intake, extra, env
+            )
+        elif api_silent:
+            # 静默执行的业务系统任务：没有人能当场点卡、填表或接同事的话。和调度来的一轮一样，
+            # 只注入员工已保存的凭证，求助同事、个人工具、定时任务、群文档、任务平台、凭证索取
+            # 这些要找人或往飞书发东西的能力都不挂。
+            from coreman.runtime.worker.chat import credentials
+
             extra, env, personal_secrets = await credentials.stored_only(
                 session, ctx, intake, extra, env
             )
@@ -608,8 +619,9 @@ class OpenStage(ChatStageBase):
             bot=bot,
             # 个人助理调度来的一轮不挂云签名代理：它的写操作要所有者另行审批，结果回不到助理。
             # 助理无人在场的一轮挂上，写由代理按任务类型拒绝；冷启动那一轮不挂。
+            # 静默执行的业务系统任务也不挂：云产品写操作要在私聊里点确认卡。
             user_id=None
-            if alert_turn or cold_start or bot_help or joined
+            if alert_turn or cold_start or bot_help or joined or api_silent
             else intake.speaker.user_id,
             origin_kind="chat",
             env=env,
@@ -645,7 +657,8 @@ class OpenStage(ChatStageBase):
         from coreman.runtime.worker.chat.reply_files import ReplyFiles
 
         # 交给平台解析的回答（helper、个人助理调度来的一轮）不会发到聊天里，图片说明用不上。
-        if not self._structured_reply(ctx):
+        # 静默执行的业务系统任务只回文字给业务系统，图片和附件发不到任何人。
+        if not self._structured_reply(ctx) and not api_silent:
             extra = with_reply_images(extra, intake.bot.platform, backend)
             if ReplyFiles.applies(intake.bot) and origin not in ("observe", "dispatch"):
                 extra = with_reply_files(extra)
@@ -770,8 +783,8 @@ class OpenStage(ChatStageBase):
             ),
         )
         self._after_supervisor(pre)
-        if ctx.task.payload.get("work_silent"):
-            # 子任务这样不出声的一轮：进度与超时通知也不推（回复上下文里的会话是假的）。
+        if ctx.task.payload.get("work_silent") or ctx.task.payload.get(SILENT_KEY):
+            # 子任务、静默执行的业务系统任务这样不出声的一轮：进度与超时通知也不推。
             pre.supervisor.silent = True
         return pre
 
@@ -969,8 +982,9 @@ class OpenStage(ChatStageBase):
             return {
                 "reply_context": {**intake.inbound.reply_context, "_collaboration_helper": True}
             }
-        if ctx.task.payload.get("work_silent"):
-            # 子任务：结果由平台交回上级任务，这条流不发到飞书。
+        if ctx.task.payload.get("work_silent") or ctx.task.payload.get(SILENT_KEY):
+            # 子任务：结果由平台交回上级任务；静默执行的业务系统任务：结果只经查询接口返回。
+            # 这条流都不发到飞书。
             return {"reply_context": {**intake.inbound.reply_context, "_silent": True}}
         if ctx.task.payload.get("origin") == "observe":
             # 插话回合不推流式卡片：网关等终稿出来再发，终稿是「不说话」就什么也不发。

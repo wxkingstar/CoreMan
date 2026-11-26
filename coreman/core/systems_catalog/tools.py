@@ -226,18 +226,25 @@ CALL_NOTES = {
     "owner_turn_required": "所有者不在场",
     "confirmation_required": "需所有者当面确认",
     proxy.OWNER_APPROVAL: "需所有者审批",
+    proxy.CALLER_REFUSED: "发起的业务系统未允许",
 }
 # The anonymous catalog keeps its own marker: callers there confirm these with the user themselves.
 ANONYMOUS_CONFIRM = ("destructive", "financial")
 
 
-def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any]) -> str:
+def call_note(ctx: Context, system: BusinessSystem, op: dict[str, Any], operation_id: str) -> str:
     """Whether this turn may call the operation, from the catalog's risk and the call mode."""
     if ctx.direct(system):
         return "需确认" if op["risk"] in ANONYMOUS_CONFIRM else ""
     if system.token_delivery == "proxy":
+        if proxy.caller_refused(ctx, system.key, operation_id, op):
+            return CALL_NOTES[proxy.CALLER_REFUSED]
         denied = proxy.policy_error(ctx, system, op)
-        if denied is None and op["risk"] in proxy.CONFIRMED_RISKS and not ctx.writes_preapproved:
+        if (
+            denied is None
+            and op["risk"] in proxy.CONFIRMED_RISKS
+            and not (ctx.writes_preapproved or ctx.silent_writes)
+        ):
             return "需确认"
         return CALL_NOTES.get(denied or "", "")
     return "需确认" if op["risk"] != "read" else ""
@@ -565,7 +572,8 @@ async def browse_operations(
         "description": module.get("description") or "",
         **({"limits": module["limits"]} if module.get("limits") else {}),
         "operations": [
-            summary_line(op_id, ops[op_id], call_note(ctx, system, ops[op_id])) for op_id in page
+            summary_line(op_id, ops[op_id], call_note(ctx, system, ops[op_id], op_id))
+            for op_id in page
         ],
         **_paged(visible, start, BROWSE_PAGE, tag),
         "permission_check": permission_check(ctx, loaded, held),
@@ -632,7 +640,7 @@ async def search(ctx: Context, args: Search) -> dict[str, Any]:
         item = {"system": key, "module": op["module"]}
         if module.get("display_name"):
             item["module_name"] = module["display_name"]
-        item["operation"] = summary_line(op_id, op, call_note(ctx, system, op))
+        item["operation"] = summary_line(op_id, op, call_note(ctx, system, op, op_id))
         item["match"] = match
         items.append(item)
     result: dict[str, Any] = {"items": items, **_paged(hits, start, SEARCH_PAGE, tag)}

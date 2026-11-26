@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from coreman.core.api_tasks.service import SILENT_ASK_CODE, SILENT_ASK_MESSAGE, SILENT_KEY
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import (
     IncompleteResultError,
@@ -27,6 +28,16 @@ class ClassifyStage(ChatStageBase):
         一枚还活着的令牌就进了聊天记录。
         """
         verdict = self._classify_outcome(ctx, pre, out)
+        if verdict.log_status == "ask_user" and ctx.task.payload.get(SILENT_KEY):
+            # 静默执行的业务系统任务没有人能答题：不进 waiting_user、不开选择卡，按失败结束，
+            # 题面留在回复里交给业务系统。
+            verdict = replace(
+                verdict,
+                log_status="error",
+                task_status="failed",
+                error_code=SILENT_ASK_CODE,
+                error_message=SILENT_ASK_MESSAGE,
+            )
         return replace(verdict, final_text=ctx.redact(verdict.final_text) or "")
 
     def _classify_outcome(self, ctx: TaskContext, pre: Prepared, out: Outcome) -> Verdict:
