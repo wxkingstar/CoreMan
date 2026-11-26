@@ -139,13 +139,13 @@ def sign(method, path, params, app_key, secret):
 | `images` | 否 | `upload_id` 列表，按顺序，张数不限。只能用这个调用方为这位员工上传、还没过期的图片。前 8 张直接给 AI 员工看；更多的它会分批下载查看，会更慢。 |
 | `request_id` | 否 | 幂等键，1–128 个字符，在这个调用方内唯一。用业务主键（申请单号等）。 |
 | `allowed_writes` | 否 | 这次允许的写操作，字符串列表，每项写成 `<业务系统标识>.<operationId>`，如 `profile_admin.saveAudienceDraft`。带了以后名单外的写操作一律被拒（`writes` 里是 `not_allowed`），不会发确认卡；名单里的照常发确认卡（静默执行时直接执行）。不带表示不限。不能是空列表，最多 100 项。 |
-| `silent` | 否 | `true` 表示静默执行，见第 7 节。此时 `allowed_writes` 必填，且每一项都要在调用方的静默写接口清单里。默认 `false`。 |
+| `silent` | 否 | `true` 表示要求静默执行，见第 7 节。此时 `allowed_writes` 必填；有任何一项不在调用方的静默写接口清单里，整个任务按普通模式执行。默认 `false`。 |
 
 新建返回 HTTP 202，`data` 是任务（见 4.3）。记下 `data.id`。
 
 重复提交不会重复处理：
 
-- 带 `request_id`：同一个编号、同样的员工、AI 员工、内容、图片、`silent` 和 `allowed_writes`，返回原来的任务（HTTP 200）；同编号换了其中任何一项返回 409（`allowed_writes` 不看顺序和重复项）。网络超时后用同一个 `request_id` 重试即可。
+- 带 `request_id`：同一个编号、同样的员工、AI 员工、内容、图片、`silent` 和 `allowed_writes`，返回原来的任务（HTTP 200）；同编号换了其中任何一项返回 409（`allowed_writes` 不看顺序和重复项；`silent` 按请求里带的值比较，回退成普通模式的任务仍按 `true` 比）。网络超时后用同一个 `request_id` 重试即可。
 - 不带 `request_id`：同一位员工、同一个 AI 员工、同样的 `prompt`、`images`、`silent` 和 `allowed_writes`，前一个任务还没结束就返回那个任务（HTTP 200）；前一个已结束的会新建。
 
 同一位员工在这个调用方下最多 20 个任务未结束，超过返回 429。
@@ -170,6 +170,7 @@ def sign(method, path, params, app_key, secret):
     "reply": "已识别：账号 demo.shop，粉丝 12.4 万……已提交写回，等你确认。",
     "reply_truncated": false,
     "silent": false,
+    "silent_fallback": null,
     "allowed_writes": null,
     "error_code": null,
     "error_message": null,
@@ -185,7 +186,9 @@ def sign(method, path, params, app_key, secret):
 | `reply` | AI 员工这一轮的最终回复（已脱敏），任务结束前是 `null`。超过 50000 字会被截断，`reply_truncated` 为 `true`，完整内容在飞书私聊里。 |
 | `writes` | 这个任务提出的写操作，见第 6 节。 |
 | `resume_at` | 状态为 `waiting_quota` 时的预计重跑时间，其余为 `null`。 |
-| `silent`、`allowed_writes` | 发起时带的值，原样返回（没带 `allowed_writes` 是 `null`）。 |
+| `silent` | 实际是否静默执行。要求了静默、但回退成普通模式时为 `false`。 |
+| `silent_fallback` | 要求了静默却按普通模式执行的原因，其余为 `null`。现在只有一种：`{"reason": "not_registered", "unregistered": ["profile_admin.updatePayout"]}`，`unregistered` 列出没登记的项。见第 7 节。 |
+| `allowed_writes` | 发起时带的值，原样返回（没带是 `null`）。 |
 | `error_code`、`error_message` | 只在 `failed` 时有值。 |
 
 只能查这个调用方为这位员工发起的任务；`user` 对不上、任务不是你发起的都返回 404。
@@ -252,7 +255,7 @@ AI 员工不会直接写你的系统。它按规则准备好写操作后，CoreM
 - **员工飞书里什么都不出现**：不发「在某系统里发起」，不发回复，不发确认卡，开始前没通过复核也不在私聊里说明。结果只从查询接口拿（`reply`、`writes`）。
 - **名单里的写操作直接执行**：以员工本人的身份和权限调用你的接口（令牌主体是员工的邮箱前缀，和确认后执行一样），`writes` 里这一项带 `"silent": true`，CoreMan 的业务系统调用记录里标为静默执行。名单外的写操作直接拒绝（`not_allowed`），不会退回成发确认卡。批量写不支持。
 - **不能问人**：AI 员工不能向员工提问、发表单、索要凭证或找同事帮忙。信息不够时任务以 `failed` 结束，`error_code` 为 `user_input_required`；不会出现 `waiting_user`。
-- **只能用登记过的接口**：`allowed_writes` 的每一项都必须在平台管理员给你的调用方登记的静默写接口清单里，否则返回 422，`errors` 为 `[{"type": "write_not_registered"}]`，`message` 指出是哪一项。这样即使密钥泄露或代码写错，也只能静默调用事先登记的接口。
+- **只能用登记过的接口，否则回退到确认模式**：`allowed_writes` 的每一项都必须在平台管理员给你的调用方登记的静默写接口清单里。有任何一项没登记（包括调用方还没配静默清单），任务照常接收，但**整个任务按普通模式执行**：私聊里照常发起、回复，写操作照常发确认卡，`allowed_writes` 照常限定范围；不会部分静默、部分确认。查询结果里 `silent` 为 `false`，`silent_fallback` 说明原因并列出没登记的项。这样即使密钥泄露或代码写错，也只能静默调用事先登记的接口，其余写操作仍要员工确认。
 - 群承接模式不支持静默执行（422，`errors` 为 `[{"type": "silent_group"}]`）。
 
 **静默执行跳过的是员工在飞书里的确认，人工复核要在你的系统里补上**：AI 写回的内容先进结果槽、标明是 AI 产出，由人审过再生效。不能满足这一点的写操作（直接对外发送、改资金或收款账户、不可撤销的改动）不要走静默执行，也不要申请登记。
@@ -275,7 +278,7 @@ AI 员工不会直接写你的系统。它按规则准备好写操作后，CoreM
 | 409 | `request_id` 已用于内容不同的任务；员工没在飞书私聊过这个 AI 员工；员工没绑定飞书身份；AI 员工已停用 | 按 `message` 处理。没私聊过的，请员工先在飞书里给 AI 员工发一条消息。 |
 | 413 | 单张图片超过 10MB，或请求体过大 | 压缩后重传。 |
 | 415 | 不是 JPEG、PNG、WebP 图片 | 转换格式后重传。 |
-| 422 | 参数不合法（缺字段、`prompt` 为空或超长、AI 员工不是飞书 AI 员工；群承接模式下带了 `user`、配了多个群却没给 `chat_id`）；`allowed_writes` 是空列表或某项不是 `<业务系统标识>.<operationId>`；`silent` 为 `true` 却没带 `allowed_writes`；`allowed_writes` 里有没登记的接口（`write_not_registered`）；群承接模式带了 `silent`（`silent_group`） | 修正参数；要登记静默接口请找 CoreMan 平台管理员。 |
+| 422 | 参数不合法（缺字段、`prompt` 为空或超长、AI 员工不是飞书 AI 员工；群承接模式下带了 `user`、配了多个群却没给 `chat_id`）；`allowed_writes` 是空列表或某项不是 `<业务系统标识>.<operationId>`；`silent` 为 `true` 却没带 `allowed_writes`；群承接模式带了 `silent`（`silent_group`） | 修正参数。`allowed_writes` 里有没登记的接口不报错，任务按普通模式执行（见第 7 节）；要登记静默接口请找 CoreMan 平台管理员。 |
 | 429 | 这位员工已有 20 个任务未结束；群承接模式下这个群已有 5 条任务在排队（`errors` 为 `[{"type": "queue_full"}]`，这条没有接收） | 等已有任务结束再发起。 |
 
 ## 10. 规矩

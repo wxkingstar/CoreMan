@@ -97,6 +97,9 @@ class ApiTask(Base):
     silent: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     # 业务系统限定这次能做的写操作（`<业务系统标识>.<operationId>`）；NULL 表示不限。
     allowed_writes: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    # 要求了静默、但 `allowed_writes` 里有没登记进调用方静默清单的项：按普通模式跑（发私聊、写操作
+    # 发确认卡），这里记下没登记的项。NULL 表示没有回退（没要求静默，或静默生效）。
+    silent_unregistered: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     created_at: Mapped[datetime] = _ts(server_default=text("now()"))
 
 

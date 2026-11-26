@@ -418,30 +418,30 @@ def writes_key(allowed: list[str] | None) -> tuple[str, ...] | None:
     return None if allowed is None else tuple(sorted(set(allowed)))
 
 
-def check_silent(client: ApiClient, silent: bool, allowed: list[str] | None) -> None:
-    """静默执行要列明写操作，且每一项都在平台管理员给这个调用方登记的静默清单里。"""
+# 要求静默却回退成普通模式的原因（任务视图 `silent_fallback.reason`）。
+SILENT_FALLBACK_NOT_REGISTERED = "not_registered"
+
+
+def check_silent(client: ApiClient, silent: bool, allowed: list[str] | None) -> list[str] | None:
+    """静默执行要列明写操作。返回没登记进调用方静默清单的项：有就整个任务回退成普通模式
+    （发私聊、写操作发确认卡），不按项拆成部分静默；None 表示没要求静默或全部登记过。"""
     if not silent:
-        return
+        return None
     if not allowed:
         raise TokenError(422, "silent 为 true 时必须带 allowed_writes，列出这次允许执行的写操作")
     registered = set(client.silent_writes or [])
-    for ref in allowed:
-        if ref not in registered:
-            raise TokenError(
-                422,
-                f"allowed_writes 里的「{ref}」不在这个调用方的静默写接口清单里，"
-                "请平台管理员在「API 调用方」里登记后再静默调用",
-                "write_not_registered",
-            )
+    missing = [ref for ref in allowed if ref not in registered]
+    return missing or None
 
 
 def fingerprint_of(row: ApiTask) -> tuple[Any, ...]:
+    # 比较的是请求内容：要求了静默但回退了的任务，仍按 silent=true 比。
     return (
         row.user_id,
         row.bot_id,
         row.prompt,
         list(row.image_ids or []),
-        bool(row.silent),
+        bool(row.silent) or row.silent_unregistered is not None,
         writes_key(row.allowed_writes),
     )
 
@@ -533,7 +533,7 @@ async def create_for_client(
         raise TokenError(422, "需要 user（员工邮箱前缀）")
     user = await resolve_member(session, subject)
     bot = await check_bot(session, client.bot_ids, target_bot, user, "调用方没有授权驱动该 AI 员工")
-    check_silent(client, silent, allowed)
+    unregistered = check_silent(client, silent, allowed)
     wanted = list(dict.fromkeys(images or []))
     fingerprint = (user.id, bot.id, prompt, wanted, silent, writes_key(allowed))
     if request_id is not None:
@@ -584,8 +584,9 @@ async def create_for_client(
         prompt=prompt,
         target="p2p",
         chat_id=reached.platform_chat_id,
-        silent=silent,
+        silent=silent and unregistered is None,
         allowed_writes=allowed,
+        silent_unregistered=unregistered,
     )
     session.add(row)
     await session.flush()
@@ -596,9 +597,11 @@ async def create_for_client(
         user=user,
         pid=pid,
         # 静默：私聊里连「在某系统里发起」这句也不发。
-        trigger=None if silent else client_trigger_text(user, client.name, prompt, len(image_ids)),
+        trigger=None
+        if row.silent
+        else client_trigger_text(user, client.name, prompt, len(image_ids)),
         session_key=client_session_key(row.id),
-        extra={"api_client": client.app_key, **({SILENT_KEY: True} if silent else {})},
+        extra={"api_client": client.app_key, **({SILENT_KEY: True} if row.silent else {})},
         images=image_ids,
     ), True
 
@@ -716,8 +719,16 @@ async def view(session: AsyncSession, row: ApiTask) -> dict[str, Any]:
             "resume_at": row.resume_at.isoformat() if waiting and row.resume_at else None,
             # 写操作要员工在私聊里点确认卡：任务结束不等于数据已经写进业务系统。
             "writes": await writes.view(session, row),
-            # 发起时带的静默与写操作范围，原样回报。
+            # 实际是否静默执行；要求了静默但有写操作没登记时为 false，原因见 silent_fallback。
             "silent": bool(row.silent),
+            "silent_fallback": (
+                {
+                    "reason": SILENT_FALLBACK_NOT_REGISTERED,
+                    "unregistered": row.silent_unregistered,
+                }
+                if row.silent_unregistered is not None
+                else None
+            ),
             "allowed_writes": row.allowed_writes,
         }
     return {

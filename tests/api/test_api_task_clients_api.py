@@ -121,9 +121,14 @@ async def test_silent_request_is_signed_and_checked_against_the_registered_write
         "/api/infra/tasks/run",
         json={**body, "prompt": "改收款账户", "allowed_writes": ["profile_admin.updatePayout"]},
     )
-    assert unregistered.status_code == 422
-    assert unregistered.json()["errors"] == [{"type": "write_not_registered"}]
-    assert "profile_admin.updatePayout" in unregistered.json()["message"]
+    # 有没登记的项：不报错，整个任务回退成普通模式，视图说明原因。
+    assert unregistered.status_code == 202, unregistered.text
+    fallback = unregistered.json()["data"]
+    assert fallback["silent"] is False
+    assert fallback["silent_fallback"] == {
+        "reason": "not_registered",
+        "unregistered": ["profile_admin.updatePayout"],
+    }
     # 签名覆盖这两个字段：按 silent=false 签名、发出去却是 true，就是签名无效。
     import time
 

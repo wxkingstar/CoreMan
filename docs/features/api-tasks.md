@@ -133,12 +133,12 @@ POST /api/infra/tasks/run
 ```
 
 - **`allowed_writes`（不论是否静默）**：这次允许的写操作。名单外的写操作在平台代理处直接拒绝，记业务系统调用 `outcome = not_allowed`，`writes` 里状态 `not_allowed`，不发确认卡；名单里的照常发确认卡。不带表示不限（兼容现有调用方）；空列表 422（空列表不参与签名，删掉它就成了不限）；格式不对 422。非静默时不要求在静默清单里。
-- **`silent: true`**：`allowed_writes` 必填，每一项都必须在调用方的静默清单里，否则 422，`errors` 为 `[{"type": "write_not_registered"}]`，`message` 指出哪一项。群承接模式不支持（422，`silent_group`）。
+- **`silent: true`**：`allowed_writes` 必填（不带 422）。有任何一项不在调用方的静默清单里（含没配清单），整个任务回退成普通模式：发私聊、写操作发确认卡，`allowed_writes` 照常收窄；不按项拆分。`api_tasks.silent` 存实际生效的值，`api_tasks.silent_unregistered` 记没登记的项；任务视图 `silent` 为 `false`，`silent_fallback` 为 `{"reason": "not_registered", "unregistered": [...]}`。群承接模式不支持（422，`silent_group`）。
 - **飞书里什么都不发**：不发「在某系统里发起」、不发回复（流带 `_silent`，网关不推，收尸也不补发）、不发确认卡、开轮前复核没通过也不在私聊里说明、进程丢了也不发「异常中断」。结果只经查询接口返回。
 - **名单里的写操作直接执行**：经平台代理以员工身份执行（委托令牌和确认后执行一样），不发卡，结果当场回给 AI 员工；业务系统调用记录 `outcome` 为 `silent_ok` / `silent_http_error` / `silent_unreachable`，`writes` 里带 `"silent": true`。批量写不支持。
 - **不能问人**：这一轮只注入员工已保存的凭证，不挂求助同事、个人工具、个人定时任务、群文档、任务平台、凭证索取、云产品代理；模型发起提问（AskUserQuestion）时任务按失败结束，`error_code` 为 `user_input_required`，题面留在 `reply` 里。查询接口不会出现 `waiting_user`。本轮块写明静默执行、能做哪几项写操作。
-- **幂等**：`silent` 和 `allowed_writes`（不看顺序和重复）都算内容：同一个 `request_id` 换了值返回 409；同内容未结束去重也比较它们。
-- 查询结果带 `silent` 和 `allowed_writes`；审计 `api_task.create` 的 diff 记 `silent`、`allowed_writes`；调用方清单的每次改动在 `api_client.update` 审计里记前后值。
+- **幂等**：`silent` 和 `allowed_writes`（不看顺序和重复）都算内容：同一个 `request_id` 换了值返回 409；同内容未结束去重也比较它们。比较的是请求里带的 `silent`：回退成普通模式的任务仍按 `true` 比。
+- 查询结果带 `silent`、`silent_fallback` 和 `allowed_writes`；审计 `api_task.create` 的 diff 记 `silent`、`silent_unregistered`、`allowed_writes`；调用方清单的每次改动在 `api_client.update` 审计里记前后值。
 - 限制：只管经平台代理（`token_delivery = proxy`）的业务系统；令牌下发到运行环境的系统由 AI 员工自己调用，不受 `allowed_writes` 约束（这一点和以前一样，那类系统本来也不发确认卡）。
 
 公司规则要求 AI 的写操作有人审批：静默执行把审批从「员工在飞书里点确认」挪到了「业务系统里的人工复核」。只登记写进待复核结果槽的接口；涉及资金、收款账户、对外发送、不可撤销的接口不要登记——代码不硬编码哪些不能登记，由平台管理员把关。

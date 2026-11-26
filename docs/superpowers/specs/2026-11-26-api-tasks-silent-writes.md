@@ -20,12 +20,13 @@
 | 字段 | 说明 |
 |---|---|
 | `allowed_writes` | 字符串列表，`<业务系统标识>.<operationId>`。带了就只允许这些写操作，名单外的拒绝；不带表示不限。空列表 422：空列表不参与签名，中间人删掉它就从「一个都不许」变成「不限」。最多 100 项。 |
-| `silent` | `true` 时静默执行；`allowed_writes` 必填且每项都在调用方的 `silent_writes` 里，否则 422（`write_not_registered`，`message` 指出哪一项）。 |
+| `silent` | `true` 时要求静默执行；`allowed_writes` 必填（不带 422）。每项都在调用方的 `silent_writes` 里才静默；有任何一项不在（含没配清单），整个任务回退成普通模式（发私聊、写操作发确认卡，`allowed_writes` 照常收窄），不按项拆分。 |
 
 - 非静默时 `allowed_writes` 只是收窄，不要求登记过（它不会让任何写操作免确认）。
-- 幂等指纹加上 `silent` 和排序去重后的 `allowed_writes`：同 `request_id` 换值 409；同内容未结束去重也比较它们。
+- 幂等指纹加上 `silent` 和排序去重后的 `allowed_writes`：同 `request_id` 换值 409；同内容未结束去重也比较它们。指纹里的 `silent` 是请求值（`silent or silent_unregistered is not None`），回退了也按 `true` 比。
+- 回退（2026-11-26 调整）：起初没登记返回 422 `write_not_registered`；改为回退到确认模式——调用方先在自己那边配好参数、平台这边还没登记时，有确认卡兜底，不会出大问题。
 - 群承接模式：`silent` 直接 422（`silent_group`）——结果本来就发在群里，群里有人接着讨论，没有「不打扰」的需求；`allowed_writes` 照常生效。
-- 查询结果回报 `silent`、`allowed_writes`；`writes` 新增状态 `not_allowed`，静默执行的项带 `"silent": true`，状态 `succeeded` / `failed` / `unknown`。`writes` 按发生先后排（确认卡按暂存时间，直接执行与拒绝按调用时间）。
+- 查询结果回报 `silent`（实际生效值）、`silent_fallback`（`{"reason": "not_registered", "unregistered": [...]}` 或 `null`）、`allowed_writes`；`writes` 新增状态 `not_allowed`，静默执行的项带 `"silent": true`，状态 `succeeded` / `failed` / `unknown`。`writes` 按发生先后排（确认卡按暂存时间，直接执行与拒绝按调用时间）。
 - 错误码 `user_input_required`：静默执行时 AI 员工需要问人。
 
 ## 4. 数据
@@ -33,7 +34,7 @@
 迁移 `0137`：
 
 - `api_clients.silent_writes`：text[]，默认空。管理台「API 调用方」与 `coreman clients set --silent-write` 维护；改动记 `api_client.update` 审计（前后值）。保存时校验系统存在且经平台代理，目录可用时操作要在目录里且不是读操作。
-- `api_tasks.silent`（bool，默认 false）、`api_tasks.allowed_writes`（text[]，NULL = 不限）。
+- `api_tasks.silent`（bool，默认 false，实际是否静默）、`api_tasks.allowed_writes`（text[]，NULL = 不限）、`api_tasks.silent_unregistered`（text[]，要求静默但回退时没登记的项；NULL = 没回退）。
 
 ## 5. 执行
 

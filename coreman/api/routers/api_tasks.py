@@ -368,6 +368,11 @@ async def create_client_task(
                 **({"chat_id": row.chat_id} if group else {}),
                 **({"silent": True} if row.silent else {}),
                 **(
+                    {"silent_unregistered": row.silent_unregistered}
+                    if row.silent_unregistered is not None
+                    else {}
+                ),
+                **(
                     {"allowed_writes": row.allowed_writes} if row.allowed_writes is not None else {}
                 ),
             },
