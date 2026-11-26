@@ -46,6 +46,8 @@ export interface ApiClientGroupRoute {
   service_user_id: string; service_user: string | null; created_at: string
 }
 export interface GroupRouteOptions {
+  /** AI 员工所在的飞书群；取不到时为空，页面仍可手填 chat_id。 */
+  bot_chats: { chat_id: string; name: string }[]
   alert_sources: { chat_id: string; service_user_id: string }[]
   service_users: { id: string; login_name: string; display_name: string | null }[]
 }
