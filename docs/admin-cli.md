@@ -165,9 +165,14 @@ coreman bots workspace-init demo-bot              # 初始化或重试初始化
 ```bash
 coreman bots switch-relay demo-bot 运行时 [--model 模型] [--mode copy|existing] [--dir 目录]
 coreman bots switch-relay demo-bot 运行时 --model 模型 --yes
+coreman bots switch-relay demo-bot 运行时 --background --yes   # 排成后台作业（同管理台），打印作业 id
+coreman bots switch-job demo-bot 123 [--wait 600]             # 进度与结论；--wait 等到结束
+coreman bots switch-cancel demo-bot 123                       # 排队中或等员工手上这一轮时可取消
 ```
 
 运行时写名称、节点名或 id；只换模型时写当前运行时。`--mode copy`（默认）把工作目录复制过去，`existing` 使用目标上已有的目录；原运行时离线时，`--allow-stored-memory` 允许用平台上的记忆快照（只能配合 `existing`）。
+
+不加 `--background` 时在这一次请求里迁移完，目录大时可能要等很久。加了之后由 worker 执行：等员工手上这一轮结束再迁移，命令立即返回作业 id；`--background --yes` 不先预览目标目录，`--dir` 不填时按原目录名。`switch-job` 结束且切换成功时退出码为 0，被规则挡下、失败或取消时为 1；开始迁移后取消不了，会跑完为止。只换模型时 `--background` 不起作用，当场完成。
 
 审批人（为空表示由发起人自己确认）：
 
@@ -331,10 +336,21 @@ AI 员工经平台代理提交的批量写操作，可以在这里查看近期�
 
 ```bash
 coreman systems batches                    # 发起时间、AI 员工、发起人、系统与操作、状态、进度、各结果的项数
+coreman systems batch-items 3f2c1ab0 [--status ok|failed|unknown|skipped|pending] [--page 2] [--per-page 50]
 coreman systems batch-stop 3f2c1ab0 --yes  # 批次 id 可以只写开头几位
 ```
 
-`batches` 只列元数据，不含每一项的请求与结果；批次在结束 24 小时后清理，所以只有近期的。`batch-stop` 只能停止执行中或已暂停的批次：执行中的在手上这一项做完后收尾，已暂停的立即结束，没执行的项记为未执行、已执行的不会撤回，发起人会收到是管理员停止的说明。
+`batches` 只列元数据；每一项的写入参数、HTTP 状态与结果摘要用 `batch-items` 分页看，查看别人提交的批次会记审计。批次在结束 24 小时后清理，所以只有近期的。`batch-stop` 只能停止执行中或已暂停的批次：执行中的在手上这一项做完后收尾，已暂停的立即结束，没执行的项记为未执行、已执行的不会撤回，发起人会收到是管理员停止的说明。
+
+个人助理遇到没权限的业务系统时，所有者可以在助理页提交申请，AI 委员会与平台管理员在这里处理：
+
+```bash
+coreman systems access-requests [--all] [--page 2]   # 默认只列待处理的
+coreman systems access-decide 5e1c0a2b approve
+coreman systems access-decide 5e1c0a2b reject --note "这个系统只开放给财务"
+```
+
+批准会把系统开放给这位助理并加上授权（申请了写权限的一并给写），被卡住的事交回助理；拒绝必须写理由，申请人与助理都会看到。批准只认管理员本人的登录，经 `coreman login` 登录的命令行和 API 令牌会被拒，请在管理台操作。
 
 ## 团队与用户
 
@@ -407,7 +423,10 @@ coreman runtimes agent-probe node-1 claude rate-limits    # 或 health-check，�
 coreman runtimes usage node-1 claude               # 今天（UTC）的对话数、token 与费用
 coreman runtimes status node-1 claude              # 实时状态与进行中的任务
 coreman runtimes session node-1 claude <会话 id>    # 跟看一次会话的事件流，Ctrl-C 结束
+coreman runtimes assistant-pool node-1 claude on   # 加入个人助理池；off 移出
 ```
+
+`assistant-pool` 需要 AI 委员会或平台管理员角色。只有能隔离运行、节点上没有普通员工、且与普通员工的节点不是同一个系统用户的实例才能加入，不满足时原样报原因。移出不改绑：已在上面的助理留在原处，非所有者的助理下一轮暂停并私聊通知所有者，直到管理员改绑。
 
 `backends` 与 `models` 任何成员可用（只列可见的实例）；`probe`、`agent-probe`、`usage`、`status` 需要 AI 委员会或平台管理员角色。`session` 的查看权限与管理后台的会话查看页一致：自己的私聊自己可看；管理员可看群聊与企微私聊，飞书私聊和以本人身份运行的定时任务谁都不能代看。
 
@@ -529,6 +548,26 @@ coreman me api-tokens --as alice
 coreman me api-token-create 工单系统 --bot demo-bot --bot 销售 --days 90 --as alice
 coreman me api-token-revoke 工单系统 --yes --as alice       # 名称、前缀（至少 8 位）或 id
 ```
+
+本机应用授权（`coreman login` 的命令行、本机 Agent 接的 MCP 等经浏览器授权的应用），与管理台「我的 API 令牌」页的「本机应用授权」一致：
+
+```bash
+coreman me oauth-grants
+coreman me oauth-revoke 7d3e91c0 --yes      # 授权 id 可以只写开头几位，立即失效
+```
+
+撤销的若是当前命令行自己这一次登录，之后要重新 `coreman login`。
+
+## 个人助理
+
+平台管理员查看谁开通了个人助理、在哪个运行时、运行状况，以及停用某人的助理。只有元数据（人、实例、节点、状态、盯消息健康、今日轮次与预算、待交回条目数、子任务数、冷启动进度、最近一次非本人访问时间），不含任何内容：
+
+```bash
+coreman assistants list
+coreman assistants deprovision alice --yes   # 所有者的登录名或姓名，或助理 id 开头几位
+```
+
+停用不可撤销：撤掉授权、销毁数据密钥、清理工作目录，返回的只是「已开始停用」。开通范围与可选 AI 在平台设置里改（`assistant_eligibility`、`assistant_backends`）。助理里的内容（知识库、跟进事项、设置等）只对所有者本人在管理台里开放，命令行一律不受理。
 
 ## 平台设置
 

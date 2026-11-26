@@ -774,6 +774,10 @@ def register_me(sub: Any) -> None:
     p = leaf(ops, "api-token-revoke", "吊销一枚 API 令牌（立即失效）", api_token_revoke)
     p.add_argument("token", help="名称、前缀或 id")
     add_yes(p)
+    leaf(ops, "oauth-grants", "列出本机应用授权（命令行、本机 Agent 的 MCP 等）", oauth_grants)
+    p = leaf(ops, "oauth-revoke", "撤销一个本机应用授权（立即失效）", oauth_revoke)
+    p.add_argument("grant", help="授权 id（可只写开头几位）")
+    add_yes(p)
 
 
 def mine(rows: list[dict[str, Any]], ref: str) -> list[dict[str, Any]]:
@@ -1062,4 +1066,40 @@ async def api_token_revoke(c: AdminClient, args: argparse.Namespace) -> int:
         output.dump(data)
     else:
         print(f"已吊销令牌 {row['name']}")
+    return 0
+
+
+async def oauth_grants(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(f"{ME}/oauth-grants")
+    if args.json:
+        output.dump(rows)
+    else:
+        output.table(
+            rows,
+            [
+                ("id", lambda r: r["id"][:8]),
+                ("应用", "client_name"),
+                ("范围", "scope"),
+                ("授权时间", "created_at"),
+                ("最近使用", "last_used_at"),
+                ("到期", "expires_at"),
+            ],
+            empty="（没有本机应用授权）",
+        )
+    return 0
+
+
+async def oauth_revoke(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = await c.get(f"{ME}/oauth-grants")
+    row = one(
+        [r for r in rows if r["id"].startswith(args.grant)],
+        args.grant,
+        "本机应用授权",
+        lambda r: f"{r['id'][:8]}（{r['client_name']}）",
+    )
+    require_yes(args, f"撤销 {row['client_name']} 的授权")
+    await c.request("DELETE", f"{ME}/oauth-grants/{row['id']}")
+    print(
+        f"已撤销 {row['client_name']} 的授权 {row['id'][:8]}；撤销的若是本命令行自己，需要重新登录"
+    )
     return 0

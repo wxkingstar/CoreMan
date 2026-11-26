@@ -607,7 +607,21 @@ def _register_switch(ops: Any) -> None:
         action="store_true",
         help="原运行时离线时用平台上的记忆快照（只能配合 --mode existing）",
     )
+    p.add_argument(
+        "--background",
+        action="store_true",
+        help="换实例或目录时排成后台作业，不等迁移完成（同管理台）；进度用 switch-job 查",
+    )
     add_yes(p)
+    p = leaf(ops, "switch-job", "查看后台切换作业的进度与结论", switch_job)
+    _bot_arg(p)
+    p.add_argument(
+        "task_id", type=int, metavar="作业id", help="switch-relay --background 打印的作业 id"
+    )
+    p.add_argument("--wait", type=int, metavar="秒", help="等到作业结束再返回，最多等这么久")
+    p = leaf(ops, "switch-cancel", "取消后台切换作业（开始迁移后不能取消）", switch_cancel)
+    _bot_arg(p)
+    p.add_argument("task_id", type=int, metavar="作业id")
 
     leaf(ops, "approvers", "列出审批人（空 = 由发起人自己确认）", approvers).add_argument("bot")
     p = leaf(ops, "approvers-set", "整体替换审批人；不写成员即清空", approvers_set)
@@ -621,7 +635,9 @@ async def switch_relay(c: AdminClient, args: argparse.Namespace) -> int:
     moving = target["id"] != bot["relay_server_id"]
     model = args.model or bot["model"]
     preview = None
-    if moving:
+    # 后台作业由 worker 去连节点：直接执行时不在这里预览，目录不填由服务端按原目录名定。
+    background = args.background and moving
+    if moving and not (background and args.yes):
         body = {"relay_server_id": target["id"], "target_directory": args.dir}
         preview = await c.request("POST", f"{BOTS}/{bot['id']}/workspace/switch-preview", body=body)
     if not args.yes:
@@ -649,17 +665,70 @@ async def switch_relay(c: AdminClient, args: argparse.Namespace) -> int:
     if moving:
         body |= {
             "workspace_mode": args.mode,
-            "target_directory": args.dir or preview["directory"],  # type: ignore[index]
+            "target_directory": args.dir or (preview["directory"] if preview else None),
             "allow_stored_memory": args.allow_stored_memory,
         }
     data = await c.request(
-        "POST", f"{BOTS}/{bot['id']}/switch-relay", body=body, version=bot["version"]
+        "POST",
+        f"{BOTS}/{bot['id']}/switch-relay",
+        params={"background": "true"} if background else None,
+        body=body,
+        version=bot["version"],
     )
+    if background:
+        return _done(
+            args,
+            data,
+            f"已排队切换作业 {data['task_id']}：{bot['name']} → {target['name']}；"
+            f"进度用 coreman bots switch-job {bot['bot_key']} {data['task_id']} --wait 600 查看",
+        )
     return _done(
         args,
         data,
         f"已把 {bot['name']} 切换到 {target['name']}，模型 {data['new_model']}"
         f"（记忆：{data['memory_status']}）",
+    )
+
+
+# 任务总线上还没结束的状态（coreman.core.bus.tasks.OPEN）。
+SWITCH_OPEN = ("queued", "claimed", "running")
+
+
+async def switch_job(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    path = f"{BOTS}/{bot['id']}/switch-jobs/{args.task_id}"
+    data = await c.get(path)
+    if args.wait:
+        deadline = time.monotonic() + args.wait
+        while data["status"] in SWITCH_OPEN and time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            data = await c.get(path)
+    if args.json:
+        output.dump(data)
+        return 0
+    result = data.get("result") or {}
+    output.fields(
+        data,
+        [
+            ("作业", "task_id"),
+            ("状态", "status"),
+            ("工作目录阶段", "phase"),
+            ("切换成功", lambda d: result.get("ok") if d["status"] == "succeeded" else None),
+            ("说明", lambda d: result.get("message") or d.get("error")),
+        ],
+    )
+    if data["status"] in SWITCH_OPEN:
+        return 0
+    return 0 if data["status"] == "succeeded" and result.get("ok") else 1
+
+
+async def switch_cancel(c: AdminClient, args: argparse.Namespace) -> int:
+    bot = await c.bot(args.bot)
+    data = await c.request("POST", f"{BOTS}/{bot['id']}/switch-jobs/{args.task_id}/cancel")
+    return _done(
+        args,
+        data,
+        f"已请求取消切换作业 {args.task_id}；用 switch-job 确认（已开始迁移的会跑完）",
     )
 
 
