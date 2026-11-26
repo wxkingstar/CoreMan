@@ -17,6 +17,8 @@ ENVIRONMENTS = ("production", "test")
 ENVIRONMENT_LABELS = {"production": "真实环境", "test": "测试环境"}
 DELIVERY = "/api/admin/system-delivery"
 BATCHES = "/api/admin/system-batches"
+ACCESS_REQUESTS = "/api/admin/system-access-requests"
+ITEM_STATUSES = ("ok", "failed", "unknown", "skipped", "pending")
 BATCH_PHASES = {
     "awaiting": "等待确认",
     "running": "执行中",
@@ -136,9 +138,26 @@ def register(sub: Any) -> None:
     p.add_argument("key")
     add_yes(p)
     leaf(ops, "batches", "列出近期的批量写操作（结束 24 小时后清理）", batches)
+    p = leaf(ops, "batch-items", "查看批量写操作的各项：参数、状态与结果摘要", batch_items)
+    p.add_argument("id", help="批次 id，可以只写开头几位（见 systems batches）")
+    p.add_argument("--status", choices=ITEM_STATUSES, help="只看这种结果的项")
+    p.add_argument("--page", type=int, default=1, help="第几页，默认 1")
+    p.add_argument("--per-page", type=int, default=50, help="每页几项，默认 50，最多 200")
     p = leaf(ops, "batch-stop", "停止一个执行中或已暂停的批量写操作", batch_stop)
     p.add_argument("id", help="批次 id，可以只写开头几位（见 systems batches）")
     add_yes(p)
+    p = leaf(
+        ops,
+        "access-requests",
+        "列出个人助理的业务系统权限申请（AI 委员会与平台管理员）",
+        access_requests,
+    )
+    p.add_argument("--all", action="store_true", help="包括已处理的，默认只看待处理的")
+    p.add_argument("--page", type=int, default=1, help="第几页（每页 50 条）")
+    p = leaf(ops, "access-decide", "批准或拒绝一张权限申请", access_decide)
+    p.add_argument("id", help="申请 id，可以只写开头几位（见 systems access-requests）")
+    p.add_argument("decision", choices=("approve", "reject"), help="approve 批准，reject 拒绝")
+    p.add_argument("--note", default="", help="拒绝理由（拒绝时必填，申请人与助理都会看到）")
 
 
 def proxy_batch_text(row: dict[str, Any]) -> str | None:
@@ -442,12 +461,44 @@ async def batches(c: AdminClient, args: argparse.Namespace) -> int:
     return 0
 
 
-async def batch_stop(c: AdminClient, args: argparse.Namespace) -> int:
+async def batch(c: AdminClient, ref: str) -> dict[str, Any]:
     rows = await c.collect(BATCHES)
-    found = [r for r in rows if r["id"] == args.id] or [
-        r for r in rows if r["id"].startswith(args.id)
-    ]
-    row = one(found, args.id, "批量写操作", lambda r: r["id"][:8])
+    found = [r for r in rows if r["id"] == ref] or [r for r in rows if r["id"].startswith(ref)]
+    return one(found, ref, "批量写操作", lambda r: r["id"][:8])
+
+
+async def batch_items(c: AdminClient, args: argparse.Namespace) -> int:
+    row = await batch(c, args.id)
+    data = await c.get(
+        f"{BATCHES}/{row['id']}/items",
+        status=args.status,
+        page=args.page,
+        per_page=args.per_page,
+    )
+    if args.json:
+        output.dump(data)
+        return 0
+    print(f"{row['id'][:8]}  {batch_operation(row)}  {batch_status(row)}  {batch_progress(row)}")
+    output.table(
+        data["items"],
+        [
+            ("序号", "seq"),
+            ("状态", "status"),
+            ("HTTP", "status_code"),
+            ("路径参数", "path_params"),
+            ("请求体", "body"),
+            ("结果摘要", "brief"),
+            ("完成时间", "finished_at"),
+        ],
+        empty="（没有符合条件的项）",
+    )
+    pages = -(-data["total"] // data["per_page"]) if data["per_page"] else 1
+    print(f"\n第 {data['page']}/{max(pages, 1)} 页，共 {data['total']} 项")
+    return 0
+
+
+async def batch_stop(c: AdminClient, args: argparse.Namespace) -> int:
+    row = await batch(c, args.id)
     short = row["id"][:8]
     require_yes(
         args,
@@ -461,4 +512,52 @@ async def batch_stop(c: AdminClient, args: argparse.Namespace) -> int:
         print(f"已请求停止批量写操作 {short}：正在执行的一项结束后收尾，其余不再执行")
     else:
         print(f"已停止批量写操作 {short}：{batch_result(data) or '没有执行任何一项'}")
+    return 0
+
+
+async def access_requests(c: AdminClient, args: argparse.Namespace) -> int:
+    data = await c.get(ACCESS_REQUESTS, status="all" if args.all else "pending", page=args.page)
+    if args.json:
+        output.dump(data)
+        return 0
+    output.table(
+        data["items"],
+        [
+            ("申请 id", lambda r: r["id"][:8]),
+            ("申请时间", "created_at"),
+            ("个人助理", "bot_name"),
+            ("申请人", "requester"),
+            ("系统", lambda r: f"{r['system_name']}（{r['system_key']}）"),
+            ("写权限", "write"),
+            ("理由", "reason"),
+            ("状态", "status"),
+            ("拒绝理由", "decision_note"),
+        ],
+        empty="（没有待处理的申请）" if not args.all else "（没有申请）",
+    )
+    if data["total"] > data["page"] * data["per_page"]:
+        print(f"\n共 {data['total']} 条，用 --page {data['page'] + 1} 看下一页")
+    return 0
+
+
+async def access_decide(c: AdminClient, args: argparse.Namespace) -> int:
+    if args.decision == "reject" and not args.note.strip():
+        raise CliError("拒绝要写理由：--note")
+    request_id = args.id
+    if len(request_id) < 36:
+        rows = (await c.get(ACCESS_REQUESTS))["items"]
+        request_id = one(
+            [r for r in rows if r["id"].startswith(args.id)],
+            args.id,
+            "待处理的申请",
+            lambda r: r["id"][:8],
+        )["id"]
+    body = {"decision": args.decision, "note": args.note}
+    data = await c.request("POST", f"{ACCESS_REQUESTS}/{request_id}/decide", body=body)
+    if args.json:
+        output.dump(data)
+    else:
+        print(
+            f"申请 {request_id[:8]}：{'已批准' if data['status'] == 'approved' else data['status']}"
+        )
     return 0

@@ -1,4 +1,4 @@
-"""平台管理：平台设置、模型目录与价格、平台应用、接口调用方、审计日志、统计、对话记录与任务平台。"""
+"""平台管理：平台设置、模型目录与价格、平台应用、接口调用方、审计日志、统计、对话记录、任务平台与个人助理。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 from coreman.admin_cli import output
 from coreman.admin_cli.base import add_yes, changed, group, leaf, on_off, read_text, require_yes
-from coreman.admin_cli.client import PAGE_SIZE, AdminClient, CliError
+from coreman.admin_cli.client import PAGE_SIZE, AdminClient, CliError, one
 from coreman.core.db.models import CAPABILITIES, WORK_TASK_PRIORITIES, WORK_TASK_STATUSES
 from coreman.core.relay.models import backend_of
 from coreman.core.settings_schema import SettingsPatch
@@ -25,6 +25,7 @@ JWT_KEYS = "/api/admin/jwt-keys"
 AUDIT = "/api/admin/audit-logs"
 CHATS = "/api/admin/chat-logs"
 TASKS = "/api/admin/work-tasks"
+ASSISTANTS = "/api/admin/assistants"
 # 设置页里篇幅很长的提示词段落：show 只显示字数，全文用 get 看。
 LONG_TEXT = 80
 
@@ -38,6 +39,7 @@ def register(sub: Any) -> None:
     register_stats(sub)
     register_chats(sub)
     register_tasks(sub)
+    register_assistants(sub)
 
 
 # ---- 平台设置 ----
@@ -1607,4 +1609,90 @@ async def tasks_stats(c: AdminClient, args: argparse.Namespace) -> int:
             ("平均处理小时", "avg_hours"),
         ],
     )
+    return 0
+
+
+# ---- 个人助理（平台管理员） ----
+
+
+def register_assistants(sub: Any) -> None:
+    ops = group(
+        sub, "assistants", "个人助理：谁开通了、在哪、运行状况；可停用某人的助理（平台管理员）"
+    )
+    leaf(ops, "list", "列出所有个人助理（只有元数据，不含任何内容）", assistants_list)
+    p = leaf(ops, "deprovision", "停用某人的个人助理（不可撤销）", assistants_deprovision)
+    p.add_argument(
+        "assistant", metavar="助理", help="所有者的登录名或姓名，或助理 id（可只写开头几位）"
+    )
+    add_yes(p)
+
+
+def assistant_owner(row: dict[str, Any]) -> str:
+    owner = row["owner"]
+    return f"{owner['display_name']}（{owner['login_name']}）"
+
+
+def assistant_watch(row: dict[str, Any]) -> str | None:
+    watch = row.get("watch")
+    if not watch:
+        return None
+    return f"{watch['state']}：{watch['last_error']}" if watch.get("last_error") else watch["state"]
+
+
+async def assistants_list(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = (await c.get(ASSISTANTS))["items"]
+    if args.json:
+        output.dump(rows)
+        return 0
+    output.table(
+        rows,
+        [
+            ("id", lambda r: r["bot_id"][:8]),
+            ("所有者", assistant_owner),
+            ("状态", "state"),
+            ("启用", "enabled"),
+            ("在班", "on_shift"),
+            (
+                "节点",
+                lambda r: (
+                    r["node"] and f"{r['node']['name']}{'' if r['node']['online'] else '（离线）'}"
+                ),
+            ),
+            ("盯消息", assistant_watch),
+            (
+                "今日轮次",
+                lambda r: r["turns"] and f"{r['turns']['today']}/{r['turns']['budget']}",
+            ),
+            ("待交回", "inbox_pending"),
+            ("子任务", "jobs_active"),
+            ("冷启动", lambda r: r["cold_start"] and r["cold_start"]["state"]),
+            (
+                "进行中",
+                lambda r: r["lifecycle"] and f"{r['lifecycle']['action']}·{r['lifecycle']['step']}",
+            ),
+            ("非本人访问", "last_non_owner_access_at"),
+        ],
+        empty="（没有个人助理）",
+    )
+    return 0
+
+
+async def assistants_deprovision(c: AdminClient, args: argparse.Namespace) -> int:
+    rows = (await c.get(ASSISTANTS))["items"]
+    ref = args.assistant
+    row = one(
+        [r for r in rows if r["bot_id"].startswith(ref)]
+        or [r for r in rows if ref in (r["owner"]["login_name"], r["owner"]["display_name"])],
+        ref,
+        "个人助理",
+        lambda r: f"{r['bot_id'][:8]}（{assistant_owner(r)}）",
+    )
+    require_yes(args, f"停用 {assistant_owner(row)} 的个人助理")
+    data = await c.request(
+        "POST", f"{ASSISTANTS}/{row['bot_id']}/deprovision", body={"confirm": True}
+    )
+    if args.json:
+        output.dump(data)
+    else:
+        print(f"已开始停用 {assistant_owner(row)} 的个人助理（{data['state']}）")
     return 0

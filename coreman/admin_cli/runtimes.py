@@ -130,6 +130,14 @@ def register_runtimes(sub: Any) -> None:
     p = leaf(ops, "session", "跟看一次会话的事件流（Ctrl-C 结束）", session_events)
     backend_args(p)
     p.add_argument("session_id", metavar="会话", help="会话 id（对话记录里的 relay_session_id）")
+    p = leaf(
+        ops,
+        "assistant-pool",
+        "把 AI 实例加入或移出个人助理池（移出不改绑已在上面的助理）",
+        assistant_pool,
+    )
+    backend_args(p)
+    p.add_argument("enabled", type=on_off, metavar="on|off", help="on 加入，off 移出")
 
 
 def register_queue(sub: Any) -> None:
@@ -517,6 +525,7 @@ async def list_backends(c: AdminClient, args: argparse.Namespace) -> int:
             ("额度", quota_text),
             ("团队", "team_name"),
             ("AI 员工数", "bot_count"),
+            ("助理池", "assistant_pool"),
             ("不可用原因", "unavailable_reason"),
         ],
         empty="（没有 AI 实例）",
@@ -787,4 +796,17 @@ async def drain(c: AdminClient, args: argparse.Namespace) -> int:
         output.dump(data)
     else:
         print(f"已请求排空{what}")
+    return 0
+
+
+async def assistant_pool(c: AdminClient, args: argparse.Namespace) -> int:
+    node, relay_id = await find_relay(c, args)
+    data = await c.request(
+        "PUT", f"{RELAYS}/{relay_id}/assistant-pool", body={"enabled": args.enabled}
+    )
+    if args.json:
+        output.dump(data)
+    else:
+        state = "已加入" if data["assistant_pool"] else "已移出"
+        print(f"{node['name']} 的 {args.provider} {state}个人助理池")
     return 0
