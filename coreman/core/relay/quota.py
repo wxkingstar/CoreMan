@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, StrictBool, ValidationError, field_valida
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coreman.core.db.models import RelayServer
+from coreman.core.db.models import RelayServer, RuntimeNode
 from coreman.core.relay.observations import matches_active_seat
 
 
@@ -58,15 +58,82 @@ def _older_node_observation(at: datetime | None, previous: dict[str, Any]) -> bo
     return at is not None and prior is not None and at < datetime.fromisoformat(prior)
 
 
-async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -> None:
-    """A failed/empty read never repaints old quota as fresh. Each window owns its time."""
-    relay = await session.scalar(
-        select(RelayServer).where(RelayServer.id == relay_id).with_for_update()
+def _account(node: RuntimeNode | None, provider: str) -> str:
+    """实例当前席位登录的账号（邮箱，小写）；读不到或 OpenCode（只有服务商名）时为空。"""
+    if node is None or provider == "opencode":
+        return ""
+    cap = (node.capabilities or {}).get(provider) or {}
+    seats = cap.get("seats") or []
+    active = next((s for s in seats if s.get("active")), None)
+    account = active.get("account") if active is not None else cap.get("account")
+    return str(account or "").strip().casefold()
+
+
+def _shareable(quota: Quota) -> bool:
+    """只有真读到用量的结果才同步给同账号的实例；读失败、没数据是这台节点自己的事。"""
+    return quota.read_status == "observed" and any(
+        w is not None and w.used_percentage is not None for w in (quota.five_hour, quota.seven_day)
     )
-    if relay is None:
+
+
+async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -> None:
+    """A failed/empty read never repaints old quota as fresh. Each window owns its time.
+
+    额度属于账号：同一种 AI 登录同一个账号的其他实例（别的节点）一起更新，
+    管理台上同账号的几行额度同时变。各实例照常按自己记录的观测时间丢弃旧结果。
+    """
+    origin = await session.get(RelayServer, relay_id)
+    if origin is None:
         return
-    if not await matches_active_seat(session, relay, quota.seat_id):
+    node = (
+        await session.get(RuntimeNode, origin.runtime_node_id) if origin.runtime_node_id else None
+    )
+    account = _account(node, origin.model_provider) if _shareable(quota) else ""
+    peers: list[uuid.UUID] = []
+    if account:
+        rows = await session.execute(
+            select(RelayServer.id, RuntimeNode)
+            .join(RuntimeNode, RuntimeNode.id == RelayServer.runtime_node_id)
+            .where(
+                RelayServer.model_provider == origin.model_provider,
+                RelayServer.id != relay_id,
+                RelayServer.is_active.is_(True),
+                RuntimeNode.is_active.is_(True),
+            )
+        )
+        peers = [rid for rid, peer in rows if _account(peer, origin.model_provider) == account]
+    # 同账号的实例一次按 id 顺序加锁，并发的两次上报不会互相等成死锁。
+    locked = {
+        r.id: r
+        for r in await session.scalars(
+            select(RelayServer)
+            .where(RelayServer.id.in_([relay_id, *peers]))
+            .order_by(RelayServer.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    }
+    relay = locked.get(relay_id)
+    if relay is None or not await matches_active_seat(session, relay, quota.seat_id):
         return
+    await _apply(session, relay, quota, shared_from=None)
+    for peer_id in peers:
+        peer = locked.get(peer_id)
+        if peer is None:
+            continue
+        plan = (peer.quota_observation or {}).get("plan_type")
+        if quota.plan_type and plan and plan != quota.plan_type:
+            continue  # 同一邮箱的另一个工作区 / 套餐，额度不通用
+        # 对方的当前席位就是这个账号，席位号是对方节点自己的。
+        await _apply(
+            session, peer, quota.model_copy(update={"seat_id": None}), shared_from=relay_id
+        )
+
+
+async def _apply(
+    session: AsyncSession, relay: RelayServer, quota: Quota, *, shared_from: uuid.UUID | None
+) -> None:
+    relay_id = relay.id
     now = datetime.now(UTC)
     at = quota.observed_at or now
     if at > now + timedelta(seconds=30):
@@ -83,6 +150,7 @@ async def save_quota(session: AsyncSession, relay_id: uuid.UUID, quota: Quota) -
         "source": quota.source,
         "read_status": quota.read_status,
         "error_code": quota.error_code,
+        "shared_from": str(shared_from) if shared_from else None,
     }
     if quota.plan_type is not None:
         metadata["plan_type"] = quota.plan_type

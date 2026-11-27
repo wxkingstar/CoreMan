@@ -244,3 +244,88 @@ async def test_legacy_reports_without_seat_id_work_with_advertised_active_seat(d
     assert relay.rate_limit_7d_used_pct == 23
     if kind in {"model", "conversation"}:
         assert relay.model_health["reply_verified"] is True
+
+
+def _seat_caps(account: str, plan: str = "codex") -> dict:
+    return {
+        plan: {
+            "installed": True,
+            "login": "ready",
+            "seats": [
+                {"id": "default", "account": "", "active": False},
+                {"id": "aaaaaaaaaaaa", "account": account, "active": True},
+            ],
+        }
+    }
+
+
+async def test_quota_refresh_updates_runtimes_logged_into_same_account(db_session):
+    a = await add_node_relay(
+        db_session,
+        node=await add_node(db_session, name="a", capabilities=_seat_caps("Ops@Looply.com")),
+        provider="codex",
+    )
+    b = await add_node_relay(
+        db_session,
+        node=await add_node(db_session, name="b", capabilities=_seat_caps("ops@looply.com")),
+        provider="codex",
+    )
+    other = await add_node_relay(
+        db_session,
+        node=await add_node(db_session, name="c", capabilities=_seat_caps("dev@looply.com")),
+        provider="codex",
+    )
+    await save_quota(
+        db_session,
+        a.id,
+        Quota(
+            seat_id="aaaaaaaaaaaa",
+            five_hour=QuotaWindow(used_percentage=41),
+            seven_day=QuotaWindow(used_percentage=12),
+        ),
+    )
+    for relay in (a, b, other):
+        await db_session.refresh(relay)
+    assert (a.rate_limit_5h_used_pct, a.rate_limit_7d_used_pct) == (41, 12)
+    assert (b.rate_limit_5h_used_pct, b.rate_limit_7d_used_pct) == (41, 12)
+    assert b.quota_observation["shared_from"] == str(a.id)
+    assert a.quota_observation["shared_from"] is None
+    assert other.rate_limit_5h_used_pct is None
+
+
+async def test_shared_quota_skips_failed_reads_stale_values_and_other_plans(db_session):
+    now = datetime.now(UTC)
+    a = await add_node_relay(
+        db_session,
+        node=await add_node(db_session, name="a", capabilities=_seat_caps("ops@looply.com")),
+        provider="codex",
+    )
+    b = await add_node_relay(
+        db_session,
+        node=await add_node(db_session, name="b", capabilities=_seat_caps("ops@looply.com")),
+        provider="codex",
+    )
+    await save_quota(
+        db_session, b.id, Quota(seven_day=QuotaWindow(used_percentage=30), observed_at=now)
+    )
+    # 一台读失败不连累同账号的另一台。
+    await save_quota(db_session, a.id, Quota(read_status="error", error_code="probe_failed"))
+    await db_session.refresh(b)
+    assert b.quota_observation["read_status"] == "observed"
+    # 比对方已有的更旧的结果不覆盖。
+    await save_quota(
+        db_session,
+        a.id,
+        Quota(seven_day=QuotaWindow(used_percentage=5), observed_at=now - timedelta(minutes=5)),
+    )
+    await db_session.refresh(b)
+    assert b.rate_limit_7d_used_pct == 30
+    # 套餐不同（同一邮箱的另一个工作区）不同步。
+    await save_quota(
+        db_session, b.id, Quota(plan_type="team", seven_day=QuotaWindow(used_percentage=31))
+    )
+    await save_quota(
+        db_session, a.id, Quota(plan_type="plus", seven_day=QuotaWindow(used_percentage=77))
+    )
+    await db_session.refresh(b)
+    assert b.rate_limit_7d_used_pct == 31
