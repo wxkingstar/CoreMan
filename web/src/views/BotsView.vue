@@ -73,15 +73,15 @@ function relayHealth(row: BotOut): string | null {
   return relay.runtime_online === false ? 'down' : relay.health_status
 }
 
-// 额度用到 90% 及以上、且窗口还没重置的，才在运行时下方画进度条提醒。
+// 运行时下方总是画 7 天额度；5 小时额度只在用到 90% 及以上、且窗口还没重置时才画。
 const QUOTA_ALERT_PCT = 90
-function quotaAlerts(row: BotOut) {
+function quotaBars(row: BotOut) {
   const relay = row.relay_server_id ? relayById.value.get(row.relay_server_id) : undefined
   if (!relay) return []
   const now = Date.now()
   return quotaWindows(relay, relay.model_provider, now).filter((w) =>
-    w.pct !== null && w.pct >= QUOTA_ALERT_PCT && !!w.resetsAt && Date.parse(w.resetsAt) > now
-    && !['not_applicable', 'unsupported'].includes(w.state))
+    w.pct !== null && !['not_applicable', 'unsupported'].includes(w.state)
+    && (w.label === '7d' || (w.pct >= QUOTA_ALERT_PCT && !!w.resetsAt && Date.parse(w.resetsAt) > now)))
 }
 
 // 列表打开时取一次，不轮询；时长按服务端给的开始时间算。
@@ -387,9 +387,9 @@ onMounted(async () => {
             </el-tooltip>
           </div>
           <QuotaBar
-            v-for="w in quotaAlerts(row)"
+            v-for="w in quotaBars(row)"
             :key="w.label"
-            :data-test="'quota-alert-' + row.id"
+            :data-test="'quota-' + w.label + '-' + row.id"
             :pct="w.pct"
             :resets-at="w.resetsAt"
             :label="w.label"
