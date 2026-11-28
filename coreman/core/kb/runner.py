@@ -39,8 +39,6 @@ CURSOR_PREFIX = "knowledge.cursor."
 DEFAULT_SCHEDULE = {"hour": 2, "timezone": "Asia/Shanghai"}
 DAILY_BATCHES = 200
 COLD_BATCHES = 500
-# 每做这么多批重新看一次额度：超过阈值就换后端，都不够就停，把余量留给调度回合。
-REPICK_EVERY = 10
 MAX_RUN_SECONDS = 4 * 3600.0
 # 一次运行卡死（进程被杀）后，过这么久才允许下一次开始。
 STALE_RUNNING = timedelta(hours=6)
@@ -196,6 +194,15 @@ def planned(units: list[sources.Unit]) -> dict[str, dict[str, int]]:
     return out
 
 
+async def _repick(
+    factory: async_sessionmaker[AsyncSession], bot: Bot, quota: dict[str, Any]
+) -> tuple[rounds.Backend | None, str]:
+    async with factory() as session:
+        picked, reason = await rounds.pick(session, bot, quota, datetime.now(UTC))
+        session.expunge_all()
+    return picked, reason
+
+
 async def _round(backend: rounds.Backend, **kwargs: Any) -> str:
     """跑一轮；节点或驱动出错时再试一次。"""
     try:
@@ -205,7 +212,11 @@ async def _round(backend: rounds.Backend, **kwargs: Any) -> str:
         return await rounds.run_round(backend, **kwargs)
 
 
-async def extract_batch(backend: rounds.Backend, batch: sources.Batch) -> list[extract.Draft]:
+async def extract_batch(
+    backend: rounds.Backend,
+    batch: sources.Batch,
+    factory: async_sessionmaker[AsyncSession] | None = None,
+) -> list[extract.Draft]:
     """抽一批；输出不是约定格式时再抽一次，仍不是就抛 ParseError。"""
     for attempt in range(2):
         output = await _round(
@@ -215,6 +226,7 @@ async def extract_batch(backend: rounds.Backend, batch: sources.Batch) -> list[e
             working_dir=extract.SCRATCH_DIR,
             max_turns=extract.MAX_TURNS,
             limit_seconds=extract.TIMEOUT_SECONDS,
+            factory=factory,
         )
         try:
             return extract.parse(output, batch)
@@ -263,17 +275,17 @@ async def _extract(
             break
         drafts: list[extract.Draft] = []
         for batch in unit.batches:
-            if state.batches and state.batches % REPICK_EVERY == 0:
-                async with factory() as session:
-                    picked, reason = await rounds.pick(session, bot, quota, datetime.now(UTC))
-                    session.expunge_all()
+            if state.batches:
+                # 每一批之前都重新看额度：上一轮用掉的已经记上了。超过阈值就换后端，都不够就停，
+                # 把余量留给调度回合。
+                picked, reason = await _repick(factory, bot, quota)
                 if picked is None:
                     state.more, state.stopped = True, reason
                     return backend
                 backend = picked
             state.batches += 1
             try:
-                drafts.extend(await extract_batch(backend, batch))
+                drafts.extend(await extract_batch(backend, batch, factory))
             except extract.ParseError:
                 state.failed_batches += 1
                 log.warning("kb_extract_unparsed", source=batch.source, refs=list(batch.refs)[:5])
@@ -313,6 +325,7 @@ async def _compile(
     factory: async_sessionmaker[AsyncSession],
     bot: Bot,
     backend: rounds.Backend,
+    quota: dict[str, Any],
     today: str,
     state: _Run,
 ) -> None:
@@ -347,6 +360,12 @@ async def _compile(
         if state.out_of_time():
             state.more = True
             return
+        if start:
+            picked, reason = await _repick(factory, bot, quota)
+            if picked is None:
+                state.more, state.stopped = True, reason
+                return
+            backend = picked
         chunk = pending[start : start + wiki.CHUNK]
         output = await _round(
             backend,
@@ -355,6 +374,7 @@ async def _compile(
             working_dir=bot.working_dir,
             max_turns=wiki.MAX_TURNS,
             limit_seconds=wiki.TIMEOUT_SECONDS,
+            factory=factory,
         )
         if text := wiki.summary(output):
             state.summaries.append(text)
@@ -370,6 +390,7 @@ async def _compile(
                 working_dir=bot.working_dir,
                 max_turns=FIX_MAX_TURNS,
                 limit_seconds=wiki.FIX_TIMEOUT_SECONDS,
+                factory=factory,
             )
             after = await wiki.read_tree(backend.relay, bot)
             hits = wiki.check(before, after)
@@ -483,7 +504,7 @@ async def run(
             factory, store, bot, backend, found.units, cursor, config.quota, run_id, cap, state
         )
         if state.stopped is None:
-            await _compile(factory, bot, backend, today.isoformat(), state)
+            await _compile(factory, bot, backend, config.quota, today.isoformat(), state)
     except (rounds.RoundError, AgentError, rules_backup.BackupError) as exc:
         status, error = "failed", str(exc) or type(exc).__name__
         if isinstance(exc, AgentError) and exc.detail:

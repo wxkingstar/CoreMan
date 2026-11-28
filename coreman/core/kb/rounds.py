@@ -1,7 +1,8 @@
 """在承接员工所在的运行时节点上选后端、跑一轮。
 
 抽取和编译都只在这个节点上跑，不换到别的节点。后端先 Claude 再 Codex，用该后端在模型目录里
-的默认模型；额度超过阈值的不选，把余量留给调度回合（它们共用同一个运行时的额度）。
+的默认模型；额度超过阈值的不选，把余量留给调度回合（它们共用同一个运行时的额度）。每一轮带回
+的额度当场记到运行时上，下一批开始前看到的就是刚用掉之后的数。
 
 这里的一轮不经聊天管线：没有会话、不挂技能、不带环境变量和业务令牌，平台直接向节点发一次
 对话请求，读完正文就结束。
@@ -17,14 +18,24 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.db.models import Bot, RelayServer
+from coreman.core.logging import get_logger
 from coreman.core.relay import probe
 from coreman.core.relay.client import ChatRequest, RelayError
 from coreman.core.relay.models import default_model, effective_models, load_catalog
-from coreman.core.relay.sse import FinishEvent, RelayErrorEvent, TextDelta
+from coreman.core.relay.quota import parse_quota, save_quota
+from coreman.core.relay.sse import (
+    FinishEvent,
+    RateLimitEvent,
+    RelayErrorEvent,
+    RuntimeObservationEvent,
+    TextDelta,
+)
 from coreman.core.timeutils import aware_utc
+
+log = get_logger(__name__)
 
 PROVIDERS = ("claude", "codex")
 DEFAULT_QUOTA = {"seven_day": 70, "five_hour": 80}
@@ -102,6 +113,21 @@ async def pick(
     return None, "；".join(reasons) or "承接员工所在节点没有 Claude 或 Codex 运行时"
 
 
+async def record_quota(
+    factory: async_sessionmaker[AsyncSession], relay_id: Any, limits: dict[str, Any]
+) -> None:
+    """把一轮带回的额度记到运行时上；格式不对或写不进去都不影响这一轮。"""
+    quota = parse_quota(limits)
+    if quota is None:
+        return
+    try:
+        async with factory() as session:
+            await save_quota(session, relay_id, quota.model_copy(update={"source": "conversation"}))
+            await session.commit()
+    except Exception:
+        log.warning("kb_quota_not_recorded", relay_id=str(relay_id), exc_info=True)
+
+
 async def run_round(
     backend: Backend,
     *,
@@ -110,8 +136,9 @@ async def run_round(
     working_dir: str,
     max_turns: int,
     limit_seconds: float,
+    factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> str:
-    """跑一轮，返回全部正文。
+    """跑一轮，返回全部正文。给了 `factory` 就把这一轮带回的额度记到运行时上（出错的轮次也记）。
 
     Raises:
         RoundError: 节点不可达、驱动报错、没有正常结束或输出过长
@@ -128,6 +155,8 @@ async def run_round(
     client = probe.make_client(backend.relay)
     parts: list[str] = []
     size, finished = 0, False
+    limits: dict[str, Any] | None = None
+    seat: str | None = None
     try:
         async with (
             asyncio.timeout(limit_seconds + 30),
@@ -141,12 +170,18 @@ async def run_round(
                     parts.append(event.text)
                 elif isinstance(event, RelayErrorEvent):
                     raise RoundError(f"运行时报错：{event.text[:200]}")
+                elif isinstance(event, RuntimeObservationEvent):
+                    seat = event.seat_id
+                elif isinstance(event, RateLimitEvent):
+                    limits = event.data
                 elif isinstance(event, FinishEvent):
                     finished = event.reason in FINISHED
     except (RelayError, TimeoutError) as exc:
         raise RoundError(str(exc)[:200] or "运行超时") from exc
     finally:
         await client.aclose()
+        if factory is not None and limits is not None:
+            await record_quota(factory, backend.relay.id, {**limits, "seat_id": seat})
     if not finished:
         raise RoundError("这一轮没有正常结束")
     return "".join(parts)

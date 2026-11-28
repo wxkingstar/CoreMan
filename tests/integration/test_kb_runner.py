@@ -83,6 +83,7 @@ class Model:
         self.fix_works = True
         self.skip_ids: set[int] = set()
         self.fail_with: Exception | None = None
+        self.before_call: Any = None
 
     async def run_round(self, backend, *, system_prompt, content, working_dir, max_turns, **_):
         self.calls.append(
@@ -93,6 +94,8 @@ class Model:
                 "content": content,
             }
         )
+        if self.before_call is not None:
+            await self.before_call(len(self.calls))
         if self.fail_with is not None:
             raise self.fail_with
         if system_prompt == extract.SYSTEM_PROMPT:
@@ -527,3 +530,107 @@ async def test_run_due_respects_switch_and_schedule(db_engine: AsyncEngine, mode
     assert first is not None and first["status"] == "ok"
     assert await runner.run_due(factory, store, NOW + timedelta(minutes=20)) is None
     assert await runner.run_due(factory, store, NOW + timedelta(days=1)) is not None
+
+
+async def test_stops_between_batches_once_quota_crosses_the_threshold(
+    db_engine: AsyncEngine, model
+) -> None:
+    store = await seed(db_engine)
+    factory = make_session_factory(db_engine)
+
+    async def burn(call: int) -> None:
+        # 第二批跑的时候额度用过了线：第三批不该再开始。
+        if call == 2:
+            await over_quota(db_engine, "claude", "codex")
+
+    model.before_call = burn
+
+    report = await runner.run(factory, store, NOW)
+
+    assert report["status"] == "ok" and report["batches"] == 2 and report["more"] is True
+    assert "中途停下" in report["error"] and "额度超过阈值" in report["error"]
+    assert report["compiled"] == 0 and model.of(wiki.SYSTEM_PROMPT) == []
+    assert {row.status for row in await items(db_engine)} == {"pending"}
+    # 额度恢复后接着做：前两批不重抽，之前抽出的条目一起编译。
+    model.before_call = None
+    async with factory() as session:
+        await session.execute(update(RelayServer).values(rate_limit_7d_used_pct=Decimal(10)))
+        await session.commit()
+    rest = await runner.run(factory, store, NOW + timedelta(hours=1))
+    assert rest["status"] == "ok" and rest["batches"] == 3 and rest["more"] is False
+    assert rest["compiled"] == 7
+
+
+class FakeStream:
+    """假的运行时客户端：吐出给定的事件。"""
+
+    def __init__(self, events: list[Any]) -> None:
+        self.events = events
+
+    async def chat_stream(self, request, *, total_timeout):
+        for event in self.events:
+            yield event
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_round_records_the_quota_it_brings_back(
+    db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.relay import probe
+    from coreman.core.relay.sse import FinishEvent, RateLimitEvent, TextDelta
+
+    factory = make_session_factory(db_engine)
+    async with factory() as session:
+        relay = await add_node_relay(session, health_status="healthy")
+        await session.commit()
+        relay_id = relay.id
+    # 保存额度按真实时钟丢弃「来自未来」的观测，所以这里用真实的现在。
+    real_now = datetime.now(UTC)
+    resets = (real_now + timedelta(days=2)).isoformat()
+    limits = {
+        "five_hour": {"used_percentage": 12, "resets_at": resets},
+        "seven_day": {"used_percentage": 96, "resets_at": resets},
+    }
+    events = [TextDelta("好"), RateLimitEvent(limits), FinishEvent("stop")]
+    monkeypatch.setattr(probe, "make_client", lambda relay: FakeStream(events))
+    backend = rounds.Backend(relay=relay, provider="claude", model="m")
+
+    text = await rounds.run_round(
+        backend,
+        system_prompt="s",
+        content="c",
+        working_dir="w",
+        max_turns=1,
+        limit_seconds=5,
+        factory=factory,
+    )
+
+    assert text == "好"
+    async with factory() as session:
+        saved = await session.get(RelayServer, relay_id)
+        assert saved is not None and saved.rate_limit_7d_used_pct == Decimal(96)
+        assert saved.rate_limit_5h_used_pct == Decimal(12)
+        assert rounds.within_quota(saved, {"seven_day": 95, "five_hour": 80}, real_now) is False
+    # 格式不对的额度不影响这一轮，也不改已有记录。
+    monkeypatch.setattr(
+        probe,
+        "make_client",
+        lambda relay: FakeStream(
+            [TextDelta("行"), RateLimitEvent({"seven_day": "?"}), FinishEvent("stop")]
+        ),
+    )
+    again = await rounds.run_round(
+        backend,
+        system_prompt="s",
+        content="c",
+        working_dir="w",
+        max_turns=1,
+        limit_seconds=5,
+        factory=factory,
+    )
+    assert again == "行"
+    async with factory() as session:
+        saved = await session.get(RelayServer, relay_id)
+        assert saved is not None and saved.rate_limit_7d_used_pct == Decimal(96)
