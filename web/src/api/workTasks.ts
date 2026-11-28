@@ -51,16 +51,25 @@ export interface WorkTaskStep {
   since: string; closed_at: string | null
   /** 后面跟的一句：做完的是结果，在等人的是等谁，在做的是最近一次进展（`note_at` 是它的时间）。 */
   note: string; note_at: string | null
+  /** 牵头员工拆步骤时写的阶段；没写是空。 */
+  phase: string
+  /** 看着在做、其实没在动：排队太久、上一轮结束没接着做、运行心跳断了。 */
+  stalled: WorkTaskStalled | null
 }
+export interface WorkTaskStalled { kind: 'queued' | 'idle' | 'lost'; since: string }
 /** 任务页首屏的全貌，和群里的进展卡同一套分块。 */
 export interface WorkTaskOverview {
   state: 'need_human' | 'running' | 'todo' | 'done' | 'cancelled' | 'shadow'
+  /** 这件事自己（没拆步骤时）是不是没在动。 */
+  stalled: WorkTaskStalled | null
   steps_done: number; steps_total: number
   /** 这件事自己和它下面各层还没人答的问题。 */
   asks: (WorkTaskAsk & { code: string; title: string })[]
   doing: WorkTaskStep[]; plan: string[]; done: WorkTaskStep[]
-  /** 办完后还要人处理的事。 */
-  followups: string[]
+  /** 办完后还要人处理的事：每件带上办没办、谁勾的，或者建成了哪个任务。 */
+  followups: { index: number; text: string; done: boolean; by: string; at: string | null; task: string }[]
+  /** 这件事上上下下人定过的事：谁、什么时候、答了什么。 */
+  decisions: { code: string; question: string; by: string; at: string | null; answer: string }[]
   latest: { text: string; at: string; actor_name: string } | null
 }
 export interface WorkTaskDetail extends WorkTask {
@@ -105,16 +114,18 @@ export interface WorkTaskPatch {
 export interface WorkTaskStats {
   days: number
   backlog: { assignee: WorkTaskActor | null; open: number; overdue: number }[]
-  by_source: { source: string; created: number; done: number; avg_hours: number | null }[]
+  by_source: { source: string; record: boolean; created: number; done: number; avg_hours: number | null }[]
   handoffs_per_task: number | null; agent_first_pass_rate: number | null; agent_reviewed: number
 }
 const base = '/api/admin/work-tasks'
 const one = (code: string) => `${base}/${encodeURIComponent(code)}`
 export const workTasks = {
   list: (params: WorkTaskQuery = {}) =>
-    call<{ items: (WorkTask & { id: number })[]; counts: Record<string, number>; needs_me: number }>(
-      http.get(base, { params }),
-    ),
+    call<{
+      items: (WorkTask & { id: number })[]; counts: Record<string, number>; needs_me: number
+      /** 「待我处理」才有：还在进行的事里，后续步骤点到我名字的。 */
+      upcoming?: { code: string; title: string; step: string }[]
+    }>(http.get(base, { params })),
   get: (code: string) => call<WorkTaskDetail>(http.get(one(code))),
   /** 给 AI 读的纯文本（Markdown）版。 */
   markdown: async (code: string): Promise<string> =>
@@ -123,6 +134,9 @@ export const workTasks = {
   create: (body: WorkTaskCreate) => call<WorkTaskDetail>(http.post(base, body)),
   assign: (code: string, body: { assignee: AssigneeIn; note?: string; review_required?: boolean | null; start?: boolean }) =>
     call<WorkTaskDetail>(http.post(`${one(code)}/assign`, body)),
+  /** 交付后还要人处理的事：勾成办了、改回没办，或者建成一件新任务。 */
+  followup: (code: string, index: number, body: { done?: boolean; as_task?: boolean }) =>
+    call<WorkTaskDetail>(http.post(`${one(code)}/followups/${index}`, body)),
   /** 叫任务上的 AI 员工开工或接着做：以点的人的身份做。 */
   start: (code: string) => call<WorkTaskDetail>(http.post(`${one(code)}/start`)),
   answer: (code: string, body: { ask_id: string; option: string; text?: string }) =>

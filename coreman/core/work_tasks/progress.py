@@ -284,8 +284,14 @@ async def awaited_users(session: AsyncSession, root: WorkTask) -> set[uuid.UUID]
     return users
 
 
-async def followups(session: AsyncSession, root: WorkTask) -> list[str]:
-    """交付时写下的、还要人处理的事。"""
+FOLLOWUP_KIND = "followup"
+
+
+async def followup_items(session: AsyncSession, root: WorkTask) -> list[dict[str, Any]]:
+    """交付时写下的、还要人处理的事，每件带上办没办（谁、什么时候勾的，或者建成了哪个任务）。
+
+    以最近一次交付为准；之后记下的「办了 / 又没办」按先后重放，最后一次算数。
+    """
     submitted = await session.scalar(
         select(WorkTaskEvent)
         .where(WorkTaskEvent.work_task_id == root.id, WorkTaskEvent.kind == "submitted")
@@ -293,7 +299,38 @@ async def followups(session: AsyncSession, root: WorkTask) -> list[str]:
         .limit(1)
     )
     left = (submitted.agent_detail or {}).get("followups") if submitted is not None else None
-    return [str(x) for x in left] if isinstance(left, list) else []
+    if submitted is None or not isinstance(left, list):
+        return []
+    items: list[dict[str, Any]] = [
+        {"index": i, "text": str(x), "done": False, "by": "", "at": None, "task": ""}
+        for i, x in enumerate(left)
+    ]
+    marks = await session.scalars(
+        select(WorkTaskEvent)
+        .where(
+            WorkTaskEvent.work_task_id == root.id,
+            WorkTaskEvent.kind == FOLLOWUP_KIND,
+            WorkTaskEvent.id > submitted.id,
+        )
+        .order_by(WorkTaskEvent.id)
+    )
+    for mark in marks:
+        detail = mark.agent_detail or {}
+        index = detail.get("index")
+        if not isinstance(index, int) or not 0 <= index < len(items):
+            continue
+        items[index] |= {
+            "done": bool(detail.get("done")),
+            "by": str(detail.get("by_name") or ""),
+            "at": mark.created_at,
+            "task": str(detail.get("task") or ""),
+        }
+    return items
+
+
+async def followups(session: AsyncSession, root: WorkTask) -> list[str]:
+    """交付时写下的、还没办的要人处理的事。"""
+    return [str(i["text"]) for i in await followup_items(session, root) if not i["done"]]
 
 
 def _bar(done: int, total: int) -> str:

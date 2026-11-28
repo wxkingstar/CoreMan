@@ -29,7 +29,7 @@ from coreman.core.db.models import (
     WorkTask,
     WorkTaskEvent,
 )
-from coreman.core.work_tasks import execute, flow, markdown, service
+from coreman.core.work_tasks import execute, flow, markdown, progress, service
 from coreman.core.work_tasks import view as task_view
 from coreman.core.work_tasks.service import Assignee, WorkTaskError
 
@@ -75,6 +75,60 @@ async def _inside(session: AsyncSession, roots: list[int]) -> dict[int, dict[str
         if not is_question and status == "done":
             entry["steps_done"] += int(count)
     return out
+
+
+UPCOMING_SCAN = 100
+UPCOMING_MAX = 10
+
+
+async def _upcoming(session: AsyncSession, user: User) -> list[dict[str, Any]]:
+    """「接下来会找你」：还在进行的事里，牵头员工写的后续步骤点到了这个人名字的那几步。
+
+    现在不用他处理，但后面会轮到他（例如「请张三同意合并」）：提前让他看到，不用等卡片来了才知道。
+    按名字匹配，名字太短（一个字）的不匹配。
+    """
+    name = service.name_of(user)
+    if len(name) < 2:
+        return []
+    roots = list(
+        await session.scalars(
+            select(WorkTask)
+            .where(
+                WorkTask.parent_id.is_(None),
+                WorkTask.origin_ref.is_(None),
+                WorkTask.status.in_(WORK_TASK_OPEN),
+            )
+            .order_by(WorkTask.id.desc())
+            .limit(UPCOMING_SCAN)
+        )
+    )
+    if not roots:
+        return []
+    plans = await session.scalars(
+        select(WorkTaskEvent)
+        .where(
+            WorkTaskEvent.work_task_id.in_([r.id for r in roots]),
+            WorkTaskEvent.kind == progress.PLAN_KIND,
+        )
+        .order_by(WorkTaskEvent.id)
+    )
+    latest = {event.work_task_id: event for event in plans}
+    out: list[dict[str, Any]] = []
+    for root in roots:
+        event = latest.get(root.id)
+        steps = (event.agent_detail or {}).get("steps") if event is not None else None
+        if not isinstance(steps, list) or not any(name in str(step) for step in steps):
+            continue
+        # 已经拆成子任务的那几步不算「后面」的了。
+        taken = set(
+            await session.scalars(select(WorkTask.title).where(WorkTask.parent_id == root.id))
+        )
+        out += [
+            {"code": root.code, "title": root.title, "step": str(step)}
+            for step in steps
+            if isinstance(step, str) and step not in taken and name in step
+        ]
+    return out[:UPCOMING_MAX]
 
 
 @router.get("")
@@ -156,6 +210,7 @@ async def list_work_tasks(
             ],
             "counts": counts,
             "needs_me": int(needs_me or 0),
+            "upcoming": await _upcoming(session, user) if view == "needs_me" else [],
         },
     }
 
@@ -185,7 +240,8 @@ async def work_task_stats(
                 func.count(),
                 func.count().filter(WorkTask.due_at < func.now()),
             )
-            .where(WorkTask.status.in_(WORK_TASK_OPEN))
+            # 积压只算人和 AI 员工手上的事：自动记下的接口任务、求助记录不算，免得把数字拉歪。
+            .where(WorkTask.status.in_(WORK_TASK_OPEN), WorkTask.origin_ref.is_(None))
             .group_by(WorkTask.assignee_bot_id, WorkTask.assignee_user_id)
             .order_by(func.count().desc())
             .limit(20)
@@ -275,6 +331,8 @@ async def work_task_stats(
             "by_source": [
                 {
                     "source": source,
+                    # 自动记下的记录（接口任务、求助）：页面上和人建的事分开列。
+                    "record": source in ("api", "collaboration"),
                     "created": int(total),
                     "done": int(done),
                     "avg_hours": round(float(avg), 1) if avg is not None else None,
@@ -360,6 +418,12 @@ class UpdateIn(BaseModel):
 
 class WatchIn(BaseModel):
     on: bool = True
+
+
+class FollowupIn(BaseModel):
+    done: bool = True
+    # 把这件事建成一件新任务（建的人是发起人），原处勾掉并互相写上编号。
+    as_task: bool = False
 
 
 async def _done(
@@ -459,6 +523,27 @@ async def assign_work_task(
         return await execute.start_now(session, row, user) if body.start else ""
 
     return await _act(request, session, user, code, op)
+
+
+@router.post("/{code}/followups/{index}")
+async def mark_work_task_followup(
+    code: str,
+    index: int,
+    body: FollowupIn,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """交付后还要人处理的事：勾成办了、改回没办，或者建成一件新任务。登录成员都能勾。"""
+    return await _act(
+        request,
+        session,
+        user,
+        code,
+        lambda row: service.mark_followup(
+            session, row, user, index, done=body.done, as_task=body.as_task
+        ),
+    )
 
 
 @router.post("/{code}/start")

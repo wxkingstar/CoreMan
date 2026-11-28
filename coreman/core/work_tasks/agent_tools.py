@@ -120,6 +120,9 @@ Other rules:
   report stuck).
 """
 
+# 阶段名的长度上限：任务页上当小标题用。
+PHASE_MAX = 12
+
 DESCRIPTIONS = {
     "find_assignees": (
         "按名字或能力关键词找能接子任务的 AI 员工和同事，返回 type、id、名字与职责。"
@@ -132,6 +135,8 @@ DESCRIPTIONS = {
         "brief 给接手的人看（背景、数据、约束、验收标准）。"
         "AI 员工接手立即开工（不出声，结果交回你）；"
         "同事会收到飞书卡片。之后调用 wait_for 等结果。"
+        f"步骤多、要分几段做时填 phase（≤{PHASE_MAX} 字，如「退货联调」），"
+        "同一阶段的步骤在任务页上排在一起。"
         f"限制：任务链最多 {MAX_DEPTH} 层，"
         f"每个任务同时进行中的子任务和问题最多 {MAX_OPEN_CHILDREN} 个；"
         "不能派给自己或链上已有的 AI 员工；"
@@ -190,6 +195,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "required": ["type", "id"],
             },
             "due_at": {"type": "string", "description": "ISO 8601，可选"},
+            "phase": {"type": "string", "description": "这一步属于哪个阶段，可选"},
         },
         "required": ["title", "brief", "assignee"],
         "additionalProperties": False,
@@ -389,6 +395,7 @@ async def create_task(
     title = _text(args, "title", TITLE_MAX, "标题")
     summary = _text(args, "summary", SUMMARY_MAX, "一句话", required=False)
     brief = _long(args, "brief", "简报")
+    phase = _text(args, "phase", PHASE_MAX, "阶段", required=False)
     raw = args.get("assignee")
     target: dict[str, Any] = raw if isinstance(raw, dict) else {}
     kind = target.get("type")
@@ -455,7 +462,8 @@ async def create_task(
         actor_type="bot",
         actor_id=str(me.id),
         human_text=f"拆出 {child.code}：{title}（{who}）",
-        detail={"child": child.code, "brief": brief},
+        # 阶段记在这一笔上：任务页按它把同一阶段的步骤排在一起。
+        detail={"child": child.code, "brief": brief, **({"phase": phase} if phase else {})},
     )
     return {"code": child.code, "assignee": who, "next": "派完要等的，调用 wait_for 后结束这一轮"}
 

@@ -33,6 +33,8 @@ const records = ref(route.query.records === '1')
 // 首页（待我处理）下面再列一段：我发起、还在进行的事，不用我处理也看得到进展到哪了。
 const mine = ref<(WorkTask & { id: number })[]>([])
 const MINE_LIMIT = 20
+// 还在进行的事里，后续步骤点到我名字的：现在不用处理，提前看到。
+const upcoming = ref<{ code: string; title: string; step: string }[]>([])
 const loading = ref(false)
 const loadError = ref('')
 const more = ref(false)
@@ -41,10 +43,11 @@ const creating = ref(false)
 interface ListMemory {
   rows: (WorkTask & { id: number })[]; counts: Record<string, number>; needsMe: number
   more: boolean; query: string; stats: WorkTaskStats | null; mine?: (WorkTask & { id: number })[]
+  upcoming?: { code: string; title: string; step: string }[]
 }
 const memory = usePageMemory<ListMemory>(() => ({
   rows: rows.value, counts: counts.value, needsMe: needsMe.value,
-  more: more.value, query: query.value, stats: stats.value, mine: mine.value,
+  more: more.value, query: query.value, stats: stats.value, mine: mine.value, upcoming: upcoming.value,
 }))
 /** 首页那一段「我发起、还在进行的」只在没筛选、没搜索时出现。 */
 const home = computed(() => view.value === 'needs_me' && !status.value && !query.value.trim())
@@ -82,6 +85,7 @@ async function load(append = false, quiet = false): Promise<void> {
       // 已经列在「待我处理」里的不再重复。
       const shown = new Set(rows.value.map(row => row.code))
       mine.value = (started?.items ?? []).filter(row => !shown.has(row.code))
+      upcoming.value = data.upcoming ?? []
     }
   } catch (e) {
     loadError.value = errorMessage(e)
@@ -104,6 +108,7 @@ onMounted(async () => {
   more.value = saved.more
   query.value = saved.query
   mine.value = saved.mine ?? []
+  upcoming.value = saved.upcoming ?? []
   await nextTick()
   memory.ready()
   void load(false, true)
@@ -249,7 +254,7 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
           />
         </div>
         <h4>{{ t('workTasks.statBySource', { days: stats.days }) }}</h4>
-        <el-table :data="stats.by_source">
+        <el-table :data="stats.by_source.filter(row => !row.record)">
           <el-table-column :label="t('workTasks.source')">
             <template #default="{ row }">
               {{ t(`workTasks.sources.${row.source}`, row.source) }}
@@ -269,6 +274,32 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
             </template>
           </el-table-column>
         </el-table>
+        <template v-if="stats.by_source.some(row => row.record)">
+          <h4>{{ t('workTasks.statRecords') }}</h4>
+          <el-table
+            :data="stats.by_source.filter(row => row.record)"
+            data-test="stats-records"
+          >
+            <el-table-column :label="t('workTasks.source')">
+              <template #default="{ row }">
+                {{ t(`workTasks.sources.${row.source}`, row.source) }}
+              </template>
+            </el-table-column>
+            <el-table-column
+              :label="t('workTasks.statCreated')"
+              prop="created"
+            />
+            <el-table-column
+              :label="t('workTasks.statDone')"
+              prop="done"
+            />
+            <el-table-column :label="t('workTasks.statAvgHours')">
+              <template #default="{ row }">
+                {{ row.avg_hours ?? '—' }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
         <h4>{{ t('workTasks.statBacklog') }}</h4>
         <el-table :data="stats.backlog">
           <el-table-column :label="t('workTasks.assignee')">
@@ -287,7 +318,29 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
         </el-table>
       </template>
     </div>
-    <template v-else>
+    <div
+      v-else
+      class="tasks-sections"
+    >
+      <div
+        v-if="home && upcoming.length"
+        class="tasks-section upcoming"
+        data-test="tasks-upcoming"
+      >
+        <h4>{{ t('workTasks.upcoming') }}<span class="muted upcoming-hint">{{ t('workTasks.upcomingHint') }}</span></h4>
+        <ul>
+          <li
+            v-for="(item, index) in upcoming"
+            :key="index"
+            :data-back-key="item.code"
+            @click="router.push({ name: 'work-task', params: { code: item.code } })"
+          >
+            <span class="upcoming-code">{{ item.code }}</span>
+            <strong>{{ item.step }}</strong>
+            <span class="muted">{{ item.title }}</span>
+          </li>
+        </ul>
+      </div>
       <div
         v-for="section in sections"
         :key="section.key"
@@ -414,7 +467,7 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
           </el-table-column>
         </el-table>
       </div>
-    </template>
+    </div>
     <div
       v-if="more && view !== 'stats'"
       class="tasks-more"
@@ -440,8 +493,18 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
 .view-badge :deep(.el-badge__content) { position: static; transform: none; }
 .tasks-table :deep(.el-table__row) { cursor: pointer; }
 .tasks-more { display: flex; justify-content: center; margin-top: 12px; }
-.tasks-section + .tasks-section { margin-top: 24px; }
+/* 三段的先后：要我处理的、接下来会找我的、我发起且还在进行的。 */
+.tasks-sections { display: flex; flex-direction: column; gap: 24px; }
+.tasks-section { order: 1; }
+.tasks-section.upcoming { order: 2; }
+.tasks-section[data-test="tasks-mine"] { order: 3; }
 .tasks-section h4 { margin: 0 0 8px; font-size: 15px; }
+.upcoming-hint { margin-left: 10px; font-weight: 400; }
+.upcoming ul { list-style: none; margin: 0; padding: 0; border: 1px solid var(--el-border-color); border-radius: 10px; }
+.upcoming li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 14px; cursor: pointer; }
+.upcoming li + li { border-top: 1px solid var(--el-border-color-lighter); }
+.upcoming li:hover { background: var(--el-fill-color-light); }
+.upcoming-code { color: var(--el-color-primary); font-variant-numeric: tabular-nums; }
 .stats { display: flex; flex-direction: column; gap: 12px; }
 .stat-row { display: flex; flex-wrap: wrap; gap: 48px; }
 .title-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

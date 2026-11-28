@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from coreman.core.db.models import (
     WORK_TASK_OPEN,
     Bot,
     GroupObserveDecision,
+    Task,
     User,
     WorkTask,
     WorkTaskEvent,
@@ -173,8 +175,8 @@ def milestone(event: WorkTaskEvent) -> bool:
     )
 
 
-async def open_asks(session: AsyncSession, row: WorkTask) -> list[WorkTask]:
-    """这件事自己和它下面各层还没人答的问题（问人、要不要接、待验收），按提出的先后。"""
+async def subtree(session: AsyncSession, row: WorkTask) -> list[WorkTask]:
+    """这件事自己和它下面各层的任务（自己排第一），按建的先后。"""
     chain = list(
         await session.scalars(
             select(WorkTask)
@@ -186,15 +188,89 @@ async def open_asks(session: AsyncSession, row: WorkTask) -> list[WorkTask]:
     for item in chain:  # 子任务的 id 总比上级大：按 id 顺着走一遍就能认出整棵子树
         if item.parent_id in inside:
             inside.add(item.id)
+    return [row, *(item for item in chain if item.id in inside)]
+
+
+def open_asks(tree: list[WorkTask]) -> list[WorkTask]:
+    """这件事自己和它下面各层还没人答的问题（问人、要不要接、待验收），按提出的先后。"""
     # `ask` 是 JSON 列，没有问题时存的是 JSON 的 null：取出来再看。
     return [
         item
-        for item in [row, *chain]
-        if item.id in inside
-        and item.status in WORK_TASK_OPEN
-        and item.ask
-        and item.ask.get("to_user_id")
+        for item in tree
+        if item.status in WORK_TASK_OPEN and item.ask and item.ask.get("to_user_id")
     ]
+
+
+def decisions_of(tree: list[WorkTask], names: dict[str, str]) -> list[dict[str, Any]]:
+    """这件事上上下下人定过的事：AI 员工问过、已经答了的问题，谁、什么时候、答了什么。"""
+    return [
+        {
+            "code": item.code,
+            "question": item.title.removeprefix("问："),
+            "by": names.get(str(item.assignee_user_id), ""),
+            "at": item.closed_at,
+            "answer": item.summary,
+        }
+        for item in tree[1:]
+        if progress.is_question(item) and item.status == "done"
+    ]
+
+
+# 多久没动算「没在动」：排队这么久还没开始，或者上一轮结束、心跳断了这么久。
+STALL_AFTER = timedelta(minutes=10)
+
+
+async def stalled_of(
+    session: AsyncSession, rows: list[WorkTask], now: datetime
+) -> dict[int, dict[str, Any]]:
+    """看着在做、其实没在动的事：任务 id → {kind, since}。
+
+    queued：排队很久还没开始（多半是运行时离线或额度用完）；idle：上一轮已经结束、任务却还标着
+    进行中；lost：正在跑的那一轮心跳断了。人盯进展时最怕的就是这三种「看着在做，其实没人在做」。
+    """
+    active = [r for r in rows if r.status in ("in_progress", "waiting")]
+    if not active:
+        return {}
+    runs = await session.scalars(
+        select(WorkTaskRun)
+        .where(WorkTaskRun.work_task_id.in_([r.id for r in active]))
+        .order_by(WorkTaskRun.id)
+    )
+    latest = {run.work_task_id: run for run in runs}
+    live = [run.chat_task_id for run in latest.values() if run.status == "running"]
+    # 只取判断用的三列：这张表的内容列是加密的，不读整行。
+    turns = (
+        {
+            turn_id: (status, heartbeat_at, finished_at)
+            for turn_id, status, heartbeat_at, finished_at in await session.execute(
+                select(Task.id, Task.status, Task.heartbeat_at, Task.finished_at).where(
+                    Task.id.in_(live)
+                )
+            )
+        }
+        if live
+        else {}
+    )
+    out: dict[int, dict[str, Any]] = {}
+    for row in active:
+        kind, since = "", None
+        if row.status == "waiting":
+            if (row.waiting_on or {}).get("kind") == "queue":
+                kind, since = "queued", row.updated_at
+        else:
+            run = latest.get(row.id)
+            if run is None:
+                continue
+            turn = turns.get(run.chat_task_id)
+            if run.status != "running":
+                kind, since = "idle", run.ended_at or run.started_at
+            elif turn is None or turn[0] not in ("queued", "claimed", "running"):
+                kind, since = "idle", (turn[2] if turn else None) or run.started_at
+            elif turn[0] == "running" and turn[1] is not None:
+                kind, since = "lost", turn[1]
+        if kind and since is not None and now - since >= STALL_AFTER:
+            out[row.id] = {"kind": kind, "since": since}
+    return out
 
 
 def _step_note(child: WorkTask, kind: str, asked: list[str], names: dict[str, str]) -> str:
@@ -219,7 +295,7 @@ async def overview(
     session: AsyncSession,
     row: WorkTask,
     children: list[WorkTask],
-    asks: list[WorkTask],
+    tree: list[WorkTask],
     events: list[WorkTaskEvent],
     names: dict[str, str],
     viewer: User | None,
@@ -228,8 +304,16 @@ async def overview(
 
     分类用 `progress.step_kind`，和进展卡一致；这里给结构化的数据，时间由页面按看的人的时区画。
     """
+    asks = open_asks(tree)
     steps = [c for c in children if c.status != "shadow"]
     asked = await progress.asked_names(session, steps)
+    stalled = await stalled_of(session, [row, *steps], service.now())
+    # 牵头员工拆步骤时写的阶段（记在「拆出」那一笔上）：同一阶段的步骤在页面上排在一起。
+    phases = {
+        str((e.agent_detail or {}).get("child")): str((e.agent_detail or {}).get("phase") or "")
+        for e in events
+        if e.kind == "subtask"
+    }
     running = [c.id for c in steps if progress.step_kind(c, asked.get(c.id, [])) == "running"]
     latest: dict[int, WorkTaskEvent] = {}
     if running:
@@ -264,10 +348,13 @@ async def overview(
             if said_last
             else _step_note(child, kind, asked.get(child.id, []), names),
             "note_at": said_last.created_at if said_last else None,
+            "phase": phases.get(child.code, ""),
+            # 看着在做、其实没在动：{kind: queued|idle|lost, since}，没有就是 None。
+            "stalled": stalled.get(child.id) if kind == "running" else None,
         }
         if question:
-            # 待答的问题画在「要人定的」里；答过的进「已完成」。
-            if kind in ("done", "cancelled"):
+            # 待答的问题画在「要人定的」里，答过的在「定过的事」里；只有不用答了的留在这张清单上。
+            if kind == "cancelled":
                 finished.append(item)
             continue
         if kind == "cancelled":
@@ -299,6 +386,7 @@ async def overview(
     spoken = [e for e in events if e.kind == "progress" and e.human_text]
     return {
         "state": state,
+        "stalled": stalled.get(row.id) if not closed and not doing else None,
         "steps_done": steps_done,
         "steps_total": steps_total,
         "asks": [
@@ -307,7 +395,9 @@ async def overview(
         "doing": doing,
         "plan": plan,
         "done": finished,
-        "followups": await progress.followups(session, row) if row.status == "done" else [],
+        # 交付后还要人处理的事，每件带上办没办；人定过的事整棵子树都算。
+        "followups": await progress.followup_items(session, row) if row.status == "done" else [],
+        "decisions": decisions_of(tree, names),
         "latest": (
             {
                 "text": spoken[-1].human_text,
@@ -346,8 +436,9 @@ async def detail(session: AsyncSession, row: WorkTask, user: User | None) -> dic
         )
     )
     decision = await session.get(GroupObserveDecision, row.decision_id) if row.decision_id else None
-    asks = await open_asks(session, row)
-    bots, users = ids_of([row, *children, *asks])
+    tree = await subtree(session, row)
+    bots, users = ids_of([row, *children, *open_asks(tree)])
+    users |= {t.assignee_user_id for t in tree if t.assignee_user_id and progress.is_question(t)}
     bots |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "bot" and e.actor_id}
     bots |= {r.bot_id for r in runs if r.bot_id}
     users |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "human" and e.actor_id}
@@ -369,7 +460,7 @@ async def detail(session: AsyncSession, row: WorkTask, user: User | None) -> dic
         "watchers": [{"id": str(i), "name": names.get(str(i), "")} for i in watcher_ids],
         "parent": {"code": parent.code, "title": parent.title} if parent else None,
         "children": children_out,
-        "overview": await overview(session, row, children, asks, events, names, user),
+        "overview": await overview(session, row, children, tree, events, names, user),
         "events": [
             {
                 "id": e.id,
