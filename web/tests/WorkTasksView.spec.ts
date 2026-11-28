@@ -38,9 +38,12 @@ vi.mock('@/api/workTasks', () => ({
     list: vi.fn().mockResolvedValue({ items: [task, asked], counts: { todo: 2 }, needs_me: 2 }),
     get: vi.fn().mockResolvedValue({
       ...task,
+      related_codes: ['T-5'],
+      linked: { 'T-5': { title: '算上上周退货率', status: 'done' }, 'T-9': { title: '拉退货明细', status: 'in_progress' } },
       watching: false, watchers: [], parent: null, children: [],
       events: [
         { id: 1, kind: 'created', actor_type: 'human', actor_name: '李雷', human_text: '李雷建了任务', agent_detail: { brief: '口径按退货单数除以签收单数' }, created_at: '2026-11-02T00:00:00Z' },
+        { id: 3, kind: 'subtask', actor_type: 'bot', actor_name: '数据助手', human_text: '拆出 T-9：拉退货明细', agent_detail: {}, created_at: '2026-11-02T00:00:00Z' },
         { id: 2, kind: 'started', actor_type: 'bot', actor_name: '数据助手', human_text: '', agent_detail: { tool: 'query' }, created_at: '2026-11-02T00:00:00Z' },
       ],
       agent: { brief: '统计上周退货率，口径按退货单数除以签收单数', digest: '', report: '总结论：退货率 4.2%', waiting_on: null, runs: [], decision: null },
@@ -123,6 +126,24 @@ describe('WorkTasksView', () => {
     const layer = drawer.querySelector('[data-test="agent-layer"]')
     expect(layer?.querySelector('.el-collapse-item.is-active')).toBeNull()
     expect(layer?.querySelector('[data-test="agent-report"]')?.textContent).toContain(i18n.global.t('workTasks.report'))
+  })
+
+  it('links task codes in related and in the text, each with its status icon', async () => {
+    const router = makeRouter()
+    await router.push('/work-tasks/T-7')
+    mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
+    await flushPromises()
+    const links = [...document.body.querySelectorAll<HTMLAnchorElement>('[data-test="task-code"]')]
+    const related = links.find(a => a.textContent?.includes('T-5'))
+    expect(related?.getAttribute('href')).toBe('/work-tasks/T-5')
+    expect(related?.querySelector('[data-status="done"]')).not.toBeNull()
+    // 时间线里提到的子任务可点，进行中的转圈。
+    const mentioned = links.find(a => a.textContent?.includes('T-9'))
+    expect(mentioned?.getAttribute('href')).toBe('/work-tasks/T-9')
+    expect(mentioned?.querySelector('.is-loading[data-status="in_progress"]')).not.toBeNull()
+    expect(mentioned?.getAttribute('title')).toContain('拉退货明细')
+    // 任务自己的编号不变成链接。
+    expect(links.some(a => a.textContent?.trim() === 'T-7')).toBe(false)
   })
 
   it('shows stats: backlog, sources and the first-pass rate', async () => {

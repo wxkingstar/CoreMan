@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -227,6 +228,24 @@ async def _load(session: AsyncSession, code: str, *, lock: bool = False) -> Work
     return row
 
 
+# 前后可以紧挨中文（「做T-7」），不能是别的编号的一部分。
+_CODE = re.compile(r"(?<![A-Za-z0-9_-])T-\d+(?!\d)")
+
+
+async def _linked(session: AsyncSession, row: WorkTask, texts: list[str]) -> dict[str, Any]:
+    """页面上出现的任务编号（相关任务、上级、正文里提到的）→ 标题和状态：编号可点、旁边标状态。"""
+    codes = set(row.related_codes or [])
+    for text in texts:
+        codes |= set(_CODE.findall(text or ""))
+    codes.discard(row.code)
+    if not codes:
+        return {}
+    found = await session.execute(
+        select(WorkTask.code, WorkTask.title, WorkTask.status).where(WorkTask.code.in_(codes))
+    )
+    return {c: {"title": t, "status": s} for c, t, s in found.all()}
+
+
 async def _detail(session: AsyncSession, row: WorkTask, user: User) -> dict[str, Any]:
     events = list(
         await session.scalars(
@@ -258,12 +277,22 @@ async def _detail(session: AsyncSession, row: WorkTask, user: User) -> dict[str,
     users |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "human" and e.actor_id}
     users |= watcher_ids
     names = await _names(session, bots, users)
+    out = task_out(row, names, user)
+    texts = [out["now"], row.summary, *(e.human_text for e in events)]
+    children_out = [task_out(c, names, user) for c in children]
+    texts += [c["now"] for c in children_out]
+    linked = await _linked(session, row, texts)
+    if parent:
+        linked[parent.code] = {"title": parent.title, "status": parent.status}
+    for c in children:
+        linked[c.code] = {"title": c.title, "status": c.status}
     return {
-        **task_out(row, names, user),
+        **out,
+        "linked": linked,
         "watching": user.id in watcher_ids,
         "watchers": [{"id": str(i), "name": names.get(str(i), "")} for i in watcher_ids],
         "parent": {"code": parent.code, "title": parent.title} if parent else None,
-        "children": [task_out(c, names, user) for c in children],
+        "children": children_out,
         "events": [
             {
                 "id": e.id,
