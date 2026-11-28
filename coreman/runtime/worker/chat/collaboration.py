@@ -188,7 +188,10 @@ async def configure(
     # Keep only a capability entry point in the system prompt. No peer catalog is loaded here.
     # 不用配置伙伴：还有别的飞书 AI 员工可能被求助就挂上入口；在不在这个群、
     # 发起人能不能用，由搜索与登记时检查，开流前不逐个问飞书。
-    peers = intake.chat_type == "group" and await session.scalar(
+    # 任务会话里要别的员工配合就拆子任务（任务平台的工具，要求和结果都走任务、不在群里出声）：
+    # 不再挂在群里求助的入口，免得同一件事有两条路、选到在群里刷全文的那条。
+    in_task = intake.session_key.startswith("work:")
+    peers = (intake.chat_type == "group" and not in_task) and await session.scalar(
         select(Bot.id)
         .where(
             Bot.id != intake.bot.id,

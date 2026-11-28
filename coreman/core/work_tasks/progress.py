@@ -24,8 +24,8 @@ from coreman.core.work_tasks.service import clip, name_of
 
 ASK_PREFIX = "[问题]"
 LINE_MAX = 120
-# 一张卡上最多列这么多件：再多就只说还有几件，细的去任务页看。
-MAX_LINES = 12
+# 做完的事最多列这么多件（最近的）：再早的只说还有几件，细的去任务页看。
+MAX_DONE = 8
 
 
 def _key(root: WorkTask) -> str:
@@ -70,7 +70,9 @@ async def _line(session: AsyncSession, child: WorkTask, asked: list[str]) -> tup
     if is_question(child):
         question = child.title.removeprefix("问：")
         if child.status == "done":
-            return f"✅ {who} 已回答：{question}", "done"
+            # 回答写在后面：群里的人要知道定了什么，不只是「答过了」。
+            answer = f" → {child.summary}" if child.summary else ""
+            return f"✅ {who} 定了：{question}{answer}", "done"
         if child.status == "cancelled":
             return f"⏹ 不用{who}回答了：{question}", "cancelled"
         return f"🟡 等 **{who}** 回答：{question}", "waiting_human"
@@ -145,10 +147,20 @@ async def card(session: AsyncSession, root: WorkTask, base_url: str) -> dict[str
         state, template = "等人处理", "orange"
     else:
         state, template = "进行中", "blue"
-    shown = lines[-MAX_LINES:]
-    body = "\n".join(shown)
-    if len(lines) > len(shown):
-        body = f"前面还有 {len(lines) - len(shown)} 件，见任务页\n" + body
+    # 先写现在的事（等人的排最前，再是在做的），做完的收在下面：打开卡先看到卡在哪、谁在做。
+    current = [t for t, k in zip(lines, kinds, strict=True) if k == "waiting_human"] + [
+        t for t, k in zip(lines, kinds, strict=True) if k == "running"
+    ]
+    finished = [t for t, k in zip(lines, kinds, strict=True) if k in ("done", "cancelled")]
+    shown = finished[-MAX_DONE:]
+    blocks: list[str] = []
+    if current:
+        blocks.append("\n".join(current))
+    if shown:
+        earlier = len(finished) - len(shown)
+        head = "**已完成**" + (f"（更早的 {earlier} 件见任务页）" if earlier else "")
+        blocks.append("\n".join([head, *shown]) if current or earlier else "\n".join(shown))
+    body = "\n\n".join(blocks)
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": body}]
     if root.status == "done" and root.summary:
         elements.append({"tag": "markdown", "content": f"**结果：**{root.summary}"})
