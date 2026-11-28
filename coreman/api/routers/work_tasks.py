@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +33,7 @@ from coreman.core.db.models import (
     WorkTaskRun,
     WorkTaskWatcher,
 )
-from coreman.core.work_tasks import execute, flow, service
+from coreman.core.work_tasks import execute, flow, markdown, service
 from coreman.core.work_tasks.service import Assignee, WorkTaskError
 
 router = APIRouter(
@@ -503,15 +504,20 @@ async def work_task_stats(
     }
 
 
-@router.get("/{code}")
+@router.get("/{code}", response_model=None)
 async def get_work_task(
     code: str,
+    format: Literal["json", "md"] = Query("json"),
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
+) -> dict[str, Any] | PlainTextResponse:
     _active(user)
     row = await _load(session, code)
-    return {"code": 0, "data": await _detail(session, row, user)}
+    data = await _detail(session, row, user)
+    if format == "md":
+        # 给 AI 读的纯文本：没有页面样式和按钮，只有内容。
+        return PlainTextResponse(markdown.render(data), media_type="text/markdown; charset=utf-8")
+    return {"code": 0, "data": data}
 
 
 # ---- 操作 ----------------------------------------------------------------------------------

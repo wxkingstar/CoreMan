@@ -48,7 +48,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { getLocale, setLocale, type Locale } from '@/i18n'
 import { DISPLAY_ZONES, displayZone, setDisplayZone } from '@/utils/displayZone'
 import { useAuthStore } from '@/stores/auth'
-import { viewKey } from '@/router/viewKey'
 const { t } = useI18n()
 const auth = useAuthStore(), router = useRouter(), route = useRoute()
 const locale = ref<Locale>(getLocale())
@@ -212,7 +211,7 @@ async function logout() { await auth.logout(); await router.push({ name: 'login'
         id="main-content"
         tabindex="-1"
       >
-        <router-view :key="viewKey(route)" />
+        <router-view :key="route.path" />
       </el-main>
     </el-container>
     <el-drawer

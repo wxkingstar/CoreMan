@@ -84,6 +84,9 @@ export const workTasks = {
       http.get(base, { params }),
     ),
   get: (code: string) => call<WorkTaskDetail>(http.get(one(code))),
+  /** 给 AI 读的纯文本（Markdown）版。 */
+  markdown: async (code: string): Promise<string> =>
+    (await http.get<string>(one(code), { params: { format: 'md' }, responseType: 'text' })).data,
   stats: (days = 30) => call<WorkTaskStats>(http.get(`${base}/stats`, { params: { days } })),
   create: (body: WorkTaskCreate) => call<WorkTaskDetail>(http.post(base, body)),
   assign: (code: string, body: { assignee: AssigneeIn; note?: string; review_required?: boolean | null }) =>

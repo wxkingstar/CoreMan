@@ -362,3 +362,28 @@ async def test_detail_lists_status_of_every_task_code_on_the_page(
         child.code: {"title": "拉退货明细", "status": "in_progress"},
         mentioned.code: {"title": "重推单据", "status": "waiting"},
     }
+
+
+async def test_detail_as_markdown_for_ai(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    task = await _seed(db_session)
+    child = WorkTask(title="拉退货|明细", status="done", requester_name="李雷", parent_id=task.id)
+    db_session.add(child)
+    await db_session.commit()
+    await login_as(client, db_session, role="member")
+    resp = await client.get(f"/api/admin/work-tasks/{task.code}", params={"format": "md"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/markdown")
+    text = resp.text
+    assert text.startswith(f"# {task.code} 查上周退货率\n")
+    assert "- 状态：试运行" in text
+    assert "- 执行人：销售（AI）" in text
+    assert "## 子任务" in text
+    assert f"| {child.code} | 拉退货\\|明细 | 已完成 |" in text
+    assert "## 交给 AI 员工的背景\n\n口径按退货单数除以签收单数" in text
+    assert "销售：试运行：调度员会交给销售" in text
+    assert '细节：{"reason":"数据问题"}' in text
+    assert "退货率?" in text
+    bad = await client.get(f"/api/admin/work-tasks/{task.code}", params={"format": "x"})
+    assert bad.status_code in (400, 422)
