@@ -410,7 +410,8 @@ class OpenStage(ChatStageBase):
             bot_key=bot.bot_key,
             platform=bot.platform,
             chat_id=intake.chat_id,
-            chat_type=intake.chat_type,
+            # 单人群按私聊：运行节点只在 single / cron 时挂本人飞书工具（驱动的兜底检查）。
+            chat_type="single" if intake.solo else intake.chat_type,
             platform_user_id=intake.speaker.platform_user_id,
             session_id=str(info.relay_session_id),
             speaker=intake.speaker,

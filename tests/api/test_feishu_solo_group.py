@@ -240,6 +240,9 @@ async def test_the_whole_turn_runs_as_a_private_chat(db_session, app, db_engine,
     request = fake.requests[0]
     system = request["messages"][0]["content"]
     assert "# 本人飞书" in system and "# 群里的飞书文档" not in system
+    # 运行节点只在 single / cron 时挂本人飞书工具（驱动的兜底检查）：单人群要传 single。
+    assert request["env_vars"]["COREMAN_CHAT_TYPE"] == "single"
+    assert request["env_vars"]["COREMAN_CHAT_ID"] == "oc_group"
     assert "按私聊处理" in request["messages"][-1]["content"]
     assert request["env_vars"][policy.PREFIX + "TOKEN"]
     assert docs_policy.PREFIX + "TOKEN" not in request["env_vars"]
@@ -269,6 +272,7 @@ async def test_the_whole_turn_in_a_shared_group_keeps_group_rules(
     request = fake.requests[0]
     system = request["messages"][0]["content"]
     assert "# 本人飞书" not in system and "# 群里的飞书文档" in system
+    assert request["env_vars"]["COREMAN_CHAT_TYPE"] == "group"
     assert "按私聊处理" not in request["messages"][-1]["content"]
     assert policy.PREFIX + "TOKEN" not in request["env_vars"]
     log = (await db_session.scalars(select(ChatLog).where(ChatLog.task_id == task.id))).one()
