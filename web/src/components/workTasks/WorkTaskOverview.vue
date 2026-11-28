@@ -472,7 +472,7 @@ async function copyDrive(): Promise<void> {
                 <span>{{ t('workTasks.overview.answer') }}{{ item.answer }}</span>
               </div>
             </div>
-            <span class="c-side">{{ item.by }}<template v-if="item.at"> {{ formatClock(item.at, now) }}</template></span>
+            <span class="c-side side-pair"><span>{{ item.by }}</span><span v-if="item.at">{{ formatClock(item.at, now) }}</span></span>
           </li>
         </ul>
       </section>
@@ -624,6 +624,7 @@ async function copyDrive(): Promise<void> {
   grid-column: 1 / -1; list-style: none; margin: 8px 0 0; padding: 0 0 2px;
   font-size: 13px; color: var(--el-text-color-secondary); border-bottom: 1px solid var(--el-border-color-lighter);
 }
+.side-pair { display: inline-flex; gap: 8px; }
 .row.more { cursor: pointer; }
 .more-link { color: var(--el-color-primary); font-size: 13px; }
 /* 待办的小方框：和上面状态图标一样大、站在同一列。 */

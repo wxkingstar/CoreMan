@@ -525,7 +525,7 @@ export default {
       states: { need_human: '等人处理', running: '进行中', todo: '待开始', done: '已完成', cancelled: '已取消', shadow: '试运行' },
       doneWithFollowups: '已完成，还有 {n} 件事要人处理', progress: '做完 {done} / 共 {total} 步',
       latestBy: '{name} {at} 更新', latestAt: '{at} 更新', goal: '目标', result: '结果', followups: '还要人处理', needYou: '现在要你定', needOthers: '在等人定',
-      stalled: { queued: '排队 {d} 了还没开始，可能是运行时离线或额度用完', idle: '上一轮结束 {d} 了，没有接着做', lost: '运行可能中断了，{d}没有动静' },
+      stalled: { queued: '已经排队 {d}，还没开始，可能是运行时离线或额度用完', idle: '上一轮已经结束 {d}，没有接着做', lost: '运行可能中断了：已经 {d}没有动静' },
       earlier: '更早的 {n} 步', fewer: '只看最近几步', noPhase: '其他',
       decisions: '定过的事', asTask: '建成任务', doneBy: '{name}办了', turnedInto: '已建成',
       waitingAnswer: '等{name}回答：', doing: '正在做', next: '接下来', finished: '已完成', decided: '{name} 定了：', answer: '答：',
