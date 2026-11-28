@@ -78,14 +78,23 @@ async def test_agent_lists_and_claims_tasks_as_the_principal(
     assert [i["code"] for i in items] == [second.code, first.code]
     assert items[0]["from"] == "alice" and items[0]["waiting_to_be_claimed"] is True
 
-    # 代表人没私聊过这位员工：没处回报，领取失败并说明原因。
+    # 代表人没有飞书身份：没法以他的身份做，领取失败并说明原因。
+    response = await client.post(
+        URL, json=_call("start_task", {"codes": [second.code]}), headers=auth
+    )
+    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+    assert result["started"] is False and "没有飞书身份" in result["reason"]
+
+    # 有飞书身份、还没私聊过这位员工：照样能领，这一轮不出声，结果记在任务上。
     db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_a"))
     await db_session.commit()
     response = await client.post(
-        URL, json=_call("start_task", {"codes": [first.code]}), headers=auth
+        URL, json=_call("start_task", {"codes": [second.code]}), headers=auth
     )
     result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
-    assert result["started"] is False and "私聊" in result["reason"]
+    assert result["started"] is True
+    quiet = await db_session.scalar(select(Task).where(Task.session_key == f"work:{second.code}"))
+    assert quiet.payload["work_silent"] is True
 
     db_session.add(UserReached(bot_id=bot.id, user_id=alice.id, platform_chat_id="oc_dm"))
     await db_session.commit()
