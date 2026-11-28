@@ -34,6 +34,8 @@ export interface WorkTask {
 export interface WorkTaskEvent {
   id: number; kind: string; actor_type: 'human' | 'bot' | 'system'; actor_name: string
   human_text: string; agent_detail: Record<string, unknown>; created_at: string
+  /** 给人看的里程碑；其余是 AI 员工的流水，「经过」里默认不显示。 */
+  milestone: boolean
 }
 export interface WorkTaskRun {
   id: number; bot: WorkTaskBot | null; trigger: string; triggered_by: Record<string, unknown>

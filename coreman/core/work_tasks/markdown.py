@@ -1,6 +1,6 @@
 """任务详情的纯文本（Markdown）版：给 AI 读，去掉页面样式和按钮，只留内容。
 
-输入是任务详情接口返回的那份数据（见 coreman/api/routers/work_tasks.py 的 _detail）。
+输入是任务详情接口返回的那份数据（见 view.detail）。内容全给、不截断，只去掉页面样式和按钮。
 """
 
 from __future__ import annotations

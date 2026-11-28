@@ -110,10 +110,13 @@ async def test_agent_lists_and_claims_tasks_as_the_principal(
     result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
     assert result["started"] is False
 
+    # 读任务回的是任务页 ?format=md 那份纯文本，不是 JSON。
     response = await client.post(URL, json=_call("get_task", {"code": first.code}), headers=auth)
-    task = json.loads(response.json()["result"]["content"][0]["text"])
-    assert task["for_agents"]["brief"] == "口径按退货单数除以签收单数"
-    assert any("叫销售开工" in line for line in task["for_people"]["timeline"])
+    text = response.json()["result"]["content"][0]["text"]
+    assert response.json()["result"]["isError"] is False
+    assert text.startswith(f"# {first.code} 查上周退货率\n")
+    assert "## 交给 AI 员工的背景\n\n口径按退货单数除以签收单数" in text
+    assert "叫销售开工" in text
 
 
 async def test_capability_dies_with_the_turn(
@@ -173,21 +176,31 @@ async def test_only_people_who_can_manage_the_task_can_start_it_and_reads_stay_o
     assert queued.payload["work_note"] == "权限开好了"
 
 
-async def test_get_task_only_reads_the_agents_own_tasks(
+async def test_get_task_reads_any_task_when_a_person_asks(
     client: httpx.AsyncClient, app, db_session: AsyncSession
 ) -> None:
+    """有人把任务链接甩给它：成员在任务页上看得到所有任务，它也能读；没人叫它时只读自己的。"""
     bot, alice, turn, _, _ = await _setup(db_session)
-    mine = await service.create(db_session, alice, title="别人的事")
+    other = await service.create(db_session, alice, title="别人的事")
     await db_session.commit()
-    token = tools.issue_capability(
-        app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=alice.id, kind="chat"
-    )
-    response = await client.post(
-        URL,
-        json=_call("get_task", {"code": mine.code}),
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert json.loads(response.json()["result"]["content"][0]["text"])["error"] == "not_found"
+
+    async def read(actor_id):
+        token = tools.issue_capability(
+            app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=actor_id, kind="chat"
+        )
+        response = await client.post(
+            URL,
+            json=_call("get_task", {"code": other.code}),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return response.json()["result"]
+
+    asked = await read(alice.id)
+    assert asked["isError"] is False
+    assert asked["content"][0]["text"].startswith(f"# {other.code} 别人的事")
+    alone = await read(None)
+    assert alone["isError"] is True
+    assert json.loads(alone["content"][0]["text"])["error"] == "not_found"
 
 
 async def test_tools_refuse_a_cancelled_task(

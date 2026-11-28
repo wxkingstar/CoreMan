@@ -78,6 +78,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         ):
             return mcp_rpc.error(rid, -32602, "Invalid params")
         name, arguments = params["name"], params.get("arguments", {})
+        value: dict[str, Any] | str
         if name in agent_tools.NAMES:
             value = (
                 await agent_tools.invoke(
@@ -95,9 +96,10 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         else:
             value = await tools.invoke(session, capability, bot, name, arguments)
         await session.commit()
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         result = {
-            "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
-            "isError": "error" in value,
+            "content": [{"type": "text", "text": text}],
+            "isError": not isinstance(value, str) and "error" in value,
         }
     else:
         return mcp_rpc.error(rid, -32601, "Method not found")
