@@ -606,7 +606,17 @@ def _forget_cards():
     group_observe._CARDS.clear()
 
 
-async def say_card(session, bot, mid):
+# 飞书实际给的骨架：占位旁边有头像图片和一个空文字，卡片有标题时标题也在。
+def real_skeleton(title):
+    row = [
+        {"tag": "img", "image_key": "img_v3_avatar"},
+        {"tag": "text", "text": UPGRADE_PLACEHOLDER},
+        {"tag": "text", "text": ""},
+    ]
+    return {"title": title, "elements": [row]}
+
+
+async def say_card(session, bot, mid, skeleton=CARD_SKELETON):
     raw = {
         "event": {
             "message": {
@@ -614,7 +624,7 @@ async def say_card(session, bot, mid):
                 "chat_id": CHAT,
                 "chat_type": "group",
                 "message_type": "interactive",
-                "content": json.dumps(CARD_SKELETON, ensure_ascii=False),
+                "content": json.dumps(skeleton, ensure_ascii=False),
             }
         }
     }
@@ -706,6 +716,28 @@ async def test_a_card_missing_from_the_archive_is_read_back_from_feishu(db_sessi
     assert again.text == "接口对齐\nsku_id 用字符串" and len(calls) == 1
 
 
+@pytest.mark.parametrize("title", [None, "接口对齐"], ids=["untitled", "titled"])
+async def test_the_skeleton_feishu_really_sends_is_read_back_too(db_session, monkeypatch, title):
+    bot = await with_feishu_app(db_session, await observing_bot(db_session))
+    ops = await another_observing_bot(db_session, bot, "ops_bot", "运维")
+    await say_card(db_session, bot, "om_card", real_skeleton(title))
+    await say_card(db_session, bot, "om_archived", real_skeleton(title))
+    db_session.add(
+        FeishuSentMessage(bot_id=ops.id, message_id="om_archived", chat_id=CHAT, text="存档里的")
+    )
+    await db_session.commit()
+    calls = serve_messages(monkeypatch, api_card("om_card", CARD_2))
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    # 骨架渲染出来不是空的（头像图片、标题），仍然要认作没读到正文的卡片。
+    assert [(UPGRADE_PLACEHOLDER in line.text, line.unread_card) for line in lines] == [
+        (True, "om_card"),
+        (False, None),
+    ]
+    lines = await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert [line.text for line in lines] == ["接口对齐\nsku_id 用字符串", "存档里的"]
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     "served",
     [
@@ -715,9 +747,19 @@ async def test_a_card_missing_from_the_archive_is_read_back_from_feishu(db_sessi
         {"items": [api_card("om_card", CARD_2, chat_id="oc_other")]},
         {"items": [api_card("om_card", CARD_2, deleted=True)]},
         {"items": [api_card("om_card", CARD_SKELETON)]},
+        {"items": [api_card("om_card", real_skeleton("接口对齐"))]},
         {"items": []},
     ],
-    ids=["no_permission", "timeout", "crash", "other_chat", "recalled", "placeholder", "none"],
+    ids=[
+        "no_permission",
+        "timeout",
+        "crash",
+        "other_chat",
+        "recalled",
+        "placeholder",
+        "titled_placeholder",
+        "none",
+    ],
 )
 async def test_a_card_that_cannot_be_read_back_keeps_its_placeholder(
     db_session, monkeypatch, served

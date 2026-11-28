@@ -14,6 +14,7 @@ message_id 查发出消息的存档（同平台 AI 员工发的都在），查�
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
@@ -39,7 +40,7 @@ from coreman.core.db.models import (
 )
 from coreman.core.logging import get_logger
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
-from coreman.core.platforms.feishu_content import mention_names, render
+from coreman.core.platforms.feishu_content import UPGRADE_PLACEHOLDER, mention_names, render
 from coreman.core.wecom.messages import InboundMessage
 
 # 入站时先按默认安静时长排队，worker 到点再按管理台设置决定是否再等。
@@ -331,10 +332,32 @@ def _unread_card(payload: dict[str, Any] | None) -> str | None:
     message = _event_message(payload)
     if message.get("message_type") != "interactive":
         return None
-    if render("interactive", message.get("content")) is not None:
+    content = message.get("content")
+    if not _degraded(content) and render("interactive", content) is not None:
         return None
     mid = message.get("message_id")
     return mid if isinstance(mid, str) and _MESSAGE_ID.fullmatch(mid) else None
+
+
+def _degraded(content: object) -> bool:
+    """卡片内容是 Card JSON 2.0 的降级骨架：某一行里有那句占位。
+
+    真实骨架里占位旁边还有头像图片，卡片有标题时标题也在，渲染出来不是空的，不能按
+    「渲染不出文字」来认。
+    """
+    if isinstance(content, str):
+        if len(content) > 256_000:
+            return False
+        try:
+            content = json.loads(content)
+        except ValueError:
+            return False
+    rows = content.get("elements") if isinstance(content, dict) else None
+    return any(
+        isinstance(node, dict) and node.get("text") == UPGRADE_PLACEHOLDER
+        for row in (rows if isinstance(rows, list) else [])[:200]
+        for node in (row if isinstance(row, list) else [])[:100]
+    )
 
 
 async def _archived_cards(
@@ -449,12 +472,11 @@ def _card_text(body: object, chat_id: str, message_id: str) -> str | None:
         return None
     if item.get("msg_type") != "interactive":
         return None
-    content = item.get("body")
-    rendered = render(
-        "interactive",
-        content.get("content") if isinstance(content, dict) else None,
-        names=mention_names(item.get("mentions")),
-    )
+    inner = item.get("body")
+    content = inner.get("content") if isinstance(inner, dict) else None
+    if _degraded(content):
+        return None
+    rendered = render("interactive", content, names=mention_names(item.get("mentions")))
     return (rendered.text() if rendered else "") or None
 
 
