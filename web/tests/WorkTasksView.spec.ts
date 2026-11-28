@@ -230,6 +230,23 @@ describe('WorkTasksView', () => {
     wrapper.unmount()
   })
 
+  it('calls the one-liner the result once the work is delivered and waiting for review', async () => {
+    const full = await vi.mocked(workTasks.get)('T-7')
+    vi.mocked(workTasks.get).mockResolvedValueOnce({
+      ...full, status: 'review', needs_drive: false, summary: '上周退货率 4.2%，比前一周低 0.3 个点', now: '等李雷验收',
+      overview: { ...full.overview, asks: [], doing: [], plan: [] },
+    })
+    const router = makeRouter()
+    await router.push('/work-tasks/T-7')
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    const goal = wrapper.find('[data-test="overview-goal"]')
+    expect(goal.find('h4').text()).toBe(i18n.global.t('workTasks.overview.result'))
+    // 结果是这时最要紧的一句；交付前的那句进展不再摆在上面。
+    expect(goal.find('p.lead').text()).toContain('上周退货率 4.2%')
+    expect(wrapper.find('[data-test="overview-latest"]').exists()).toBe(false)
+  })
+
   it('starts a new task for an AI employee right away unless told to leave it', async () => {
     const created = await vi.mocked(workTasks.get)('T-7')
     vi.mocked(workTasks.create).mockResolvedValue({ ...created, start_error: '请他先私聊「数据助手」一次' } as never)
