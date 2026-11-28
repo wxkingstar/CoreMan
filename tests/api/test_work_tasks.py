@@ -503,9 +503,23 @@ async def test_stats_show_backlog_and_first_pass_rate(
             "/api/admin/work-tasks",
             json={"title": title, "assignee": {"type": "human", "id": str(bob.id)}},
         )
+    # 自动记下的记录不算进积压，按来源那张表里单独标出来。
+    db_session.add(
+        WorkTask(
+            title="求助：库存口径",
+            status="in_progress",
+            source="collaboration",
+            origin_ref="bot_help:9",
+            assignee_user_id=bob.id,
+        )
+    )
+    await db_session.commit()
     stats = (await client.get("/api/admin/work-tasks/stats", params={"days": 7})).json()["data"]
     assert stats["backlog"][0]["assignee"]["name"] == "bob" and stats["backlog"][0]["open"] == 2
-    assert {s["source"]: s["created"] for s in stats["by_source"]} == {"web": 2}
+    assert {s["source"]: (s["created"], s["record"]) for s in stats["by_source"]} == {
+        "web": (2, False),
+        "collaboration": (1, True),
+    }
     assert stats["agent_first_pass_rate"] is None
 
 

@@ -240,7 +240,8 @@ async def work_task_stats(
                 func.count(),
                 func.count().filter(WorkTask.due_at < func.now()),
             )
-            .where(WorkTask.status.in_(WORK_TASK_OPEN))
+            # 积压只算人和 AI 员工手上的事：自动记下的接口任务、求助记录不算，免得把数字拉歪。
+            .where(WorkTask.status.in_(WORK_TASK_OPEN), WorkTask.origin_ref.is_(None))
             .group_by(WorkTask.assignee_bot_id, WorkTask.assignee_user_id)
             .order_by(func.count().desc())
             .limit(20)
@@ -330,6 +331,8 @@ async def work_task_stats(
             "by_source": [
                 {
                     "source": source,
+                    # 自动记下的记录（接口任务、求助）：页面上和人建的事分开列。
+                    "record": source in ("api", "collaboration"),
                     "created": int(total),
                     "done": int(done),
                     "avg_hours": round(float(avg), 1) if avg is not None else None,

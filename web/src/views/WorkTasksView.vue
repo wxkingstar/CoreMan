@@ -254,7 +254,7 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
           />
         </div>
         <h4>{{ t('workTasks.statBySource', { days: stats.days }) }}</h4>
-        <el-table :data="stats.by_source">
+        <el-table :data="stats.by_source.filter(row => !row.record)">
           <el-table-column :label="t('workTasks.source')">
             <template #default="{ row }">
               {{ t(`workTasks.sources.${row.source}`, row.source) }}
@@ -274,6 +274,32 @@ function show(row: WorkTask, _column?: unknown, event?: Event): void {
             </template>
           </el-table-column>
         </el-table>
+        <template v-if="stats.by_source.some(row => row.record)">
+          <h4>{{ t('workTasks.statRecords') }}</h4>
+          <el-table
+            :data="stats.by_source.filter(row => row.record)"
+            data-test="stats-records"
+          >
+            <el-table-column :label="t('workTasks.source')">
+              <template #default="{ row }">
+                {{ t(`workTasks.sources.${row.source}`, row.source) }}
+              </template>
+            </el-table-column>
+            <el-table-column
+              :label="t('workTasks.statCreated')"
+              prop="created"
+            />
+            <el-table-column
+              :label="t('workTasks.statDone')"
+              prop="done"
+            />
+            <el-table-column :label="t('workTasks.statAvgHours')">
+              <template #default="{ row }">
+                {{ row.avg_hours ?? '—' }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
         <h4>{{ t('workTasks.statBacklog') }}</h4>
         <el-table :data="stats.backlog">
           <el-table-column :label="t('workTasks.assignee')">

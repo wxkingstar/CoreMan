@@ -13,7 +13,7 @@ import WorkTaskAsk from './WorkTaskAsk.vue'
 import WorkTaskCode from './WorkTaskCode.vue'
 import WorkTaskStatusIcon from './WorkTaskStatusIcon.vue'
 import WorkTaskText from './WorkTaskText.vue'
-import type { WorkTaskDetail, WorkTaskStep } from '@/api/workTasks'
+import type { WorkTaskDetail, WorkTaskStalled, WorkTaskStep } from '@/api/workTasks'
 import { formatClock } from '@/utils/format'
 
 const props = defineProps<{ detail: WorkTaskDetail }>()
@@ -98,6 +98,28 @@ function elapsed(from: string): string {
 function took(step: WorkTaskStep): string {
   return step.closed_at ? t('workTasks.overview.took', { d: duration(step.since, step.closed_at) }) : ''
 }
+function stalledText(stalled: WorkTaskStalled): string {
+  return t(`workTasks.overview.stalled.${stalled.kind}`, { d: duration(stalled.since, now.value) })
+}
+/**
+ * 牵头员工给步骤写了阶段时，同一阶段的排在一起，每个阶段前面一行小标题；都没写就照原来的顺序。
+ */
+function withHeads(steps: WorkTaskStep[]): { step: WorkTaskStep; head: string }[] {
+  if (!steps.some(step => step.phase)) return steps.map(step => ({ step, head: '' }))
+  const order: string[] = []
+  for (const step of steps) if (!order.includes(step.phase || '')) order.push(step.phase || '')
+  return order.flatMap(phase => steps
+    .filter(step => (step.phase || '') === phase)
+    .map((step, index) => ({ step, head: index === 0 ? (phase || t('workTasks.overview.noPhase')) : '' })))
+}
+// 已完成的步骤多了只列最近几步，更早的点一下再展开：办了十几步的事不至于一上来就是一面墙。
+const RECENT_DONE = 5
+const allDone = ref(false)
+const hiddenDone = computed(() =>
+  allDone.value || view.value.done.length <= RECENT_DONE + 1 ? 0 : view.value.done.length - RECENT_DONE,
+)
+const doingRows = computed(() => withHeads(view.value.doing))
+const doneRows = computed(() => withHeads(hiddenDone.value ? view.value.done.slice(-RECENT_DONE) : view.value.done))
 function open(step: WorkTaskStep): void {
   void router.push({ name: 'work-task', params: { code: step.code } })
 }
@@ -159,6 +181,11 @@ async function copyDrive(): Promise<void> {
         v-if="running"
         class="sub"
       >{{ started(running) }}，{{ elapsed(running) }}</span>
+      <span
+        v-if="view.stalled"
+        class="sub wait"
+        data-test="overview-stalled"
+      >{{ stalledText(view.stalled) }}</span>
       <span
         v-if="detail.needs_drive"
         class="drive-actions"
@@ -333,49 +360,63 @@ async function copyDrive(): Promise<void> {
           {{ t('workTasks.overview.doing') }}<span class="n">{{ view.doing.length }}</span>
         </h4>
         <ul>
-          <li
-            v-for="step in view.doing"
+          <template
+            v-for="{ step, head } in doingRows"
             :key="step.code"
-            class="row"
-            :data-back-key="step.code"
-            data-test="overview-step"
-            @click="open(step)"
           >
-            <WorkTaskCode
-              class="c-code"
-              :code="step.code"
-              :status="step.status"
-              :title="step.title"
-              @click.stop
-            />
-            <div class="c-main">
-              <div class="title-line">
-                <span class="step-title">{{ step.title }}</span>
-                <WorkTaskActor
-                  v-if="step.assignee"
-                  class="who"
-                  :actor="step.assignee"
-                />
+            <li
+              v-if="head"
+              class="phase"
+            >
+              {{ head }}
+            </li>
+            <li
+              class="row"
+              :data-back-key="step.code"
+              data-test="overview-step"
+              @click="open(step)"
+            >
+              <WorkTaskCode
+                class="c-code"
+                :code="step.code"
+                :status="step.status"
+                :title="step.title"
+                @click.stop
+              />
+              <div class="c-main">
+                <div class="title-line">
+                  <span class="step-title">{{ step.title }}</span>
+                  <WorkTaskActor
+                    v-if="step.assignee"
+                    class="who"
+                    :actor="step.assignee"
+                  />
+                </div>
+                <div class="note">
+                  <span
+                    v-if="step.kind === 'waiting_human'"
+                    class="wait"
+                  >{{ step.note }}</span>
+                  <span
+                    v-if="step.stalled"
+                    class="wait"
+                    data-test="step-stalled"
+                  >{{ stalledText(step.stalled) }}</span>
+                  <span v-if="step.status !== 'todo'">{{ started(step.since) }}<span class="narrow-only">，{{ elapsed(step.since) }}</span></span>
+                  <span v-if="step.kind === 'running' && step.note">
+                    <template v-if="step.note_at">{{ t('workTasks.overview.recent') }}</template><WorkTaskText
+                      :text="step.note"
+                      :linked="detail.linked"
+                    /><template v-if="step.note_at">（{{ formatClock(step.note_at, now) }}）</template>
+                  </span>
+                </div>
               </div>
-              <div class="note">
-                <span
-                  v-if="step.kind === 'waiting_human'"
-                  class="wait"
-                >{{ step.note }}</span>
-                <span v-if="step.status !== 'todo'">{{ started(step.since) }}<span class="narrow-only">，{{ elapsed(step.since) }}</span></span>
-                <span v-if="step.kind === 'running' && step.note">
-                  <template v-if="step.note_at">{{ t('workTasks.overview.recent') }}</template><WorkTaskText
-                    :text="step.note"
-                    :linked="detail.linked"
-                  /><template v-if="step.note_at">（{{ formatClock(step.note_at, now) }}）</template>
-                </span>
-              </div>
-            </div>
-            <span
-              v-if="step.status !== 'todo'"
-              class="c-side"
-            >{{ elapsed(step.since) }}</span>
-          </li>
+              <span
+                v-if="step.status !== 'todo'"
+                class="c-side"
+              >{{ elapsed(step.since) }}</span>
+            </li>
+          </template>
         </ul>
       </section>
 
@@ -446,54 +487,71 @@ async function copyDrive(): Promise<void> {
         </h4>
         <ul>
           <li
-            v-for="step in view.done"
-            :key="step.code"
-            class="row"
-            :class="{ cancelled: step.kind === 'cancelled' }"
-            :data-back-key="step.code"
-            data-test="overview-step"
-            @click="open(step)"
+            v-if="hiddenDone || allDone"
+            class="row plain more"
+            data-test="done-more"
+            @click="allDone = !allDone"
           >
-            <WorkTaskCode
-              class="c-code"
-              :code="step.code"
-              :status="step.status"
-              :title="step.title"
-              @click.stop
-            />
-            <div class="c-main">
-              <div class="title-line">
-                <span class="step-title"><template v-if="step.question && step.kind === 'done'">{{ t('workTasks.overview.decided', { name: step.assignee?.name ?? '' }) }}</template>{{ step.title }}</span>
-                <WorkTaskActor
-                  v-if="step.assignee && !step.question"
-                  class="who"
-                  :actor="step.assignee"
-                />
-                <span
-                  v-if="step.kind === 'done' && !step.question && took(step)"
-                  class="who narrow-only"
-                >{{ took(step) }}</span>
-              </div>
-              <div
-                v-if="step.note"
-                class="note"
-                :class="{ answer: step.question }"
-              >
-                <span><template v-if="step.question">{{ t('workTasks.overview.answer') }}</template><WorkTaskText
-                  :text="step.note"
-                  :linked="detail.linked"
-                /></span>
-              </div>
-            </div>
-            <span
-              v-if="step.kind === 'cancelled'"
-              class="c-side"
-            >{{ t('workTasks.statuses.cancelled') }}</span>
-            <span
-              v-else-if="!step.question && took(step)"
-              class="c-side"
-            >{{ took(step) }}</span>
+            <span class="c-main more-link">{{ allDone ? t('workTasks.overview.fewer') : t('workTasks.overview.earlier', { n: hiddenDone }) }}</span>
           </li>
+          <template
+            v-for="{ step, head } in doneRows"
+            :key="step.code"
+          >
+            <li
+              v-if="head"
+              class="phase"
+            >
+              {{ head }}
+            </li>
+            <li
+              class="row"
+              :class="{ cancelled: step.kind === 'cancelled' }"
+              :data-back-key="step.code"
+              data-test="overview-step"
+              @click="open(step)"
+            >
+              <WorkTaskCode
+                class="c-code"
+                :code="step.code"
+                :status="step.status"
+                :title="step.title"
+                @click.stop
+              />
+              <div class="c-main">
+                <div class="title-line">
+                  <span class="step-title"><template v-if="step.question && step.kind === 'done'">{{ t('workTasks.overview.decided', { name: step.assignee?.name ?? '' }) }}</template>{{ step.title }}</span>
+                  <WorkTaskActor
+                    v-if="step.assignee && !step.question"
+                    class="who"
+                    :actor="step.assignee"
+                  />
+                  <span
+                    v-if="step.kind === 'done' && !step.question && took(step)"
+                    class="who narrow-only"
+                  >{{ took(step) }}</span>
+                </div>
+                <div
+                  v-if="step.note"
+                  class="note"
+                  :class="{ answer: step.question }"
+                >
+                  <span><template v-if="step.question">{{ t('workTasks.overview.answer') }}</template><WorkTaskText
+                    :text="step.note"
+                    :linked="detail.linked"
+                  /></span>
+                </div>
+              </div>
+              <span
+                v-if="step.kind === 'cancelled'"
+                class="c-side"
+              >{{ t('workTasks.statuses.cancelled') }}</span>
+              <span
+                v-else-if="!step.question && took(step)"
+                class="c-side"
+              >{{ took(step) }}</span>
+            </li>
+          </template>
         </ul>
       </section>
     </div>
@@ -561,6 +619,13 @@ async function copyDrive(): Promise<void> {
 .note { display: flex; flex-wrap: wrap; gap: 0 14px; margin-top: 2px; line-height: 1.6; }
 .note.answer { color: var(--el-text-color-regular); }
 .row.cancelled .step-title { color: var(--el-text-color-secondary); font-weight: 400; }
+/* 阶段小标题：占满一行，比分组标题轻一级。 */
+.phase {
+  grid-column: 1 / -1; list-style: none; margin: 8px 0 0; padding: 0 0 2px;
+  font-size: 13px; color: var(--el-text-color-secondary); border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.row.more { cursor: pointer; }
+.more-link { color: var(--el-color-primary); font-size: 13px; }
 /* 待办的小方框：和上面状态图标一样大、站在同一列。 */
 .box {
   display: inline-block; width: 16px; height: 16px; margin: 0 1px; vertical-align: -3px;

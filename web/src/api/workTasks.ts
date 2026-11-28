@@ -51,10 +51,17 @@ export interface WorkTaskStep {
   since: string; closed_at: string | null
   /** 后面跟的一句：做完的是结果，在等人的是等谁，在做的是最近一次进展（`note_at` 是它的时间）。 */
   note: string; note_at: string | null
+  /** 牵头员工拆步骤时写的阶段；没写是空。 */
+  phase: string
+  /** 看着在做、其实没在动：排队太久、上一轮结束没接着做、运行心跳断了。 */
+  stalled: WorkTaskStalled | null
 }
+export interface WorkTaskStalled { kind: 'queued' | 'idle' | 'lost'; since: string }
 /** 任务页首屏的全貌，和群里的进展卡同一套分块。 */
 export interface WorkTaskOverview {
   state: 'need_human' | 'running' | 'todo' | 'done' | 'cancelled' | 'shadow'
+  /** 这件事自己（没拆步骤时）是不是没在动。 */
+  stalled: WorkTaskStalled | null
   steps_done: number; steps_total: number
   /** 这件事自己和它下面各层还没人答的问题。 */
   asks: (WorkTaskAsk & { code: string; title: string })[]
@@ -107,7 +114,7 @@ export interface WorkTaskPatch {
 export interface WorkTaskStats {
   days: number
   backlog: { assignee: WorkTaskActor | null; open: number; overdue: number }[]
-  by_source: { source: string; created: number; done: number; avg_hours: number | null }[]
+  by_source: { source: string; record: boolean; created: number; done: number; avg_hours: number | null }[]
   handoffs_per_task: number | null; agent_first_pass_rate: number | null; agent_reviewed: number
 }
 const base = '/api/admin/work-tasks'

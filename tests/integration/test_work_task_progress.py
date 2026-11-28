@@ -375,6 +375,45 @@ async def test_the_task_page_opens_on_the_same_picture_as_the_card(db_session):
     assert made.code in root.related_codes
 
 
+async def test_the_task_page_groups_steps_by_phase_and_flags_what_is_not_moving(db_session):
+    lead, helper, alice, root = await _setup(db_session)
+    first = await _tool(
+        db_session,
+        root,
+        lead,
+        "create_task",
+        {**_subtask(helper, "退货单推给仓储"), "phase": "退货联调"},
+    )
+    second = await _tool(db_session, root, lead, "create_task", _subtask(helper, "核对库存"))
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    assert [(d["code"], d["phase"]) for d in seen["doing"]] == [
+        (first["code"], "退货联调"),
+        (second["code"], ""),
+    ]
+    # 刚排上队：不算没在动。
+    assert [d["stalled"] for d in seen["doing"]] == [None, None]
+
+    # 排了很久还没开始（多半是运行时离线或额度用完）：页面上要标出来，不能看着像在做。
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == first["code"]))
+    assert child.status == "waiting" and child.waiting_on["kind"] == "queue"
+    child.updated_at = datetime.now(UTC) - timedelta(minutes=25)
+    await db_session.commit()
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    stalled = seen["doing"][0]["stalled"]
+    assert stalled["kind"] == "queued" and stalled["since"] == child.updated_at
+    assert seen["doing"][1]["stalled"] is None
+
+    # 阶段名太长：退回让它改短，不建这一步。
+    refused = await _tool(
+        db_session,
+        root,
+        lead,
+        "create_task",
+        {**_subtask(helper, "回传发货"), "phase": "这是一个明显超过十二个字的阶段名字"},
+    )
+    assert "阶段" in str(refused) and "code" not in refused
+
+
 async def test_a_buried_card_moves_to_the_bottom_when_something_real_changes(db_session):
     lead, helper, _, root = await _setup(db_session)
     first = await _tool(db_session, root, lead, "create_task", _subtask(helper, "对齐接口文档"))

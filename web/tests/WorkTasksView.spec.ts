@@ -55,7 +55,7 @@ vi.mock('@/api/workTasks', () => ({
           assignee: { type: 'bot', id: 'b1', name: '数据助手' }, since: '2026-11-02T00:00:00Z', closed_at: '2026-11-02T00:04:00Z',
           note: '口径按退货单数除以签收单数', note_at: null,
         }],
-        followups: [], decisions: [],
+        followups: [], decisions: [], stalled: null,
         latest: { text: '口径已定，正在拉明细', at: '2026-11-02T00:06:00Z', actor_name: '数据助手' },
       },
       events: [
@@ -72,7 +72,10 @@ vi.mock('@/api/workTasks', () => ({
     create: vi.fn(),
     stats: vi.fn().mockResolvedValue({
       days: 30, handoffs_per_task: 1.5, agent_first_pass_rate: 0.8, agent_reviewed: 5,
-      by_source: [{ source: 'api', created: 3, done: 2, avg_hours: 1.2 }],
+      by_source: [
+        { source: 'web', record: false, created: 4, done: 3, avg_hours: 2.5 },
+        { source: 'api', record: true, created: 3, done: 2, avg_hours: 1.2 },
+      ],
       backlog: [{ assignee: { type: 'human', id: 'u2', name: '韩梅梅' }, open: 4, overdue: 1 }],
     }),
   },
@@ -242,7 +245,7 @@ describe('WorkTasksView', () => {
     vi.mocked(workTasks.get).mockResolvedValueOnce({
       ...full,
       children: [],
-      overview: { state: 'need_human', steps_done: 0, steps_total: 0, asks: [], doing: [], plan: [], done: [], followups: [], decisions: [], latest: null },
+      overview: { state: 'need_human', steps_done: 0, steps_total: 0, asks: [], doing: [], plan: [], done: [], followups: [], decisions: [], stalled: null, latest: null },
     })
     const router = makeRouter()
     await router.push('/work-tasks/T-7')
@@ -254,7 +257,7 @@ describe('WorkTasksView', () => {
     expect(wrapper.find('[data-test="overview-progress"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="overview-doing"]').exists()).toBe(false)
     // 页面上直接点「开工」，不用去飞书里说一句。
-    const started = { ...full, children: [], needs_drive: false, status: 'waiting', now: '排队等数据助手开始', overview: { state: 'running', steps_done: 0, steps_total: 0, asks: [], doing: [], plan: [], done: [], followups: [], decisions: [], latest: null } }
+    const started = { ...full, children: [], needs_drive: false, status: 'waiting', now: '排队等数据助手开始', overview: { state: 'running', steps_done: 0, steps_total: 0, asks: [], doing: [], plan: [], done: [], followups: [], decisions: [], stalled: null, latest: null } }
     vi.mocked(workTasks.start).mockResolvedValueOnce(started as never)
     const button = wrapper.find('[data-test="start-task"]')
     expect(button.text()).toBe(i18n.global.t('workTasks.start'))
@@ -263,6 +266,44 @@ describe('WorkTasksView', () => {
     expect(workTasks.start).toHaveBeenCalledWith('T-7')
     expect(wrapper.find('[data-test="work-task-now"]').text()).toContain('排队等数据助手开始')
     expect(wrapper.find('[data-test="start-task"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('groups steps by phase, folds older finished steps and flags a step that is not moving', async () => {
+    const full = await vi.mocked(workTasks.get)('T-7')
+    const step = (code: string, title: string, phase: string, extra: Record<string, unknown> = {}) => ({
+      code, title, status: 'done', kind: 'done', question: false, assignee: { type: 'bot', id: 'b1', name: '数据助手' },
+      since: '2026-11-02T00:00:00Z', closed_at: '2026-11-02T00:04:00Z', note: '', note_at: null, phase, stalled: null, ...extra,
+    })
+    vi.mocked(workTasks.get).mockResolvedValueOnce({
+      ...full,
+      overview: {
+        ...full.overview, asks: [], plan: [],
+        doing: [step('T-30', '回传发货', '发货联调', {
+          status: 'waiting', kind: 'running', closed_at: null, stalled: { kind: 'queued', since: '2026-11-02T00:00:00Z' },
+        })],
+        done: [
+          step('T-21', '盘点约定', ''), step('T-22', '推退货单', '退货联调'), step('T-23', '退货收货', '退货联调'),
+          step('T-24', '核对退货', '退货联调'), step('T-25', '建寄售单', '寄售联调'), step('T-26', '寄售借出', '寄售联调'),
+          step('T-27', '寄售叫回', '寄售联调'),
+        ],
+      },
+    } as never)
+    const router = makeRouter()
+    await router.push('/work-tasks/T-7')
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
+    await flushPromises()
+    // 排了很久没开始：标出来，不能看着像在做。
+    expect(wrapper.find('[data-test="step-stalled"]').text()).toContain('还没开始')
+    expect(wrapper.find('[data-test="overview-doing"] .phase').text()).toBe('发货联调')
+    // 做完七步：只列最近五步，更早的两步点一下再展开；同一阶段的排在一起，前面一行小标题。
+    const done = wrapper.find('[data-test="overview-done"]')
+    expect(done.findAll('[data-test="overview-step"]')).toHaveLength(5)
+    expect(done.find('[data-test="done-more"]').text()).toBe(i18n.global.t('workTasks.overview.earlier', { n: 2 }))
+    expect(done.findAll('.phase').map(el => el.text())).toEqual(['退货联调', '寄售联调'])
+    await done.find('[data-test="done-more"]').trigger('click')
+    expect(done.findAll('[data-test="overview-step"]')).toHaveLength(7)
+    expect(done.findAll('.phase').map(el => el.text())).toEqual([i18n.global.t('workTasks.overview.noPhase'), '退货联调', '寄售联调'])
     wrapper.unmount()
   })
 
@@ -428,6 +469,10 @@ describe('WorkTasksView', () => {
     const panel = wrapper.find('[data-test="work-task-stats"]')
     expect(panel.text()).toContain('韩梅梅')
     expect(panel.text()).toContain(i18n.global.t('workTasks.sources.api'))
+    // 自动记录单独一张表，不和人建的事混在一起。
+    const records = panel.find('[data-test="stats-records"]')
+    expect(records.text()).toContain(i18n.global.t('workTasks.sources.api'))
+    expect(records.text()).not.toContain(i18n.global.t('workTasks.sources.web'))
   })
 
   it('opens a task on its own page and keeps the chosen tab in the address', async () => {
