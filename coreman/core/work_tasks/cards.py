@@ -193,26 +193,25 @@ async def _in_group(
     bot = await session.get(Bot, root.dispatcher_bot_id or root.assignee_bot_id)
     if bot is None or not bot.enabled or bot.platform != "feishu" or is_assistant(bot):
         return False
-    seen = (
-        await session.execute(
-            select(InboundEvent.id, InboundEvent.sender_open_id)
-            .where(
-                InboundEvent.bot_id == bot.id,
-                InboundEvent.chat_id == root.chat_id,
-                InboundEvent.sender_platform_user_id == pid,
-            )
-            .order_by(InboundEvent.id.desc())
-            .limit(1)
-        )
-    ).first()
-    if seen is None:
+    spoke = (
+        InboundEvent.bot_id == bot.id,
+        InboundEvent.chat_id == root.chat_id,
+        InboundEvent.sender_platform_user_id == pid,
+    )
+    # 只认带 open_id 的记录：任务开工、续做时平台写的合成事件也记在这个群和这个人名下，
+    # 但没有 open_id，不能拿最新的一条当准。
+    open_id = await session.scalar(
+        select(InboundEvent.sender_open_id)
+        .where(*spoke, InboundEvent.sender_open_id.is_not(None))
+        .order_by(InboundEvent.id.desc())
+        .limit(1)
+    )
+    if open_id is None and (
+        await session.scalar(select(InboundEvent.id).where(*spoke).limit(1)) is None
+    ):
         return False
     person = await session.get(User, to)
-    mention = (
-        f"<at id={seen.sender_open_id}></at> 请你来定"
-        if seen.sender_open_id
-        else f"**{name_of(person)}** 请你来定"
-    )
+    mention = f"<at id={open_id}></at> 请你来定" if open_id else f"**{name_of(person)}** 请你来定"
     allowed = [pid]
     principal = (
         await feishu_user_id(session, row.principal_user_id) if row.principal_user_id else None
