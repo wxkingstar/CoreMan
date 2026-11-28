@@ -12,9 +12,12 @@ const STORE_KEY = 'coreman.pageMemory'
 const MAX_ENTRIES = 40
 const READY_TIMEOUT_MS = 3000
 const FLASH_CLASS = 'cm-flash'
+// 表格、折叠块在内容出来后还会再排版几次，页面高度跟着变：这段时间里持续把位置校正回去。
+const SETTLE_MS = 2500
 
-interface Origin { key: string; index: number }
-interface Saved { state: unknown; origin: Origin | null; at: number }
+/** 刚才点的那一处：第几个带这个 key 的元素，点的时候它离窗口顶部多远。 */
+interface Origin { key: string; index: number; top?: number }
+interface Saved { state: unknown; origin: Origin | null; scrollY?: number; at: number }
 
 let popped = false
 // 模块一加载就挂上、且用捕获阶段：要比路由自己的 popstate 监听先执行。路由的导航在它的监听里
@@ -82,9 +85,38 @@ function withKey(key: string, root: ParentNode = document): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>('[data-back-key]')].filter(el => el.getAttribute('data-back-key') === key)
 }
 
-function flash(origin: Origin): void {
+function originElement(origin: Origin): HTMLElement | undefined {
   const all = withKey(origin.key)
-  const el = all[origin.index] ?? all[0]
+  return all[origin.index] ?? all[0]
+}
+
+/**
+ * 回到原处：有刚才点的元素就让它回到点的时候离窗口顶部的那个距离，没有就回到原来的滚动位置。
+ * 内容刚出来时页面还没撑到全高，浏览器会把滚动截短；所以页面高度变化时一直校正，
+ * 直到稳定（SETTLE_MS）或用户自己动了（滚轮、触摸、按键）。
+ */
+function settle(origin: Origin | null, scrollY: number | undefined): void {
+  const align = (): void => {
+    const el = origin && origin.top !== undefined ? originElement(origin) : undefined
+    const target = el ? window.scrollY + el.getBoundingClientRect().top - (origin?.top ?? 0) : scrollY
+    if (target === undefined || Math.abs(window.scrollY - target) < 1) return
+    window.scrollTo({ top: target, behavior: 'instant' })
+  }
+  align()
+  if (typeof ResizeObserver === 'undefined') return
+  const observer = new ResizeObserver(align)
+  observer.observe(document.body)
+  const events = ['wheel', 'touchstart', 'keydown', 'mousedown'] as const
+  const stop = (): void => {
+    observer.disconnect()
+    for (const name of events) window.removeEventListener(name, stop)
+  }
+  for (const name of events) window.addEventListener(name, stop, { passive: true, once: true })
+  setTimeout(stop, SETTLE_MS)
+}
+
+function flash(origin: Origin): void {
+  const el = originElement(origin)
   if (!el) return
   const target = el.closest<HTMLElement>('tr') ?? el
   target.classList.remove(FLASH_CLASS)
@@ -102,11 +134,12 @@ function flash(origin: Origin): void {
 export function usePageMemory<T>(snapshot: () => T) {
   let origin: Origin | null = null
   let restoredOrigin: Origin | null = null
+  let restoredScroll: number | undefined
   let restoredFor = ''
 
   function originOf(el: Element): Origin {
     const key = el.getAttribute('data-back-key') ?? ''
-    return { key, index: withKey(key).indexOf(el as HTMLElement) }
+    return { key, index: withKey(key).indexOf(el as HTMLElement), top: el.getBoundingClientRect().top }
   }
 
   function onClick(event: MouseEvent): void {
@@ -119,7 +152,7 @@ export function usePageMemory<T>(snapshot: () => T) {
   function save(): void {
     if (!entry) return
     const all = readAll()
-    all[entry] = { state: snapshot(), origin, at: Date.now() }
+    all[entry] = { state: snapshot(), origin, scrollY: window.scrollY, at: Date.now() }
     writeAll(all)
     origin = null
   }
@@ -135,11 +168,13 @@ export function usePageMemory<T>(snapshot: () => T) {
     },
     recall(): T | null {
       restoredOrigin = null
+      restoredScroll = undefined
       restoredFor = entry
       if (!returning) return null
       const saved = readAll()[entry]
       if (!saved) return null
       restoredOrigin = saved.origin
+      restoredScroll = saved.scrollY
       return saved.state as T
     },
     ready(): void {
@@ -147,9 +182,15 @@ export function usePageMemory<T>(snapshot: () => T) {
       readyEntry = entry
       onReady?.()
       const target = restoredOrigin
+      const scrollY = restoredScroll
       restoredOrigin = null
-      // 滚动发生在 ready 之后的下一帧；闪烁放在滚完之后。
-      if (target) setTimeout(() => flash(target), 120)
+      restoredScroll = undefined
+      if (!target && scrollY === undefined) return
+      // 路由自己的滚动发生在 ready 之后的下一帧；在它之后接手校正，再闪一下。
+      setTimeout(() => {
+        settle(target, scrollY)
+        if (target) flash(target)
+      }, 60)
     },
   }
 }
