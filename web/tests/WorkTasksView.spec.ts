@@ -42,9 +42,9 @@ vi.mock('@/api/workTasks', () => ({
       watching: false, watchers: [], parent: null,
       children: [{ ...task, code: 'T-9', title: '拉退货明细', status: 'in_progress', now: '数据助手在拉明细' }],
       events: [
-        { id: 1, kind: 'created', actor_type: 'human', actor_name: '李雷', human_text: '李雷建了任务', agent_detail: { brief: '口径按退货单数除以签收单数' }, created_at: '2026-11-02T00:00:00Z' },
-        { id: 3, kind: 'subtask', actor_type: 'bot', actor_name: '数据助手', human_text: '拆出 T-9：拉退货明细', agent_detail: {}, created_at: '2026-11-02T00:00:00Z' },
-        { id: 2, kind: 'started', actor_type: 'bot', actor_name: '数据助手', human_text: '', agent_detail: { tool: 'query' }, created_at: '2026-11-02T00:00:00Z' },
+        { id: 1, kind: 'created', actor_type: 'human', actor_name: '李雷', human_text: '李雷建了任务', agent_detail: { brief: '口径按退货单数除以签收单数' }, created_at: '2026-11-02T00:00:00Z', milestone: true },
+        { id: 3, kind: 'subtask', actor_type: 'bot', actor_name: '数据助手', human_text: '拆出 T-9：拉退货明细', agent_detail: {}, created_at: '2026-11-02T00:00:00Z', milestone: false },
+        { id: 2, kind: 'started', actor_type: 'bot', actor_name: '数据助手', human_text: '', agent_detail: { tool: 'query' }, created_at: '2026-11-02T00:00:00Z', milestone: false },
       ],
       agent: { brief: '统计上周退货率，口径按退货单数除以签收单数', digest: '', report: '总结论：退货率 4.2%', waiting_on: null, runs: [], decision: null },
     }),
@@ -129,8 +129,11 @@ describe('WorkTasksView', () => {
     const layer = drawer.querySelector('[data-test="agent-layer"]')
     expect(layer?.querySelector('.el-collapse-item.is-active')).toBeNull()
     expect(layer?.querySelector('[data-test="agent-report"]')?.textContent).toContain(i18n.global.t('workTasks.report'))
-    // 事件里给 AI 的细节不出现在给人看的经过里。
+    // 事件里给 AI 的细节不出现在给人看的经过里；经过默认只有里程碑，流水点「显示全部」才出来。
     expect(drawer.querySelector('.el-timeline')?.textContent).not.toContain('口径按退货单数')
+    expect(drawer.querySelector('.el-timeline')?.textContent).not.toContain('拆出')
+    await wrapper.find('[data-test="all-events"]').trigger('click')
+    expect(drawer.querySelector('.el-timeline')?.textContent).toContain('拆出 T-9')
     // 子任务是表格：编号、标题、状态、执行人、进展。
     const children = wrapper.find('[data-test="work-task-children"]')
     expect(children.text()).toContain('拉退货明细')

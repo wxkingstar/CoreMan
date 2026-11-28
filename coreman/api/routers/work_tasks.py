@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -26,14 +25,12 @@ from coreman.core.db.models import (
     WORK_TASK_OPEN,
     WORK_TASK_STATUSES,
     Bot,
-    GroupObserveDecision,
     User,
     WorkTask,
     WorkTaskEvent,
-    WorkTaskRun,
-    WorkTaskWatcher,
 )
 from coreman.core.work_tasks import execute, flow, markdown, service
+from coreman.core.work_tasks import view as task_view
 from coreman.core.work_tasks.service import Assignee, WorkTaskError
 
 router = APIRouter(
@@ -48,116 +45,6 @@ def _active(user: User) -> None:
 
 def _fail(exc: WorkTaskError) -> ApiError:
     return ApiError(exc.status, exc.status, exc.message)
-
-
-async def _names(
-    session: AsyncSession, bot_ids: set[uuid.UUID], user_ids: set[uuid.UUID]
-) -> dict[str, str]:
-    """id → 名字，AI 员工和成员放在一张表里（键是 id 的字符串）。"""
-    names: dict[str, str] = {}
-    if bot_ids:
-        rows = await session.execute(select(Bot.id, Bot.name).where(Bot.id.in_(bot_ids)))
-        names |= {str(i): n for i, n in rows.all()}
-    if user_ids:
-        rows = await session.execute(
-            select(User.id, User.display_name, User.login_name).where(User.id.in_(user_ids))
-        )
-        names |= {str(i): d or login for i, d, login in rows.all()}
-    return names
-
-
-def _ids(rows: list[WorkTask]) -> tuple[set[uuid.UUID], set[uuid.UUID]]:
-    bots = {
-        i for r in rows for i in (r.assignee_bot_id, r.dispatcher_bot_id, r.requester_bot_id) if i
-    }
-    users = {
-        i
-        for r in rows
-        for i in (
-            r.requester_user_id,
-            r.principal_user_id,
-            r.assignee_user_id,
-            r.reviewer_user_id,
-            service.ask_to(r),
-        )
-        if i
-    }
-    for r in rows:
-        waiting = (r.waiting_on or {}).get("user_id")
-        if waiting:
-            users.add(uuid.UUID(waiting))
-    return bots, users
-
-
-def _bot(bot_id: uuid.UUID | None, names: dict[str, str]) -> dict[str, Any] | None:
-    if bot_id is None:
-        return None
-    return {"id": str(bot_id), "name": names.get(str(bot_id), "已删除的员工")}
-
-
-def _actor(
-    bot_id: uuid.UUID | None, user_id: uuid.UUID | None, names: dict[str, str]
-) -> dict[str, Any] | None:
-    if bot_id is not None:
-        return {"type": "bot", "id": str(bot_id), "name": names.get(str(bot_id), "已删除的员工")}
-    if user_id is not None:
-        return {
-            "type": "human",
-            "id": str(user_id),
-            "name": names.get(str(user_id), "已删除的成员"),
-        }
-    return None
-
-
-def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -> dict[str, Any]:
-    """给人看的那一层。"""
-    ask = row.ask
-    return {
-        "code": row.code,
-        "title": row.title,
-        "summary": row.summary,
-        "status": row.status,
-        "source": row.source,
-        "mirror": bool(row.origin_ref),
-        "platform": row.platform,
-        "chat_id": row.chat_id,
-        "requester_name": row.requester_name,
-        "requester": _actor(row.requester_bot_id, row.requester_user_id, names),
-        "principal": _actor(None, row.principal_user_id, names),
-        "assignee": _actor(row.assignee_bot_id, row.assignee_user_id, names),
-        "reviewer": _actor(None, row.reviewer_user_id, names),
-        "dispatcher": _bot(row.dispatcher_bot_id, names),
-        "review_required": row.review_required,
-        "priority": row.priority,
-        "due_at": row.due_at,
-        "start_mode": row.start_mode,
-        "claimed_at": row.claimed_at,
-        # 人派给 AI 员工、还没被领取：页面上提示人去叫它开工。
-        "needs_drive": service.needs_drive(row),
-        "now": service.current_line(row, names),
-        "ask": (
-            {
-                "id": ask["id"],
-                "kind": ask["kind"],
-                "to": _actor(None, service.ask_to(row), names),
-                "question": ask["question"],
-                "why": ask.get("why") or "",
-                "options": ask["options"],
-                "other": bool(ask.get("other")),
-                "needs_text": sorted(service.NEEDS_TEXT),
-                "mine": viewer is not None and str(viewer.id) == ask.get("to_user_id"),
-                "can_answer": viewer is not None and service.can_answer(row, viewer),
-            }
-            if ask
-            else None
-        ),
-        "can_manage": viewer is not None and service.can_manage(row, viewer),
-        "related_codes": list(row.related_codes or []),
-        "artifacts": list(row.artifacts or []),
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-        "closed_at": row.closed_at,
-    }
 
 
 _EMPTY_INSIDE = {"steps": 0, "steps_done": 0, "decisions": 0, "decisions_open": 0}
@@ -238,7 +125,7 @@ async def list_work_tasks(
     if before_id is not None:
         stmt = stmt.where(WorkTask.id < before_id)
     rows = list(await session.scalars(stmt.order_by(WorkTask.id.desc()).limit(limit)))
-    names = await _names(session, *_ids(rows))
+    names = await task_view.names_of(session, *task_view.ids_of(rows))
     grouped = await session.execute(
         select(WorkTask.status, func.count()).where(*conditions).group_by(WorkTask.status)
     )
@@ -251,7 +138,11 @@ async def list_work_tasks(
         "code": 0,
         "data": {
             "items": [
-                {**task_out(r, names, user), "id": r.id, **inside.get(r.id, _EMPTY_INSIDE)}
+                {
+                    **task_view.task_out(r, names, user),
+                    "id": r.id,
+                    **inside.get(r.id, _EMPTY_INSIDE),
+                }
                 for r in rows
             ],
             "counts": counts,
@@ -266,120 +157,6 @@ async def _load(session: AsyncSession, code: str, *, lock: bool = False) -> Work
     if row is None:
         raise not_found("任务不存在")
     return row
-
-
-# 前后可以紧挨中文（「做T-7」），不能是别的编号的一部分。
-_CODE = re.compile(r"(?<![A-Za-z0-9_-])T-\d+(?!\d)")
-
-
-async def _linked(session: AsyncSession, row: WorkTask, texts: list[str]) -> dict[str, Any]:
-    """页面上出现的任务编号（相关任务、上级、正文里提到的）→ 标题和状态：编号可点、旁边标状态。"""
-    codes = set(row.related_codes or [])
-    for text in texts:
-        codes |= set(_CODE.findall(text or ""))
-    codes.discard(row.code)
-    if not codes:
-        return {}
-    found = await session.execute(
-        select(WorkTask.code, WorkTask.title, WorkTask.status).where(WorkTask.code.in_(codes))
-    )
-    return {c: {"title": t, "status": s} for c, t, s in found.all()}
-
-
-async def _detail(session: AsyncSession, row: WorkTask, user: User) -> dict[str, Any]:
-    events = list(
-        await session.scalars(
-            select(WorkTaskEvent)
-            .where(WorkTaskEvent.work_task_id == row.id)
-            .order_by(WorkTaskEvent.id)
-        )
-    )
-    runs = list(
-        await session.scalars(
-            select(WorkTaskRun).where(WorkTaskRun.work_task_id == row.id).order_by(WorkTaskRun.id)
-        )
-    )
-    children = list(
-        await session.scalars(
-            select(WorkTask).where(WorkTask.parent_id == row.id).order_by(WorkTask.id)
-        )
-    )
-    parent = await session.get(WorkTask, row.parent_id) if row.parent_id else None
-    watcher_ids = set(
-        await session.scalars(
-            select(WorkTaskWatcher.user_id).where(WorkTaskWatcher.work_task_id == row.id)
-        )
-    )
-    decision = await session.get(GroupObserveDecision, row.decision_id) if row.decision_id else None
-    bots, users = _ids([row, *children])
-    bots |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "bot" and e.actor_id}
-    bots |= {r.bot_id for r in runs if r.bot_id}
-    users |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "human" and e.actor_id}
-    users |= watcher_ids
-    names = await _names(session, bots, users)
-    out = task_out(row, names, user)
-    texts = [out["now"], row.summary, *(e.human_text for e in events)]
-    children_out = [task_out(c, names, user) for c in children]
-    texts += [c["now"] for c in children_out]
-    linked = await _linked(session, row, texts)
-    if parent:
-        linked[parent.code] = {"title": parent.title, "status": parent.status}
-    for c in children:
-        linked[c.code] = {"title": c.title, "status": c.status}
-    return {
-        **out,
-        "linked": linked,
-        "watching": user.id in watcher_ids,
-        "watchers": [{"id": str(i), "name": names.get(str(i), "")} for i in watcher_ids],
-        "parent": {"code": parent.code, "title": parent.title} if parent else None,
-        "children": children_out,
-        "events": [
-            {
-                "id": e.id,
-                "kind": e.kind,
-                "actor_type": e.actor_type,
-                "actor_name": names.get(e.actor_id or "", ""),
-                "human_text": e.human_text,
-                "agent_detail": e.agent_detail,
-                "created_at": e.created_at,
-            }
-            for e in events
-        ],
-        # 给 Agent 看的那一层：页面上默认折叠，所有人都能展开。
-        "agent": {
-            "brief": row.brief,
-            "digest": row.digest,
-            "report": row.report,
-            "waiting_on": row.waiting_on,
-            "runs": [
-                {
-                    "id": r.id,
-                    "bot": _bot(r.bot_id, names),
-                    "trigger": r.trigger,
-                    "triggered_by": r.triggered_by,
-                    "status": r.status,
-                    "outcome": r.outcome,
-                    "session_key": r.session_key,
-                    "chat_task_id": r.chat_task_id,
-                    "started_at": r.started_at,
-                    "ended_at": r.ended_at,
-                }
-                for r in runs
-            ],
-            "decision": (
-                {
-                    "id": decision.id,
-                    "probability": decision.probability,
-                    "outcome": decision.outcome,
-                    "recent_messages": (decision.state or {}).get("recent_messages") or [],
-                    "dispatch": decision.dispatch,
-                    "created_at": decision.created_at,
-                }
-                if decision is not None
-                else None
-            ),
-        },
-    }
 
 
 @router.get("/stats")
@@ -405,14 +182,14 @@ async def work_task_stats(
             .limit(20)
         )
     ).all()
-    names = await _names(
+    names = await task_view.names_of(
         session,
         {b for b, _, _, _ in open_rows if b},
         {u for _, u, _, _ in open_rows if u},
     )
     backlog = [
         {
-            "assignee": _actor(bot_id, user_id, names),
+            "assignee": task_view.actor_out(bot_id, user_id, names),
             "open": int(n),
             "overdue": int(overdue),
         }
@@ -513,7 +290,7 @@ async def get_work_task(
 ) -> dict[str, Any] | PlainTextResponse:
     _active(user)
     row = await _load(session, code)
-    data = await _detail(session, row, user)
+    data = await task_view.detail(session, row, user)
     if format == "md":
         # 给 AI 读的纯文本：没有页面样式和按钮，只有内容。
         return PlainTextResponse(markdown.render(data), media_type="text/markdown; charset=utf-8")
@@ -576,7 +353,7 @@ async def _done(session: AsyncSession, row: WorkTask, user: User) -> dict[str, A
     await session.flush()
     await session.commit()
     row = await _load(session, row.code)
-    return {"code": 0, "data": await _detail(session, row, user)}
+    return {"code": 0, "data": await task_view.detail(session, row, user)}
 
 
 async def _act(

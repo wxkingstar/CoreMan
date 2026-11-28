@@ -387,3 +387,19 @@ async def test_detail_as_markdown_for_ai(
     assert "退货率?" in text
     bad = await client.get(f"/api/admin/work-tasks/{task.code}", params={"format": "x"})
     assert bad.status_code in (400, 422)
+
+
+def test_timeline_keeps_milestones_for_people() -> None:
+    from coreman.core.work_tasks.view import milestone
+
+    def event(kind: str, text: str, detail: dict | None = None) -> WorkTaskEvent:
+        return WorkTaskEvent(kind=kind, human_text=text, agent_detail=detail or {})
+
+    assert milestone(event("created", "调度员自己牵头"))
+    assert milestone(event("progress", "退货链路已走通"))
+    assert milestone(event("subtask", "问王五（T-9）：要走哪种寄售？"))
+    assert milestone(event("claimed", "李雷叫销售开工", {"trigger": "chat"}))
+    assert not milestone(event("claimed", "等的事都有结果了，销售接着做", {"trigger": "resume"}))
+    assert not milestone(event("started", "销售继续处理"))
+    assert not milestone(event("subtask", "拆出 T-9：拉退货明细（销售）"))
+    assert not milestone(event("waiting", ""))

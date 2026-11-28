@@ -34,6 +34,7 @@ const assigning = ref<'any' | 'bot' | null>(null)
 const assignee = ref<AssigneeIn | null>(null)
 const assignNote = ref('')
 const commentText = ref('')
+const allEvents = ref(false)
 // 手机（飞书里点开多半是手机）：信息表一栏、子任务表把进展折进标题下面。
 const narrowQuery = window.matchMedia?.('(max-width: 640px)')
 const narrow = ref(!!narrowQuery?.matches)
@@ -57,6 +58,7 @@ watch([code, plain], () => {
   detail.value = null
   text.value = ''
   assigning.value = null
+  allEvents.value = false
   void load()
 }, { immediate: true })
 watch([detail, code], () => {
@@ -174,6 +176,9 @@ async function comment(): Promise<void> {
 const mine = computed(() => !!detail.value && detail.value.assignee?.type === 'human' && detail.value.assignee.id === auth.user?.id)
 const closed = computed(() => !!detail.value && ['done', 'cancelled', 'shadow'].includes(detail.value.status))
 const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.human_text))
+/** 「经过」默认只放里程碑；AI 员工开始/继续处理、拆子任务（表里有）这类流水点「显示全部」才出来。 */
+const shownEvents = computed(() => allEvents.value ? humanEvents.value : humanEvents.value.filter(e => e.milestone))
+const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value.filter(e => e.milestone).length)
 </script>
 
 <template>
@@ -505,10 +510,22 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
         </el-table>
       </template>
 
-      <h4>{{ t('workTasks.timeline') }}</h4>
-      <el-timeline v-if="humanEvents.length">
+      <div class="timeline-head">
+        <h4>{{ t('workTasks.timeline') }}</h4>
+        <el-button
+          v-if="hiddenEvents"
+          link
+          type="primary"
+          size="small"
+          data-test="all-events"
+          @click="allEvents = !allEvents"
+        >
+          {{ allEvents ? t('workTasks.milestonesOnly') : t('workTasks.allEvents', { n: hiddenEvents }) }}
+        </el-button>
+      </div>
+      <el-timeline v-if="shownEvents.length">
         <el-timeline-item
-          v-for="event in humanEvents"
+          v-for="event in shownEvents"
           :key="event.id"
           :timestamp="formatDateTime(event.created_at)"
         >
@@ -654,6 +671,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
 .task-loading { height: 240px; }
 .task-detail { display: flex; flex-direction: column; gap: 12px; }
 .task-detail h4 { margin: 8px 0 0; }
+.timeline-head { display: flex; align-items: baseline; gap: 12px; }
 .task-detail pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
 .now :deep(.el-alert__content) { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
