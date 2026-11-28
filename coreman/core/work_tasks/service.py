@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,6 +59,17 @@ def now() -> datetime:
 def clip(text: str, limit: int = LINE_MAX) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+_MD_LEAD = re.compile(r"^\s*(#{1,6}|>+|[-*+]|\d+[.)])\s+")
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MD_MARK = re.compile(r"\*\*|__|~~|`+")
+
+
+def plain_line(text: str) -> str:
+    """给人看的一句话里不留 Markdown 记号：AI 的回复原文常带加粗、标题、列表符号和链接。"""
+    lines = [_MD_LEAD.sub("", line) for line in text.splitlines() if line.strip()]
+    return _MD_MARK.sub("", _MD_LINK.sub(r"\1", " ".join(lines)))
 
 
 def name_of(user: User | None) -> str:

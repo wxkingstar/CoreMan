@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.chat import bot_collaboration
 from coreman.core.db.models import (
     WORK_TASK_OPEN,
+    ApiClient,
     ApiTask,
     Bot,
     BotCollaboration,
@@ -34,7 +35,14 @@ from coreman.core.db.models import (
     WorkTask,
     WorkTaskEvent,
 )
-from coreman.core.work_tasks.service import BRIEF_MAX, SUMMARY_MAX, TITLE_MAX, clip, name_of
+from coreman.core.work_tasks.service import (
+    BRIEF_MAX,
+    SUMMARY_MAX,
+    TITLE_MAX,
+    clip,
+    name_of,
+    plain_line,
+)
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +54,7 @@ _FAILED = ("failed", "cancelled", "timed_out")
 
 def _title(text: str, prefix: str = "") -> str:
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    return clip(prefix + first, TITLE_MAX) or prefix.rstrip("：") or "（无标题）"
+    return clip(prefix + plain_line(first), TITLE_MAX) or prefix.rstrip("：") or "（无标题）"
 
 
 async def _parent_of(session: AsyncSession, chat_task_id: int | None) -> WorkTask | None:
@@ -72,7 +80,8 @@ def _apply(row: WorkTask, status: str, now: datetime, summary: str = "", waiting
         new = ("waiting", {"kind": "external", "human_text": clip(waiting, SUMMARY_MAX)})
     else:
         new = ("in_progress", None)
-    summary = clip(summary, SUMMARY_MAX) if summary else ""
+    # 一句话是给人看的：原文是 AI 的回复时去掉里面的 Markdown 记号。
+    summary = clip(plain_line(summary), SUMMARY_MAX) if summary else ""
     if (row.status, row.waiting_on) == new and (not summary or row.summary == summary):
         return False
     row.status, row.waiting_on = new
@@ -181,7 +190,9 @@ async def _api_tasks(session: AsyncSession, now: datetime) -> int:
         created = False
         if mirror is None:
             user = await session.get(User, api.user_id)
-            via = "业务系统" if api.client_key else "API"
+            # 写出是哪个业务系统发起的：一排「业务系统发起的私聊任务」分不出谁是谁。
+            client = await session.get(ApiClient, api.client_key) if api.client_key else None
+            via = (client.name if client else "业务系统") if api.client_key else "API"
             private = api.target == "p2p"
             mirror = _mirror(
                 ref=ref,

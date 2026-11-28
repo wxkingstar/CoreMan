@@ -129,6 +129,53 @@ async def test_the_list_shows_goals_only_and_counts_what_is_inside(
     assert [i["title"] for i in found["items"]] == ["仓储侧开发"]
 
 
+async def test_the_list_leaves_out_automatic_records_unless_asked(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """自动记下的接口任务、求助默认不列：它们是机器之间的流水，一多就把人建的事淹没了。"""
+    alice = await login_as(client, db_session, display_name="alice")
+    made = (await client.post("/api/admin/work-tasks", json={"title": "整理供应商名单"})).json()
+    mine = made["data"]["code"]
+    db_session.add_all(
+        [
+            WorkTask(
+                title="业务系统发起的私聊任务",
+                status="done",
+                source="api",
+                origin_ref="api:1",
+                requester_user_id=alice.id,
+                principal_user_id=alice.id,
+            ),
+            WorkTask(
+                title="求助：库存口径",
+                status="in_progress",
+                source="collaboration",
+                origin_ref="bot_help:1",
+                principal_user_id=alice.id,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    for view in ("all", "created"):
+        listed = (await client.get("/api/admin/work-tasks", params={"view": view})).json()["data"]
+        assert [i["code"] for i in listed["items"]] == [mine], view
+        assert listed["counts"] == {"todo": 1}
+    # 要看时带 records；按关键词找时不用带也找得到。
+    everything = (await client.get("/api/admin/work-tasks", params={"records": True})).json()
+    assert {i["title"] for i in everything["data"]["items"]} == {
+        "整理供应商名单",
+        "业务系统发起的私聊任务",
+        "求助：库存口径",
+    }
+    found = (await client.get("/api/admin/work-tasks", params={"q": "库存口径"})).json()["data"]
+    assert [i["mirror"] for i in found["items"]] == [True]
+    # 只看还没结束的：首页「我发起、还在进行的」用。
+    params = {"view": "created", "unfinished": True, "records": True}
+    going = (await client.get("/api/admin/work-tasks", params=params)).json()["data"]
+    assert {i["status"] for i in going["items"]} == {"todo", "in_progress"}
+
+
 # ---- 任务平台：人在网页上的操作 --------------------------------------------------------------
 
 
