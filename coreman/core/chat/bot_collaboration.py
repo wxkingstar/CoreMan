@@ -107,7 +107,8 @@ async def routes_for(
 
 
 # 不再配置伙伴关系：同群的飞书 AI 员工都可以求助，等待时长统一。
-TIMEOUT_SECONDS = 300
+# 对方可能正在做一轮开发或等一次发布（十几分钟很常见），等 5 分钟多半等不到。
+TIMEOUT_SECONDS = 1800
 
 
 async def authorized_peer(
