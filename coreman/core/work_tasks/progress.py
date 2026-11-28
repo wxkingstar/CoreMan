@@ -299,6 +299,7 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
     principal = (
         await feishu_user_id(session, root.principal_user_id) if root.principal_user_id else None
     )
+    questions: list[tuple[WorkTask, dict[str, Any], str, list[str]]] = []
     for item in [] if closed else await _pending_asks(session, root):
         ask = item.ask or {}
         to = ask.get("to_user_id")
@@ -318,8 +319,17 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
         if principal and principal not in allowed:
             allowed = [*allowed, principal]  # 代表人可以代答
         attn.append(f"ask:{ask.get('id')}")
+        questions.append((item, ask, mention, allowed))
+    # 都是问同一个人：在「现在要你定」那一行点一次名，不在每个问题前面重复。
+    one = questions[0][2] if len({q[2] for q in questions}) == 1 else ""
+    for number, (item, ask, mention, allowed) in enumerate(questions, start=1):
         need += cards.ask_elements(
-            item, ask, mention=f"{mention} 请你来定", allowed=allowed, on=root
+            item,
+            ask,
+            mention="" if one else f"{mention} 请你来定",
+            number=number if len(questions) > 1 else 0,
+            allowed=allowed,
+            on=root,
         )
     waiting = root.waiting_on or {}
     if root.status == "waiting" and waiting.get("kind") == "human" and root.principal_user_id:
@@ -373,7 +383,7 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
     elif root.summary:
         elements.append({"tag": "markdown", "content": f"**目标**：{root.summary}"})
     if need:
-        elements.append({"tag": "markdown", "content": "**现在要你定**"})
+        elements.append({"tag": "markdown", "content": f"**现在要你定** {one}".rstrip()})
         elements += need
     if doing or private:
         elements.append({"tag": "markdown", "content": "\n".join(["**正在做**", *private, *doing])})

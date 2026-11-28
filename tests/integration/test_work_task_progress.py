@@ -367,13 +367,13 @@ async def test_questions_sit_on_the_same_card_and_only_the_asked_person_answers(
     _, moved, stub = await _progress_items(db_session, root)
     assert moved.kind == "send" and stub.kind == "card_update"
     assert _subtitle(moved) == "等人处理 □□□□□□□□ 0/1"
-    assert _blocks(moved)[:7] == [
-        "**现在要你定**",
-        "<at id=ou_open_alice></at> 请你来定",
+    # 点名并在「现在要你定」那一行，不另起一行。
+    assert _blocks(moved)[:6] == [
+        "**现在要你定** <at id=ou_open_alice></at>",
         "退货单作废还是放宽校验？",
         "[作废]",
         "[放宽]",
-        "〔都不合适？写下你的答案〕",
+        "〔其他答案〕",
         "[提交]",
     ]
     # 选项并排成一行，输入框和提交按钮也在同一行：不让一个问题把卡片撑出一屏。
@@ -383,6 +383,9 @@ async def test_questions_sit_on_the_same_card_and_only_the_asked_person_answers(
         if e.get("tag") in ("column_set", "form")
     ]
     assert [len(rows[0]["columns"]), rows[1]["elements"][0]["tag"]] == [2, "column_set"]
+    # 输入框撑满自己那一格，不在和「提交」之间留一截空白。
+    entry = rows[1]["elements"][0]["columns"][0]["elements"][0]
+    assert entry["tag"] == "input" and entry["width"] == "fill"
     value = _buttons(moved)[0]["behaviors"][0]["value"]
     assert value["task_id"] == cards.card_task_id(root) == moved.payload["card"]["task_id"]
     assert value["event_key"] == cards.PROGRESS_EVENT and value["allowed"] == ["ou_alice"]
@@ -618,6 +621,12 @@ async def test_two_questions_on_one_card_keep_their_form_names_apart(db_session)
     ]
     forms = [e["name"] for e in card.payload["card"]["body"]["elements"] if e.get("tag") == "form"]
     assert len(named) == 4 and len(set(named)) == 4 and len(set(forms)) == 2
+    # 两个问题都是问同一个人：只在标题那一行点一次名，问题按顺序编号。
+    texts = _blocks(card)
+    assert texts[0] == "**现在要你定** <at id=ou_open_alice></at>"
+    asked_texts = [t for t in texts if "？" in t]
+    assert asked_texts == ["1. 退货单作废还是放宽校验？", "2. 寄售先联调哪一种？"]
+    assert not [t for t in texts if "请你来定" in t]
 
     # 在第二个问题的输入框里写了自己的答案：按那个问题记下。
     second = await db_session.scalar(select(WorkTask).where(WorkTask.code == codes[1]))
@@ -650,3 +659,39 @@ async def test_two_questions_on_one_card_keep_their_form_names_apart(db_session)
         select(WorkTaskEvent).where(WorkTaskEvent.work_task_id == second.id)
     )
     assert any("两种都先不做" in (e.human_text or "") + str(e.agent_detail) for e in events)
+
+
+def _rows(labels: list[str]) -> list[tuple[str, int]]:
+    """这些选项在卡上排成几行：每行写成（怎么折行, 几个按钮）；单独占一行的按钮写成 ("fill", 1)。"""
+    task = WorkTask(id=7, code="T-7", title="事")
+    ask = {
+        "id": "a1",
+        "question": "选哪个？",
+        "options": [{"key": f"o{i}", "label": label} for i, label in enumerate(labels, 1)],
+    }
+    return [
+        (e["flex_mode"], len(e["columns"])) if e["tag"] == "column_set" else (e["width"], 1)
+        for e in cards.ask_elements(task, ask)
+        if e["tag"] in ("column_set", "button")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("labels", "rows"),
+    [
+        # 窄屏手机上也放得下：始终并排一行（四个短的两行两个）。
+        (["同意合并", "先不合并"], [("none", 2)]),
+        (["要", "不要", "再等"], [("none", 3)]),
+        (["甲", "乙", "丙", "丁"], [("bisect", 4)]),
+        # 只有电脑上放得下：电脑上并排，手机上一个一行（三个四字选项在窄屏上会被截成两个字）。
+        (["寄出代卖", "收货代卖", "两种都要"], [("stretch", 3)]),
+        (["先合并订单侧", "等仓储侧一起"], [("stretch", 2)]),
+        # 电脑上也放不下：一个一行，各自撑满。
+        (["先把订单侧的改动合并了再说", "等仓储侧的改动好了一起合并"], [("fill", 1)] * 2),
+        (["按订单系统的地址来", "按仓储系统的地址来", "两边地址都保留下来"], [("fill", 1)] * 3),
+        # 只有一个：也撑满一行，和下面的输入框对齐。
+        (["通过"], [("fill", 1)]),
+    ],
+)
+def test_option_buttons_share_a_row_only_when_their_labels_fit(labels, rows):
+    assert _rows(labels) == rows
