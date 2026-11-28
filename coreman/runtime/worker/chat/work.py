@@ -31,7 +31,7 @@ from coreman.core.db.models import (
     WorkTaskEvent,
     WorkTaskRun,
 )
-from coreman.core.work_tasks import cards, flow
+from coreman.core.work_tasks import cards, flow, progress
 from coreman.core.work_tasks.service import name_of, to_review
 from coreman.runtime.worker.chat.inbound import joined_text, message_type_of
 from coreman.runtime.worker.chat.models import Intake, Verdict
@@ -384,7 +384,19 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
             lines.append(f"这一轮是代表人看过后补充的话，按它接着做：{extra}")
         else:
             lines.append(f"这一轮是补充：{extra}")
-    if ctx.task.payload.get("work_silent"):
+    if ctx.task.payload.get("work_silent") and row.parent_id is None and progress.group_root(row):
+        reply = (
+            "怎么回复：这一轮是你等的事有了结果、接着往下安排，回复不会发到群里——"
+            "群里的人看的是这件事的那张进展卡。"
+            "先用 update_task 的 human_text 写一句现在到哪了（显示在卡上「最新」那一行），"
+            "plan 写剩下还没开始的步骤；"
+            "要人定的事用 ask_human（卡片会挪到群里最新的位置并 @ 他）；"
+            "还有没结果的事就调用 wait_for。"
+            "目标全部达成时用 submit_result 交付：result 写一句结论，"
+            "report 写给发起人看的总结（达成了什么、做了哪几件事、还剩什么要人处理），"
+            "它会显示在卡上并 @ 发起人。"
+        )
+    elif ctx.task.payload.get("work_silent"):
         reply = (
             "怎么回复：这一轮的回复不发给任何人，用 submit_result 交付（result、output、digest），"
             "回复里简短重复结论即可。"

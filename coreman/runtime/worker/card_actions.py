@@ -190,6 +190,7 @@ class CardActionHandler:
                     request_cards.EVENT_KEY: gap_request_cards.handle,
                     scope_prompt.EVENT_KEY: app_scope_cards.handle,
                     work_task_cards_core.EVENT_KEY: work_task_cards.handle,
+                    work_task_cards_core.PROGRESS_EVENT: work_task_cards.handle,
                     work_task_due.EVENT_KEY: work_task_cards.handle,
                 }.get(str(action.get("event_key")), handle_selection)
                 result = await handle(session, ctx, bot, inbound, action)

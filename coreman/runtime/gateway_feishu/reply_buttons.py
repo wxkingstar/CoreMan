@@ -174,8 +174,8 @@ WRITE_CARD_EVENTS = frozenset(
     }
 )
 SCHEDULE_EVENT = "personal_schedule"
-# 任务平台的提问卡（core/work_tasks/cards.EVENT_KEY）。
-WORK_TASK_ASK_EVENT = "work_task_ask"
+# 任务平台的提问：私聊的提问卡，和画在群里进展卡上的问题（core/work_tasks/cards）。
+WORK_TASK_ASK_EVENTS = frozenset({"work_task_ask", "work_task_progress_ask"})
 TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
 COLD_START_EVENT = "assistant_cold_start_card"
 STOP_EVENT = "assistant_stop"
@@ -199,7 +199,7 @@ def _not_asked(message: InboundMessage) -> bool:
     allowed = action.get("allowed")
     return (
         message.kind == "card_action"
-        and action.get("event_key") == WORK_TASK_ASK_EVENT
+        and action.get("event_key") in WORK_TASK_ASK_EVENTS
         and isinstance(allowed, list)
         and bool(allowed)
         and message.sender.platform_user_id not in allowed

@@ -9,12 +9,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
 from coreman.core.db.models import Bot, InboundEvent, User, UserIdentity, WorkTask
-from coreman.core.work_tasks import cards, due, execute, flow
+from coreman.core.work_tasks import cards, due, execute, flow, progress
 from coreman.core.work_tasks.service import (
     WorkTaskError,
     can_manage,
@@ -68,6 +68,22 @@ async def handle(
     user = await _clicker(session, inbound)
     if action.get("event_key") == due.EVENT_KEY:
         return await _postpone(session, ctx, bot, inbound, row, user, option)
+    # 群里进展卡上的问题：卡是根任务的，按问题编号找到被问的那一件。这张卡是整件事共用的，
+    # 出错（答过了、没权限）时不能像单独的提问卡那样整张换成一句结果，只把卡重画一遍。
+    shared = action.get("event_key") == cards.PROGRESS_EVENT
+    if shared and row is not None and ask_id:
+        root = row
+        row = await session.scalar(
+            select(WorkTask)
+            .where(
+                or_(WorkTask.id == root.id, WorkTask.root_id == root.id),
+                WorkTask.ask["id"].astext == ask_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            await progress.refresh(session, root, base_url=ctx.public_base_url)
+            return "stale"
     if row is None or user is None or not ask_id or not option:
         return "ignored"
     selected = action.get("selected") or {}
@@ -85,6 +101,9 @@ async def handle(
         if exc.status == 403:
             # 发在群里的卡被别人点了（网关已提示过）：卡片不动，留给被问的人。
             return "not_allowed"
+        if shared:
+            await progress.refresh(session, row, base_url=ctx.public_base_url)
+            return "stale"
         await _show(
             session,
             bot,

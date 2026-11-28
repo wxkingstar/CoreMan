@@ -157,10 +157,20 @@ async def remind_asks(session: AsyncSession, now: datetime) -> int:
     sent = 0
     for row in rows:
         ask = row.ask or {}
+        if not ask.get("id"):
+            continue  # JSON 的 null：没有待答的问题
         key = f"work-task:{row.id}:ask:{ask.get('id')}"
         card = await session.scalar(
             select(OutboxItem).where(OutboxItem.dedupe_key == key, OutboxItem.status == "sent")
         )
+        if card is None:
+            # 问题画在群里的进展卡上：提醒回复在那张卡（最新的一张）下面。
+            root = await session.get(WorkTask, row.root_id) if row.root_id else None
+            card = await progress.current_card(session, root) if root is not None else None
+            if card is not None and f"ask:{ask.get('id')}" not in (
+                ((card.payload or {}).get("_progress") or {}).get("attn") or []
+            ):
+                card = None
         message_id = (card.payload or {}).get("_feishu_message_id") if card is not None else None
         chat_id = (card.target or {}).get("chat_id") if card is not None else None
         # 只提醒发在群里的卡：私聊的卡对方自己看得到，不再追一条。
