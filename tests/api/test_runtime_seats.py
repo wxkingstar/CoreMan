@@ -102,6 +102,9 @@ async def test_admin_adds_signs_in_and_switches_a_seat(client, db_session, monke
     switched = await client.post(f"{base(node)}/{SEAT}/activate")
     assert switched.status_code == 200, switched.text
     assert [s["active"] for s in switched.json()["data"]["seats"]] == [False, True]
+    await db_session.refresh(node)
+    assert node.capabilities["claude"]["account"] == "b@example.com"
+    assert node.capabilities["claude"]["login"] == "ready"
     await db_session.refresh(relay)
     # 新席位没有采集过额度：清空；旧席位的额度存起来，切回时还原。
     assert relay.rate_limit_5h_used_pct is None and relay.rate_limit_7d_used_pct is None
