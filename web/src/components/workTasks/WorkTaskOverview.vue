@@ -64,12 +64,14 @@ const segments = computed(() => [
 const segmentsLabel = computed(() => t('workTasks.overview.segments', {
   done: view.value.steps_done, doing: view.value.doing.length, todo: view.value.plan.length,
 }))
+/** 已经交付（待验收或已完成）：「一句话」写的是结果，不再是目标；交付前的那句进展也过时了。 */
+const delivered = computed(() => ['done', 'review'].includes(props.detail.status))
 /**
- * 这一页最要紧的那句话，只有一句用大字：有最新进展就是它，办完了是结果，否则是「现在」那句。
+ * 这一页最要紧的那句话，只有一句用大字：交付了是结果，没交付时有最新进展就是它，否则是「现在」那句。
  */
 const lead = computed(() => {
-  if (view.value.latest) return 'latest'
-  if (props.detail.status === 'done' && props.detail.summary) return 'result'
+  if (delivered.value && props.detail.summary) return 'result'
+  if (view.value.latest && !delivered.value) return 'latest'
   return showNow.value ? 'now' : ''
 })
 
@@ -178,7 +180,7 @@ async function copyDrive(): Promise<void> {
     </div>
 
     <div
-      v-if="view.latest"
+      v-if="view.latest && !delivered"
       class="lead"
       data-test="overview-latest"
     >
@@ -197,11 +199,11 @@ async function copyDrive(): Promise<void> {
       data-test="overview-goal"
     >
       <h4 class="label">
-        {{ detail.status === 'done' ? t('workTasks.overview.result') : t('workTasks.overview.goal') }}
+        {{ delivered ? t('workTasks.overview.result') : t('workTasks.overview.goal') }}
       </h4>
       <p
         v-if="detail.summary"
-        :class="{ lead: lead === 'result', done: lead === 'result' }"
+        :class="{ lead: lead === 'result', done: lead === 'result' && detail.status === 'done' }"
       >
         <WorkTaskText
           :text="detail.summary"
