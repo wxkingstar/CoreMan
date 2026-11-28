@@ -98,8 +98,8 @@ async def _runtime_supported(session: AsyncSession, intake: Intake) -> bool:
 
 
 async def _scope(session: AsyncSession, ctx: TaskContext, intake: Intake) -> policy.Scope | None:
-    """本人私聊且身份已绑定才有个人工具；其余情况（群聊、协作、未绑定）都返回 None。"""
-    if intake.bot.platform != "feishu" or intake.chat_type != "single":
+    """本人私聊（含单人群）且身份已绑定才有个人工具；其余情况（群聊、协作、未绑定）都返回 None。"""
+    if intake.bot.platform != "feishu" or not intake.private:
         return None
     if not intake.speaker.known or intake.speaker.user_id is None:
         return None

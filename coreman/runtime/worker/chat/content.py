@@ -106,7 +106,7 @@ class ContentStage(ChatStageBase):
         recalled = (
             await self._recall(ctx, pre, parent_id)
             if pre.intake.bot.platform == "feishu"
-            and pre.intake.chat_type == "single"
+            and pre.intake.private
             and has_parent
             and not self_render
             and not media_message_id
@@ -115,7 +115,11 @@ class ContentStage(ChatStageBase):
         )
         if recalled is not None:
             parts = _with_recall(parts, recalled.text) + recalled.parts
-        if pre.intake.bot.platform == "feishu" and pre.intake.chat_type == "group":
+        if (
+            pre.intake.bot.platform == "feishu"
+            and pre.intake.chat_type == "group"
+            and not pre.intake.private
+        ):
             from coreman.runtime.worker.chat.feishu_docs import remember_links
 
             async with ctx.session_factory() as session:

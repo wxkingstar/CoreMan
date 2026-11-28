@@ -192,6 +192,10 @@ class IntakeStage(ChatStageBase):
             text,
             message_type_of(parts),
         )
+        from coreman.runtime.worker.chat import solo
+
+        # 单人群按私聊：排在「连接飞书」等拦截之前，它们和后面挂工具的阶段都只看 `intake.private`。
+        intake = await solo.apply(session, ctx, intake)
         if observe:
             return await self._observe_intake(session, ctx, intake, parts)
         if alert:

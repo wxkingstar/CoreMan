@@ -22,6 +22,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import outbox
+from coreman.core.chat import solo_group
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import Bot, InboundEvent, InteractionState, OutboxItem, Task
 from coreman.core.systems_catalog import uploads
@@ -142,10 +143,11 @@ async def confirmable_origin(
     if bot is None or bot.platform != "feishu" or event is None or event.kind != "message":
         return None
     try:
-        if event.chat_type == "group":
+        if event.chat_type == "group" and not solo_group.marked(task):
             group = await verified_group_origin(session, task, str(user_id))
             return group.chat_id, "group"
-        if event.chat_type == "single":
+        # 单人群按私聊：卡片仍发回这个群，核验与私聊同一套。
+        if event.chat_type == "single" or solo_group.marked(task):
             scope = await verified_origin_scope(session, task, str(user_id))
             return scope.chat_id, "single"
     except ValueError:
