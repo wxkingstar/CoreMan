@@ -45,6 +45,23 @@ NOTIFIER_SETTING = "work_task_notifier_bot_id"
 TEXT_MAX = 500
 
 
+def text_field(row: WorkTask) -> str:
+    """这个问题的输入框在卡上的名字。"""
+    return f"{TEXT_FIELD}_{row.id}"
+
+
+def typed_text(selected: Any) -> str:
+    """从卡片回调带回的表单值里取出填的那句话（输入框名字见 `text_field`，旧卡是 `text`）。"""
+    if not isinstance(selected, dict):
+        return ""
+    for name, values in selected.items():
+        if (name == TEXT_FIELD or str(name).startswith(f"{TEXT_FIELD}_")) and isinstance(
+            values, list
+        ):
+            return str(values[0]) if values else ""
+    return ""
+
+
 def task_url(base_url: str, code: str) -> str:
     return f"{base_url.rstrip('/')}/work-tasks/{code}"
 
@@ -116,37 +133,65 @@ def ask_elements(
         elements.append({"tag": "markdown", "content": f"<font color='grey'>{ask['why']}</font>"})
     plain = [o for o in ask["options"] if o["key"] not in NEEDS_TEXT]
     texted = [o for o in ask["options"] if o["key"] in NEEDS_TEXT]
-    for i, option in enumerate(plain):
-        elements.append(
-            _button(row, ask["id"], option["key"], option["label"], i == 0, allowed, on)
-        )
-    submits = [*texted, *([{"key": OTHER, "label": "其他"}] if ask.get("other") else [])]
+    buttons = [
+        _button(row, ask["id"], option["key"], option["label"], i == 0, allowed, on)
+        for i, option in enumerate(plain)
+    ]
+    # 选项并排成一行（手机上两个一行）：一个按钮占一整行的话，几个选项就把卡片撑出一屏。
+    elements += [_side_by_side(buttons)] if len(buttons) > 1 else buttons
+    # 只有它一个时就是输入框旁边的「提交」；和「退回」「拒绝」并排时还叫「其他」，免得分不清。
+    other = [{"key": OTHER, "label": "其他" if texted else "提交"}] if ask.get("other") else []
+    # 输入框和提交按钮的名字在整张卡里不能重复（飞书会拒收整张卡）：一张进展卡上可能同时
+    # 画着几个问题，名字带上问题所在任务的 id。
+    submits = [
+        {
+            **_button(row, ask["id"], o["key"], o["label"], False, allowed, on),
+            "name": f"{o['key']}_{row.id}",
+            "form_action_type": "submit",
+        }
+        for o in [*texted, *other]
+    ]
     if submits:
-        elements.append(
-            {
-                "tag": "form",
-                "name": f"work_task_{row.id}",
-                "elements": [
-                    {
-                        "tag": "input",
-                        "name": TEXT_FIELD,
-                        "max_length": TEXT_MAX,
-                        "label": {"tag": "plain_text", "content": "写一句话（退回、拒绝要写理由）"},
-                        "label_position": "top",
-                        "placeholder": {"tag": "plain_text", "content": "理由，或你自己的答案"},
-                    },
-                    *(
-                        {
-                            **_button(row, ask["id"], o["key"], o["label"], False, allowed, on),
-                            "name": o["key"],
-                            "form_action_type": "submit",
-                        }
-                        for o in submits
-                    ),
-                ],
-            }
+        entry: dict[str, Any] = {
+            "tag": "input",
+            "name": text_field(row),
+            "max_length": TEXT_MAX,
+            "placeholder": {
+                "tag": "plain_text",
+                "content": "写一句理由，或你自己的答案" if texted else "都不合适？写下你的答案",
+            },
+        }
+        # 只有「其他」时输入框和提交按钮放同一行；还有要写理由的选项（退回、拒绝）时，
+        # 输入框一行、几个按钮并排一行。
+        body = (
+            [_side_by_side([entry, submits[0]], weights=[3, 1])]
+            if len(submits) == 1
+            else [entry, _side_by_side(submits)]
         )
+        elements.append({"tag": "form", "name": f"work_task_{row.id}", "elements": body})
     return elements
+
+
+def _side_by_side(cells: list[dict[str, Any]], weights: list[int] | None = None) -> dict[str, Any]:
+    """几块并排成一行。不给 `weights` 时等宽，窄屏上两个一行。"""
+    for cell in cells:
+        if cell.get("tag") == "button":
+            cell["width"] = "fill"
+    return {
+        "tag": "column_set",
+        "flex_mode": "none" if weights else "bisect",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": (weights or [1] * len(cells))[n],
+                "vertical_align": "center",
+                "elements": [cell],
+            }
+            for n, cell in enumerate(cells)
+        ],
+    }
 
 
 def ask_card(row: WorkTask, ask: dict[str, Any], base_url: str) -> dict[str, Any]:

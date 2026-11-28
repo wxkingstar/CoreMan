@@ -86,9 +86,7 @@ async def handle(
             return "stale"
     if row is None or user is None or not ask_id or not option:
         return "ignored"
-    selected = action.get("selected") or {}
-    values = selected.get(cards.TEXT_FIELD) if isinstance(selected, dict) else None
-    text = str(values[0]) if isinstance(values, list) and values else ""
+    text = cards.typed_text(action.get("selected"))
     before_ask, before_status = row.ask, row.status
     try:
         await execute.answer(

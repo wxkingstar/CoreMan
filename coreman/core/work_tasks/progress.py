@@ -247,7 +247,8 @@ async def shows_ask(session: AsyncSession, row: WorkTask, to: uuid.UUID) -> bool
 
 def _bar(done: int, total: int) -> str:
     filled = round(BAR_CELLS * done / total) if total else 0
-    return "▓" * filled + "░" * (BAR_CELLS - filled)
+    # 实心、空心用同一套方块：▓ 和 ░ 在手机上一个是斜纹块、一个是带间隙的方框，看着不是一条。
+    return "■" * filled + "□" * (BAR_CELLS - filled)
 
 
 async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Rendered | None:
