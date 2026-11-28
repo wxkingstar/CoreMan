@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks.service import allowed_to_use
 from coreman.core.assistants.records import is_assistant
+from coreman.core.chat.dispatch import is_lead
 from coreman.core.db.models import WORK_TASK_OPEN, Bot, User, WorkTask
 from coreman.core.work_tasks import cards, execute
 from coreman.core.work_tasks.service import (
@@ -32,6 +33,8 @@ from coreman.core.work_tasks.service import (
 MAX_DEPTH = 3
 MAX_OPEN_CHILDREN = 5
 MAX_ASKS_PER_CHAIN = 3
+# 调度员牵头的任务是分几步推进的目标，要人定的事比一件普通任务多。
+MAX_ASKS_PER_LEAD_CHAIN = 10
 MAX_PENDING_PER_PERSON = 5
 QUESTION_MAX = 60
 OPTION_MAX = 20
@@ -130,7 +133,8 @@ DESCRIPTIONS = {
         "问人一个问题：question ≤60 字，options 最多 4 个（每个 ≤20 字，平台自动加「其他」），"
         "why ≤40 字，context 写全背景。to_user_id 不填时问代表人。对方在飞书卡片或网页上回答，"
         "答复交回你。之后调用 wait_for。"
-        f"限制：同一条任务链最多问人 {MAX_ASKS_PER_CHAIN} 次；"
+        f"限制：同一条任务链最多问人 {MAX_ASKS_PER_CHAIN} 次"
+        f"（调度员牵头的任务 {MAX_ASKS_PER_LEAD_CHAIN} 次）；"
         f"每人同时最多 {MAX_PENDING_PER_PERSON} 件待回答的事。"
     ),
     "update_task": "写进展：detail 是给 Agent 看的细节；human_text ≤80 字，只在人需要知道时写。",
@@ -476,8 +480,10 @@ async def ask_human(
             WorkTask.brief.like("[问题]%"),
         )
     )
-    if int(asked or 0) >= MAX_ASKS_PER_CHAIN:
-        raise WorkTaskError(409, f"这件事已经问过人 {MAX_ASKS_PER_CHAIN} 次，先自己判断或交付说明")
+    top = row if root == row.id else await session.get(WorkTask, root)
+    limit = MAX_ASKS_PER_LEAD_CHAIN if top is not None and is_lead(top) else MAX_ASKS_PER_CHAIN
+    if int(asked or 0) >= limit:
+        raise WorkTaskError(409, f"这件事已经问过人 {limit} 次，先自己判断或交付说明")
     await _check_pending(session, person)
     await _check_room(session, row)
     child = _child(

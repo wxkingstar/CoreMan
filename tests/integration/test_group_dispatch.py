@@ -652,6 +652,105 @@ def test_dispatcher_note_says_to_leave_mentioned_employees_alone():
     assert "@ 了某位 AI 员工" in text and "除了上面 @ 员工的情况，不要选 none" in text
 
 
+LEAD = {
+    "title": "订单与仓储系统对接",
+    "summary": "两个系统对齐接口并联调",
+    "brief": "先对齐接口，再各自开发，最后在测试环境联调",
+}
+
+
+def test_parse_accepts_and_checks_lead():
+    led = dispatch.parse(
+        plan(action="lead", lead={**LEAD, "title": "很" * 50, "related": ["T-1", "T-9"]}),
+        STAFF,
+        {"T-1"},
+    )
+    assert led.action == "lead"
+    (item,) = led.tasks
+    assert len(item["title"]) == dispatch.TITLE_LIMIT and item["related"] == ["T-1"]
+    assert item["brief"] == LEAD["brief"]
+    with pytest.raises(ValueError, match="bad_lead"):
+        dispatch.parse(plan(action="lead"), STAFF, set())
+    with pytest.raises(ValueError, match="missing_title"):
+        dispatch.parse(plan(action="lead", lead={"brief": "对接"}), STAFF, set())
+    assert "- lead：" in dispatch.note(STAFF, [], [], {})
+
+
+async def test_dispatcher_in_trial_records_that_it_would_lead(db_engine, db_session, monkeypatch):
+    bot, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, plan(action="lead", reason="要分几步", lead=LEAD)
+    )
+    assert stream.final_text == group_observe.NO_REPLY and decision.outcome == "dispatch_lead"
+    (task,) = list(await db_session.scalars(select(WorkTask)))
+    assert task.status == "shadow" and dispatch.is_lead(task)
+    assert task.assignee_bot_id == bot.id
+    from coreman.core.db.models import Task
+
+    assert list(await db_session.scalars(select(Task).where(Task.status == "queued"))) == []
+
+
+async def test_live_dispatcher_leads_a_goal_in_its_own_task_session(
+    db_engine, db_session, monkeypatch
+):
+    bot, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine,
+        db_session,
+        monkeypatch,
+        plan(action="lead", reason="要分几步", lead=LEAD),
+        mode="on",
+    )
+    (task,) = list(await db_session.scalars(select(WorkTask)))
+    assert task.status == "waiting" and task.tracked and dispatch.is_lead(task)
+    assert task.assignee_bot_id == bot.id == task.dispatcher_bot_id and task.root_id == task.id
+    link = f"[{task.code}](http://localhost/work-tasks/{task.code})"
+    assert stream.final_text == f"这件事我来牵头：订单与仓储系统对接（{link}）"
+    assert decision.outcome == "dispatch_lead" and decision.dispatch["codes"] == [task.code]
+
+    # 牵头的那一轮排给调度员自己，在任务会话里做；回复仍回到群里那条消息上。
+    done, body, reply = await _run_work_turn(
+        db_engine, db_session, monkeypatch, bot.id, f"{link} 卡住了：群里没有能接的员工"
+    )
+    assert done.session_key == dispatch.work_session_key(task.code)
+    turn = body["messages"][-1]["content"]
+    turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
+    assert "这件事由你牵头" in turn and LEAD["brief"] in turn
+    assert "调度员写的要求" not in turn
+    assert reply.reply_context["message_id"] == "om1"
+
+    # 调度回合的名录里，它牵头的任务写明是它自己的。
+    note = dispatch.note(STAFF, [], [task], {bot.id: bot.name})
+    assert f"- {task.code}" in note and "你牵头" in note
+
+
+async def test_a_note_for_a_task_waiting_on_subtasks_keeps_it_waiting(db_session):
+    """补充交给正在等子任务的任务：照常排一轮，任务仍在等，子任务的结果才交得回去。"""
+    from coreman.core.db.models import InboundEvent, Task
+
+    bot = await dispatcher_bot(db_session, "on")
+    await say(db_session, bot, "om1", "接口文档放哪了？")
+    event = await db_session.scalar(select(InboundEvent))
+    waiting_on = {"kind": "task", "codes": ["T-9"], "human_text": "等 T-9 的结果"}
+    row = WorkTask(
+        title="订单与仓储系统对接",
+        status="waiting",
+        waiting_on=waiting_on,
+        platform="feishu",
+        chat_id=CHAT,
+        assignee_bot_id=bot.id,
+        dispatcher_bot_id=bot.id,
+        requester_user_id=bot.created_by,
+    )
+    db_session.add(row)
+    await db_session.flush()
+    await dispatch.hand_off(db_session, row, event_id=event.id, requester_pid="u1", note="放在仓库")
+    await db_session.commit()
+    assert row.status == "waiting" and row.waiting_on == waiting_on
+    queued = await db_session.scalar(
+        select(Task).where(Task.session_key == dispatch.work_session_key(row.code))
+    )
+    assert queued.payload["work_note"] == "放在仓库"
+
+
 # ---------------------------------------------------------------- 运行时额度用完
 
 LIMIT_NOTICE = "You've hit your weekly limit · resets Nov 30 at 4am (America/Los_Angeles)"

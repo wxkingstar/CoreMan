@@ -278,3 +278,28 @@ async def test_a_turn_ending_after_its_resume_is_queued_does_not_finish_the_task
     parent = await _fresh(db_session, parent)
     assert parent.status == "waiting" and parent.waiting_on["kind"] == "queue"
     assert parent.closed_at is None
+
+
+async def test_a_dispatcher_led_task_may_ask_people_more_often(db_session):
+    """普通任务一条链最多问人 3 次；调度员牵头的任务分几步推进，放宽到 10 次。"""
+    lead, _, _, parent, turn = await _setup(db_session)
+
+    async def ask(n: int):
+        return await agent_tools.invoke(
+            db_session,
+            parent,
+            lead,
+            "ask_human",
+            {"question": f"第 {n} 个口径怎么定？", "context": "背景"},
+            chat_task_id=turn.id,
+            base_url=BASE,
+        )
+
+    for n in range(agent_tools.MAX_ASKS_PER_CHAIN):
+        assert "code" in await ask(n)
+    refused = await ask(9)
+    assert refused["stop"] is True and "3 次" in refused["message"]
+
+    parent.source, parent.dispatcher_bot_id = "dispatch", lead.id
+    await db_session.flush()
+    assert "code" in await ask(9)
