@@ -30,6 +30,8 @@ CoreMan 签发自己的不透明令牌，登录沿用管理台已有的登录方
 | `GET /.well-known/oauth-authorization-server` | 授权服务器元数据；issuer 是 `PUBLIC_BASE_URL` |
 | `POST /api/oauth/register` | 动态注册，只接受公开客户端（`token_endpoint_auth_method=none`）和本机回环回调（`http://127.0.0.1`、`http://localhost`、`http://[::1]`，端口不限，按 RFC 8252 比较时忽略端口） |
 | `GET /api/oauth/authorize` | 校验客户端与回调；没登录先去登录页，登录后回到这里；显示授权确认页 |
+| 客户端元数据文档 | `client_id` 是带路径的 https 地址时（元数据里 `client_id_metadata_document_supported: true`），不用注册：成员登录后平台取回该地址的 JSON（只访问公网地址、不跟随重定向、5 秒、16 KB），要求其中 `client_id` 与地址完全一致、公开客户端，只采用其中的本机回环回调，每次授权都重新取。MCP 2026-07-28 起动态注册标为弃用，两种都保留 |
+| `resource` 参数（RFC 8707） | 授权和换令牌时可带。只认本机的两个资源：目录 MCP 地址（scope `mcp`）与站点根（scope `api`）；比较时忽略查询串和末尾斜杠。授权请求里每个 scope 都必须属于点名的资源，换令牌时的资源必须是授权时点过的，否则 `invalid_target`。令牌本来就按 scope 分开使用，所以点名资源后拿不到别处才用的权限 |
 | `POST /api/oauth/authorize` | 确认页提交：允许则带 `code`、`state`、`iss` 回到回调，拒绝则带 `error=access_denied` |
 | `POST /api/oauth/token` | `authorization_code`（必须 PKCE S256）、`refresh_token`（每次轮换） |
 | `POST /api/oauth/revoke` | 吊销访问令牌或续期令牌，整次授权一起失效 |

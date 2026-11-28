@@ -39,12 +39,13 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     base = await session.get(ChatSession, (scope.bot.id, scope.task.session_key))
     if base is None or base.relay_session_id != capability.session_id:
         raise ApiError(403, 403, "Group conversation changed")
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY), request.headers)
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
-    if method == "initialize":
-        return mcp_rpc.initialize(rid, params, "coreman-feishu-docs")
+    hello = mcp_rpc.hello(rid, method, params, "coreman-feishu-docs")
+    if hello is not None:
+        return hello
     result: dict[str, Any]
     if method in ("ping", "tools/list"):
         if params:

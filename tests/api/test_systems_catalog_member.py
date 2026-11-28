@@ -454,3 +454,189 @@ async def test_rate_limit_and_hourly_budget(
         await call(client, "systems_browse", {})
         limited = await rpc(client, "tools/call", {"name": "systems_browse", "arguments": {}})
         assert limited["error"]["code"] == -32000
+
+
+TASKS = "io.modelcontextprotocol/tasks"
+
+
+async def modern(
+    client: httpx.AsyncClient,
+    method: str,
+    params: dict[str, Any] | None = None,
+    *,
+    tasks: bool = True,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """One request of the stateless protocol revision: self-describing `_meta`, mirrored headers."""
+    capabilities = {"extensions": {TASKS: {}}} if tasks else {}
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": capabilities,
+    }
+    params = params or {}
+    sent = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method}
+    named = params.get("name") or params.get("taskId")
+    if named:
+        sent["Mcp-Name"] = named
+    return await client.post(
+        PUBLIC_PATH,
+        json={"jsonrpc": "2.0", "id": 7, "method": method, "params": {**params, "_meta": meta}},
+        headers={**sent, **(headers or {})},
+    )
+
+
+async def test_stateless_revision_discovery_and_headers(
+    app: Any, db_session: AsyncSession, fake: FakeBusinessSystem
+) -> None:
+    _, _, _, access = await setup(db_session)
+    async with agent(app, access) as client:
+        found = (await modern(client, "server/discover")).json()["result"]
+        assert found["resultType"] == "complete"
+        assert found["supportedVersions"] == ["2026-07-28"]
+        assert found["capabilities"] == {"tools": {}, "extensions": {TASKS: {}}}
+        assert found["ttlMs"] > 0 and found["cacheScope"] == "public"
+        assert found["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "coreman-systems"
+
+        listed = (await modern(client, "tools/list")).json()["result"]
+        # The list depends on the member, so nobody may share or keep it.
+        assert listed["resultType"] == "complete"
+        assert (listed["ttlMs"], listed["cacheScope"]) == (0, "private")
+        hints = {tool["name"]: tool["annotations"] for tool in listed["tools"]}
+        assert hints["systems_search"]["readOnlyHint"] is True
+        assert hints["systems_call"] == {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "openWorldHint": True,
+        }
+
+        # The handshake and keep-alive of older revisions are not methods here.
+        for gone in ("initialize", "ping"):
+            reply = await modern(client, gone)
+            assert reply.status_code == 404 and reply.json()["error"]["code"] == -32601
+        mismatch = await modern(
+            client, "tools/call", {"name": "systems_browse"}, headers={"Mcp-Name": "other"}
+        )
+        assert mismatch.status_code == 400 and mismatch.json()["error"]["code"] == -32020
+        encoded = await modern(
+            client,
+            "tools/call",
+            {"name": "systems_browse", "arguments": {}},
+            headers={"Mcp-Name": "=?base64?c3lzdGVtc19icm93c2U=?="},
+        )
+        assert encoded.status_code == 200 and "error" not in encoded.json()
+        wrong = await modern(client, "tools/list", headers={"MCP-Protocol-Version": "2025-11-25"})
+        assert wrong.status_code == 400 and wrong.json()["error"]["code"] == -32020
+        old = await client.post(
+            PUBLIC_PATH,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2030-01-01",
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                    }
+                },
+            },
+            headers={"MCP-Protocol-Version": "2030-01-01", "Mcp-Method": "tools/list"},
+        )
+        assert old.status_code == 400
+        assert old.json()["error"]["code"] == -32022
+        assert old.json()["error"]["data"]["supported"][0] == "2026-07-28"
+        missing = await client.post(
+            PUBLIC_PATH,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"},
+        )
+        assert missing.status_code == 400 and missing.json()["error"]["code"] == -32602
+
+        # Clients of older revisions are served as before, on the same endpoint.
+        legacy = await rpc(client, "initialize", {"protocolVersion": "2025-11-25"})
+        assert legacy["result"]["protocolVersion"] == "2025-11-25"
+        assert "resultType" not in (await rpc(client, "tools/list"))["result"]
+        assert (await rpc(client, "ping"))["result"] == {}
+        cancelled = await client.post(
+            PUBLIC_PATH,
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 1},
+            },
+        )
+        assert cancelled.status_code == 202
+        assert (await rpc(client, "tasks/get", {"taskId": "x"}))["error"]["code"] == -32601
+
+
+async def test_staged_write_is_a_task_for_clients_that_support_tasks(
+    app: Any, db_session: AsyncSession, fake: FakeBusinessSystem
+) -> None:
+    bot, _, _, access = await setup(db_session)
+    write = {
+        "name": "systems_call",
+        "arguments": {
+            "system": "stock",
+            "operation_id": "createDraft",
+            "body": {"sku": "SKU-9", "quantity": 3},
+            "note": {"target": "SKU-9 入库草稿"},
+        },
+    }
+    async with agent(app, access) as client:
+        # Without the extension on the request the write is staged the old way.
+        plain = (await modern(client, "tools/call", write, tasks=False)).json()["result"]
+        assert plain["resultType"] == "complete"
+        assert json.loads(plain["content"][0]["text"])["status"] == "pending_confirmation"
+        refused = await modern(client, "tasks/get", {"taskId": str(uuid.uuid4())}, tasks=False)
+        assert refused.status_code == 400 and refused.json()["error"]["code"] == -32021
+
+        created = (await modern(client, "tools/call", write)).json()["result"]
+        assert created["resultType"] == "task" and created["status"] == "working"
+        assert created["ttlMs"] > 0 and created["pollIntervalMs"] == 3000
+        assert created["createdAt"] and created["lastUpdatedAt"]
+        task_id = created["taskId"]
+        assert not any(r.method == "POST" for r in fake.requests)
+
+        waiting = (await modern(client, "tasks/get", {"taskId": task_id})).json()["result"]
+        assert waiting["resultType"] == "complete" and waiting["status"] == "working"
+        assert "result" not in waiting and "确认" in waiting["statusMessage"]
+        # Nothing the agent sends can confirm or withdraw the write.
+        for method in ("tasks/update", "tasks/cancel"):
+            params = {"taskId": task_id, **({"inputResponses": {}} if "update" in method else {})}
+            assert (await modern(client, method, params)).json()["result"] == {
+                "resultType": "complete",
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "coreman-systems",
+                        "version": "2.0",
+                    }
+                },
+            }
+        assert not any(r.method == "POST" for r in fake.requests)
+        unknown = (await modern(client, "tasks/get", {"taskId": str(uuid.uuid4())})).json()
+        assert unknown["error"]["code"] == -32602
+
+        assert await click(app, db_session, bot, task_id, "confirm") == "member_write_ok"
+        done = (await modern(client, "tasks/get", {"taskId": task_id})).json()["result"]
+        assert done["status"] == "completed" and done["result"]["isError"] is False
+        outcome = json.loads(done["result"]["content"][0]["text"])
+        assert outcome["status"] == "ok" and "SKU-9" in outcome["response"]
+
+    # Another member's agent cannot see the task.
+    other = User(login_name="lisi", display_name="李四", email="lisi@example.test")
+    db_session.add(other)
+    db_session.add(OAuthClient(client_id="cli-other", client_name="Codex", redirect_uris=[]))
+    await db_session.flush()
+    grant = OAuthGrant(
+        client_id="cli-other",
+        user_id=other.id,
+        scope="mcp",
+        refresh_hash=uuid.uuid4().hex,
+        refresh_expires_at=utcnow() + timedelta(days=30),
+    )
+    db_session.add(grant)
+    await db_session.flush()
+    theirs = await oauth._mint_access(db_session, grant)
+    await db_session.commit()
+    async with agent(app, theirs) as client:
+        hidden = (await modern(client, "tasks/get", {"taskId": task_id})).json()
+        assert hidden["error"]["code"] == -32602

@@ -7,12 +7,14 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.api import mcp_rpc
 from coreman.api.deps import get_session
 from coreman.api.errors import ApiError
 from coreman.core.chat import bot_collaboration as service
 from coreman.core.chat import collaboration_tools as tools
 
 router = APIRouter(tags=["bot-collaboration"])
+MAX_BODY = 16384
 
 
 class HelpIn(BaseModel):
@@ -60,39 +62,19 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     # This endpoint is for native CLI clients, never browser-originated requests.
     if request.headers.get("Origin"):
         raise ApiError(403, 403, "Browser origins are not supported")
-    raw = await request.body()
-    if len(raw) > 16384:
-        raise ApiError(413, 413, "Request too large")
-    try:
-        body = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return rpc_error(None, -32700, "Parse error")
-    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0":
-        return rpc_error(None, -32600, "Invalid request")
-    rid, method = body.get("id"), body.get("method")
-    if not isinstance(method, str) or isinstance(rid, (dict, list, bool)):
-        return rpc_error(None, -32600, "Invalid request")
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY), request.headers)
+    if isinstance(parsed, Response):
+        return parsed
+    rid, method, params = parsed
     try:
         await tools.task_scope(session, task_id, actor)
     except ValueError as exc:
         raise ApiError(403, 403, str(exc)) from None
-    if "id" not in body:
-        return Response(status_code=202)
-    params = body.get("params", {})
-    if not isinstance(params, dict):
-        return rpc_error(rid, -32602, "Invalid params")
+    hello = mcp_rpc.hello(rid, method, params, "coreman-collaboration")
+    if hello is not None:
+        return hello
     result: dict[str, Any]
-    if method == "initialize":
-        requested = params.get("protocolVersion")
-        version = (
-            requested if requested in ("2025-03-26", "2025-06-18", "2025-11-25") else "2025-03-26"
-        )
-        result = {
-            "protocolVersion": version,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "coreman-collaboration", "version": "1.0"},
-        }
-    elif method == "ping":
+    if method == "ping":
         result = {}
     elif method == "tools/list":
         result = {"tools": tools.tool_definitions()}
@@ -118,20 +100,10 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
             "isError": "error" in value,
         }
     else:
-        return rpc_error(rid, -32601, "Method not found")
-    return Response(
-        json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}, ensure_ascii=False),
-        media_type="application/json",
-    )
-
-
-def rpc_error(rid: Any, code: int, message: str) -> Response:
-    return Response(
-        json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}),
-        media_type="application/json",
-    )
+        return mcp_rpc.error(rid, -32601, "Method not found")
+    return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": result})
 
 
 @router.get("/api/runtime/collaboration/mcp")
 async def no_sse() -> Response:
-    return Response(status_code=405, headers={"Allow": "POST"})
+    return Response(status_code=405, headers={"Allow": "POST", **mcp_rpc.NO_STORE})

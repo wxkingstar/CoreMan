@@ -53,7 +53,7 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
         or not bot.enabled
     ):
         raise ApiError(403, 403, "Task turn is no longer active")
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY), request.headers)
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
@@ -61,8 +61,9 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     # 只有调用这些工具时才锁任务行，列工具、领取别的任务都不锁。
     locking = method == "tools/call" and params.get("name") in agent_tools.NAMES
     current = await _current(session, task, bot, lock=locking)
-    if method == "initialize":
-        return mcp_rpc.initialize(rid, params, "coreman-tasks")
+    hello = mcp_rpc.hello(rid, method, params, "coreman-tasks")
+    if hello is not None:
+        return hello
     result: dict[str, Any]
     if method in ("ping", "tools/list"):
         if params:

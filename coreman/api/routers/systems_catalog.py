@@ -237,12 +237,13 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     so a stopped task, a disabled employee or a revoked grant takes effect on the next call.
     """
     capability, scope = await _capability_scope(request, session)
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY), request.headers)
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
-    if method == "initialize":
-        return mcp_rpc.initialize(rid, params, "coreman-systems")
+    hello = mcp_rpc.hello(rid, method, params, "coreman-systems")
+    if hello is not None:
+        return hello
     result: dict[str, Any]
     if method in ("ping", "tools/list"):
         if params:
@@ -396,6 +397,19 @@ class _RateLimit:
 
 MEMBER_CALLS_PER_MINUTE = 120
 _member_limit = _RateLimit(MEMBER_CALLS_PER_MINUTE)
+# MCP Tasks 扩展的方法 → 允许的参数。
+TASK_METHODS = {
+    "tasks/get": {"taskId"},
+    "tasks/update": {"taskId", "inputResponses"},
+    "tasks/cancel": {"taskId"},
+}
+
+
+def _tool_result(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
+        "isError": "error" in value,
+    }
 
 
 @router.post(PUBLIC_PATH)
@@ -430,13 +444,17 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
         raise ApiError(400, 400, "token_env must be an environment variable name")
     # Members' writes carry their request body in the tool arguments.
     limit = MAX_BODY if member is not None else PUBLIC_MAX_BODY
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, limit))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, limit), request.headers)
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
-    if method == "initialize":
-        return mcp_rpc.initialize(rid, params, "coreman-systems")
-    if method not in ("ping", "tools/list", "tools/call"):
+    hello = mcp_rpc.hello(
+        rid, method, params, "coreman-systems", extensions={mcp_rpc.TASKS_EXTENSION: {}}
+    )
+    if hello is not None:
+        return hello
+    tasks_call = method in TASK_METHODS and mcp_rpc.modern()
+    if method not in ("ping", "tools/list", "tools/call") and not tasks_call:
         return mcp_rpc.error(rid, -32601, "Method not found")
     if method in ("ping", "tools/list") and params:
         return mcp_rpc.error(rid, -32602, "Invalid params")
@@ -448,6 +466,11 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
         or not isinstance(params.get("arguments", {}), dict)
     ):
         return mcp_rpc.error(rid, -32602, "Invalid params")
+    if tasks_call:
+        if not mcp_rpc.client_extension(mcp_rpc.TASKS_EXTENSION):
+            return mcp_rpc.missing_capability(rid, mcp_rpc.TASKS_EXTENSION)
+        if set(params) - TASK_METHODS[method] or not isinstance(params.get("taskId"), str):
+            return mcp_rpc.error(rid, -32602, "Invalid params")
     if member is not None and method == "tools/call" and not _member_limit.allow(member.id):
         return mcp_rpc.error(rid, -32000, "调用过于频繁，请稍后再试")
     ctx: context.Context | None = None
@@ -460,6 +483,19 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
             unavailable = exc.reason
         if ctx is not None:
             ctx.token_env = token_env
+    if tasks_call:
+        # 任务就是一个等本人确认的写操作，只有成员本人这次授权下的才查得到。
+        view = await member_writes.task(ctx, params["taskId"]) if ctx is not None else None
+        await session.rollback()
+        if view is None:
+            return mcp_rpc.error(rid, -32602, "Task not found")
+        if method != "tasks/get":
+            # 没有要客户端补充的输入；取消也只是不再等：撤不撤由本人在卡片或 Tower 上决定。
+            return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": {}})
+        outcome = view.pop("outcome", None)
+        if outcome is not None:
+            view["result"] = _tool_result(outcome)
+        return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": view})
     if ctx is None:
         ctx = context.Context(
             session=session,
@@ -485,10 +521,19 @@ async def public_mcp(request: Request, session: AsyncSession = Depends(get_sessi
         else:
             value = await tools.dispatch(ctx, name, arguments)
         await session.commit()
-        result = {
-            "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
-            "isError": "error" in value,
-        }
+        if (
+            name == "systems_call"
+            and value.get("status") == "pending_confirmation"
+            and mcp_rpc.client_extension(mcp_rpc.TASKS_EXTENSION)
+        ):
+            # 客户端支持任务：等确认的写操作作为任务返回，由客户端自己轮询结果。
+            view = await member_writes.task(ctx, str(value["confirmation_id"]))
+            await session.rollback()
+            if view is not None:
+                return mcp_rpc.response(
+                    {"jsonrpc": "2.0", "id": rid, "result": {"resultType": "task", **view}}
+                )
+        result = _tool_result(value)
     return mcp_rpc.response({"jsonrpc": "2.0", "id": rid, "result": result})
 
 
