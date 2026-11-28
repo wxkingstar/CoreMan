@@ -162,6 +162,21 @@ async def test_tasks_not_started_in_a_group_get_no_progress_card(db_session):
 
 async def test_questions_go_to_the_group_and_only_the_asked_person_answers(db_session):
     lead, _, alice, root = await _setup(db_session)
+    # 任务续做时平台写的合成事件也记在这个群、这个人名下，但没有 open_id：不能挡住真消息里的那个。
+    db_session.add(
+        InboundEvent(
+            bot_id=lead.id,
+            platform="feishu",
+            platform_msg_id=f"work:{root.id}:2:resume",
+            kind="message",
+            chat_type="group",
+            chat_id=GROUP,
+            sender_platform_user_id="ou_alice",
+            payload={},
+            reply_context={"chat_id": GROUP, "chat_type": "group"},
+        )
+    )
+    await db_session.commit()
     asked = await _tool(
         db_session,
         root,
