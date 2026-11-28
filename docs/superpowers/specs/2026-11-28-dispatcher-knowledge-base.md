@@ -382,6 +382,6 @@ coreman knowledge purge K-<id> [K-<id> ...]
 - **落不了页的条目。** 一个条目交给编译三次仍没有出现在任何一页，记为丢弃（`not_compiled`），不再重试。
 - **设置的键。** `knowledge.bot_id`、`knowledge.enabled`、`knowledge.quota`、`knowledge.schedule`（`{hour, timezone}`，默认 2 点、`Asia/Shanghai`）、`knowledge.cold_start`（冷启动还没跑完）、`knowledge.last_run`、`knowledge.cursor.<来源>`。平台没有统一的部署时区，所以时区跟着这项设置走。
 - **没跑成时的重试。** 额度不够、节点离线或出错时，从约定时间起 6 小时内每小时再试一次；过了就等第二天。
-- **一次运行的上限。** 除了批次上限，还有 4 小时的总时长上限；没做完的下次接着做。每做 10 批重新看一次额度，超过阈值就换后端，都不够就停。
+- **一次运行的上限。** 除了批次上限，还有 4 小时的总时长上限；没做完的下次接着做。每一轮带回的额度当场记到运行时上，每批抽取和每批编译之前都重新看额度，超过阈值就换后端，都不够就停。
 - **表。** `knowledge_items` 多一列 `attempts`；`knowledge_excluded_chats` 第二期再建。
 - **命令行。** 是在平台容器里执行的管理命令（和规则备份一样），不经管理台接口：`status` 看设置、条目计数和最近几次运行，`set --bot <标识> --enable` 指定承接员工并开启，`run [--cold-start] [--apply] [--limit N]` 立即跑一次（不加 `--apply` 只列出会读多少材料）。`exclude`、`purge` 第二期做。
