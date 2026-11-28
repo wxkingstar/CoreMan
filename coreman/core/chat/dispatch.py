@@ -716,7 +716,7 @@ async def record(
                         else f"补充给 @{assignee.name} 了"
                     )
     elif plan.action == "adopt":
-        row, line = await _adopt(
+        adopted, line = await _adopt(
             session,
             plan,
             dispatcher=dispatcher,
@@ -731,8 +731,8 @@ async def record(
             live=live,
             base_url=base_url,
         )
-        if row is not None:
-            codes.append(row.code)
+        if adopted is not None:
+            codes.append(adopted.code)
     elif plan.action == "clarify" and live:
         line = plan.question
     elif plan.action == "reply" and live:
@@ -784,7 +784,7 @@ async def _adopt(
         e.bot_id for e in staff
     }:
         problem = f"{row.code} 指派给的员工不在这个群里，没法在这里开工"
-    if problem is not None:
+    if problem is not None or speaker is None:
         return row, (problem if live else None)
     if not live:
         return row, None
