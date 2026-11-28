@@ -59,8 +59,10 @@ export interface WorkTaskOverview {
   /** 这件事自己和它下面各层还没人答的问题。 */
   asks: (WorkTaskAsk & { code: string; title: string })[]
   doing: WorkTaskStep[]; plan: string[]; done: WorkTaskStep[]
-  /** 办完后还要人处理的事。 */
-  followups: string[]
+  /** 办完后还要人处理的事：每件带上办没办、谁勾的，或者建成了哪个任务。 */
+  followups: { index: number; text: string; done: boolean; by: string; at: string | null; task: string }[]
+  /** 这件事上上下下人定过的事：谁、什么时候、答了什么。 */
+  decisions: { code: string; question: string; by: string; at: string | null; answer: string }[]
   latest: { text: string; at: string; actor_name: string } | null
 }
 export interface WorkTaskDetail extends WorkTask {
@@ -112,9 +114,11 @@ const base = '/api/admin/work-tasks'
 const one = (code: string) => `${base}/${encodeURIComponent(code)}`
 export const workTasks = {
   list: (params: WorkTaskQuery = {}) =>
-    call<{ items: (WorkTask & { id: number })[]; counts: Record<string, number>; needs_me: number }>(
-      http.get(base, { params }),
-    ),
+    call<{
+      items: (WorkTask & { id: number })[]; counts: Record<string, number>; needs_me: number
+      /** 「待我处理」才有：还在进行的事里，后续步骤点到我名字的。 */
+      upcoming?: { code: string; title: string; step: string }[]
+    }>(http.get(base, { params })),
   get: (code: string) => call<WorkTaskDetail>(http.get(one(code))),
   /** 给 AI 读的纯文本（Markdown）版。 */
   markdown: async (code: string): Promise<string> =>
@@ -123,6 +127,9 @@ export const workTasks = {
   create: (body: WorkTaskCreate) => call<WorkTaskDetail>(http.post(base, body)),
   assign: (code: string, body: { assignee: AssigneeIn; note?: string; review_required?: boolean | null; start?: boolean }) =>
     call<WorkTaskDetail>(http.post(`${one(code)}/assign`, body)),
+  /** 交付后还要人处理的事：勾成办了、改回没办，或者建成一件新任务。 */
+  followup: (code: string, index: number, body: { done?: boolean; as_task?: boolean }) =>
+    call<WorkTaskDetail>(http.post(`${one(code)}/followups/${index}`, body)),
   /** 叫任务上的 AI 员工开工或接着做：以点的人的身份做。 */
   start: (code: string) => call<WorkTaskDetail>(http.post(`${one(code)}/start`)),
   answer: (code: string, body: { ask_id: string; option: string; text?: string }) =>

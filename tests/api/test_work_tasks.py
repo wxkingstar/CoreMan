@@ -129,6 +129,76 @@ async def test_the_list_shows_goals_only_and_counts_what_is_inside(
     assert [i["title"] for i in found["items"]] == ["仓储侧开发"]
 
 
+async def test_the_home_list_tells_me_what_is_coming_my_way(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """还在进行的事里，后续步骤点到我名字的：现在不用我处理，但提前让我看到。"""
+    await login_as(client, db_session, display_name="alice")
+    root = WorkTask(title="订单与仓储系统对接", status="in_progress")
+    db_session.add(root)
+    await db_session.flush()
+    root.root_id = root.id
+    db_session.add_all(
+        [
+            WorkTask(title="两边联调", status="in_progress", parent_id=root.id, root_id=root.id),
+            WorkTaskEvent(
+                work_task_id=root.id,
+                kind="plan",
+                actor_type="bot",
+                human_text="",
+                agent_detail={"steps": ["两边联调", "请 alice 同意合并", "合并后发测试环境"]},
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    home = (await client.get("/api/admin/work-tasks", params={"view": "needs_me"})).json()["data"]
+    assert home["items"] == []
+    assert home["upcoming"] == [
+        {"code": root.code, "title": "订单与仓储系统对接", "step": "请 alice 同意合并"}
+    ]
+    # 别的栏不算这个；事情办完了也不再预告。
+    assert (await client.get("/api/admin/work-tasks")).json()["data"]["upcoming"] == []
+    root.status = "done"
+    await db_session.commit()
+    home = (await client.get("/api/admin/work-tasks", params={"view": "needs_me"})).json()["data"]
+    assert home["upcoming"] == []
+
+
+async def test_follow_ups_left_after_delivery_can_be_ticked_off(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    alice = await login_as(client, db_session, display_name="alice")
+    made = (await client.post("/api/admin/work-tasks", json={"title": "对接仓储系统"})).json()
+    code = made["data"]["code"]
+    row = await db_session.scalar(select(WorkTask).where(WorkTask.code == code))
+    row.status, row.summary = "done", "测试环境联调通过"
+    db_session.add(
+        WorkTaskEvent(
+            work_task_id=row.id,
+            kind="submitted",
+            actor_type="human",
+            actor_id=str(alice.id),
+            human_text="交付",
+            agent_detail={"followups": ["合并 PR #12", "发到正式环境"]},
+        )
+    )
+    await db_session.commit()
+
+    ticked = await client.post(f"/api/admin/work-tasks/{code}/followups/0", json={"done": True})
+    left = ticked.json()["data"]["overview"]["followups"]
+    assert [(f["text"], f["done"], f["by"]) for f in left] == [
+        ("合并 PR #12", True, "alice"),
+        ("发到正式环境", False, ""),
+    ]
+    assert "alice办了：合并 PR #12" in [e["human_text"] for e in ticked.json()["data"]["events"]]
+    turned = await client.post(f"/api/admin/work-tasks/{code}/followups/1", json={"as_task": True})
+    task_code = turned.json()["data"]["overview"]["followups"][1]["task"]
+    assert task_code and task_code in turned.json()["data"]["related_codes"]
+    missing = await client.post(f"/api/admin/work-tasks/{code}/followups/9", json={"done": True})
+    assert missing.status_code == 404
+
+
 async def test_the_list_leaves_out_automatic_records_unless_asked(
     client: httpx.AsyncClient, db_session: AsyncSession
 ) -> None:

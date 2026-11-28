@@ -424,6 +424,7 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
           :detail="detail"
           @answered="answered"
           @start="startTask"
+          @followup="(index, body) => act(() => workTasks.followup(detail!.code, index, body))"
         />
       </section>
       <div

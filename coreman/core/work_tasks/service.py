@@ -374,6 +374,62 @@ async def assign(
     return row
 
 
+# ---- 交付后还要人处理的事 --------------------------------------------------------------------
+
+
+async def mark_followup(
+    session: AsyncSession,
+    row: WorkTask,
+    user: User,
+    index: int,
+    *,
+    done: bool,
+    as_task: bool = False,
+) -> WorkTask | None:
+    """把一件「还要人处理的事」勾成办了（或改回没办）；`as_task` 时把它建成一件新任务再勾掉。
+
+    谁都能勾：这些事常常写明要某位同事去办，办的人不一定是任务的参与者。返回新建的任务。
+    """
+    from coreman.core.work_tasks import progress
+
+    items = await progress.followup_items(session, row)
+    if not 0 <= index < len(items):
+        raise WorkTaskError(404, "没有这件要处理的事，请刷新")
+    item = items[index]
+    if bool(item["done"]) == done and not as_task:
+        return None
+    made: WorkTask | None = None
+    if as_task:
+        if item["done"]:
+            raise WorkTaskError(409, "这件事已经办了")
+        text = str(item["text"])
+        made = await create(
+            session, user, title=clip(text, TITLE_MAX), summary=clip(text, SUMMARY_MAX)
+        )
+        made.related_codes = [row.code]
+        row.related_codes = [*(row.related_codes or []), made.code]
+        done = True
+    line = (
+        f"{name_of(user)}把「{clip(str(item['text']), 40)}」建成了 {made.code}"
+        if made is not None
+        else f"{name_of(user)}{'办了' if done else '改回没办'}：{clip(str(item['text']), 50)}"
+    )
+    human_event(
+        session,
+        row,
+        user,
+        "followup",
+        line,
+        {
+            "index": index,
+            "done": done,
+            "by_name": name_of(user),
+            "task": made.code if made is not None else "",
+        },
+    )
+    return made
+
+
 # ---- 回答待选择事项 ------------------------------------------------------------------------
 
 

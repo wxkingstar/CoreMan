@@ -20,7 +20,7 @@ from coreman.core.db.models import (
     WorkTaskWatcher,
 )
 from coreman.core.wecom.messages import InboundMessage, Sender
-from coreman.core.work_tasks import agent_tools, cards, due, flow, progress, view
+from coreman.core.work_tasks import agent_tools, cards, due, flow, progress, service, view
 from coreman.runtime.gateway_feishu import reply_buttons
 from coreman.runtime.worker import work_task_cards
 from coreman.runtime.worker.chat import work
@@ -329,6 +329,11 @@ async def test_the_task_page_opens_on_the_same_picture_as_the_card(db_session):
     (doing,) = seen["doing"]
     assert (doing["kind"], doing["note"]) == ("running", "表结构已建好")
     assert doing["note_at"] is not None
+    # 人定过的事集中列出来：问题是下面那一步问的，在上级的页面上也查得到谁定了什么。
+    (decided,) = seen["decisions"]
+    assert (decided["code"], decided["question"]) == (asked["code"], "库存字段用哪个口径？")
+    assert (decided["by"], decided["answer"]) == ("alice", "可售")
+    assert [d["code"] for d in seen["done"]] == [first["code"]]  # 答过的问题不再混在步骤里
 
     # 办完：只留结果和还要人处理的事，不再有「最新」和「接下来」。
     other.status, other.summary = "done", "仓储侧已上线测试环境"
@@ -346,8 +351,28 @@ async def test_the_task_page_opens_on_the_same_picture_as_the_card(db_session):
     await db_session.commit()
     seen = (await view.detail(db_session, root, alice))["overview"]
     assert (seen["state"], seen["steps_done"], seen["steps_total"]) == ("done", 2, 2)
-    assert seen["followups"] == ["合并 PR #12"]
+    assert [(f["index"], f["text"], f["done"]) for f in seen["followups"]] == [
+        (0, "合并 PR #12", False)
+    ]
     assert seen["latest"] is None and seen["plan"] == [] and seen["doing"] == []
+
+    # 还要人处理的事可以勾掉：记下是谁办的，群里那张卡上也不再算它；也能改回没办。
+    bob_row = await db_session.get(User, bob.id)
+    await service.mark_followup(db_session, root, bob_row, 0, done=True)
+    await db_session.commit()
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    assert [(f["done"], f["by"]) for f in seen["followups"]] == [(True, "bob")]
+    assert await progress.followups(db_session, root) == []
+    await service.mark_followup(db_session, root, bob_row, 0, done=False)
+    await db_session.commit()
+    assert await progress.followups(db_session, root) == ["合并 PR #12"]
+    # 或者建成一件新任务：原处勾掉，两边互相写上编号。
+    made = await service.mark_followup(db_session, root, bob_row, 0, done=True, as_task=True)
+    await db_session.commit()
+    assert made is not None and made.title == "合并 PR #12" and made.related_codes == [root.code]
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    assert [(f["done"], f["task"]) for f in seen["followups"]] == [(True, made.code)]
+    assert made.code in root.related_codes
 
 
 async def test_a_buried_card_moves_to_the_bottom_when_something_real_changes(db_session):

@@ -17,7 +17,10 @@ import type { WorkTaskDetail, WorkTaskStep } from '@/api/workTasks'
 import { formatClock } from '@/utils/format'
 
 const props = defineProps<{ detail: WorkTaskDetail }>()
-const emit = defineEmits<{ answered: [code: string, detail: WorkTaskDetail]; start: [] }>()
+const emit = defineEmits<{
+  answered: [code: string, detail: WorkTaskDetail]; start: []
+  followup: [index: number, body: { done?: boolean; as_task?: boolean }]
+}>()
 const { t } = useI18n()
 const router = useRouter()
 
@@ -36,7 +39,7 @@ const stateType = computed(() => {
   return 'primary'
 })
 const stateText = computed(() => {
-  const left = view.value.followups.length
+  const left = view.value.followups.filter(item => !item.done).length
   if (view.value.state === 'done' && left) return t('workTasks.overview.doneWithFollowups', { n: left })
   return t(`workTasks.overview.states.${view.value.state}`)
 })
@@ -261,7 +264,7 @@ async function copyDrive(): Promise<void> {
 
     <!-- 一张清单：三列对齐（编号、内容、时间），还要人处理的、正在做的、接下来的、已完成的依次往下排。 -->
     <div
-      v-if="view.followups.length || view.doing.length || view.plan.length || view.done.length"
+      v-if="view.followups.length || view.doing.length || view.plan.length || view.decisions.length || view.done.length"
       class="ledger"
     >
       <section
@@ -269,17 +272,54 @@ async function copyDrive(): Promise<void> {
         class="group"
         data-test="overview-followups"
       >
-        <h4 class="label attention">
-          {{ t('workTasks.overview.followups') }}<span class="n">{{ view.followups.length }}</span>
+        <h4
+          class="label"
+          :class="{ attention: view.followups.some(item => !item.done) }"
+        >
+          {{ t('workTasks.overview.followups') }}<span class="n">{{ view.followups.filter(item => !item.done).length }} / {{ view.followups.length }}</span>
         </h4>
         <ul>
           <li
-            v-for="(item, index) in view.followups"
-            :key="index"
+            v-for="item in view.followups"
+            :key="item.index"
             class="row plain"
+            :class="{ ticked: item.done }"
+            data-test="overview-followup"
           >
-            <span class="c-code"><span class="box attention" /></span>
-            <span class="c-main">{{ item }}</span>
+            <span class="c-code"><button
+              type="button"
+              class="box tick"
+              :class="{ attention: !item.done, on: item.done }"
+              :aria-pressed="item.done"
+              :aria-label="item.text"
+              data-test="followup-tick"
+              @click="emit('followup', item.index, { done: !item.done })"
+            /></span>
+            <div class="c-main">
+              <span class="followup-text">{{ item.text }}</span>
+              <div
+                v-if="item.done"
+                class="note"
+              >
+                <span v-if="item.task">{{ t('workTasks.overview.turnedInto') }} <WorkTaskCode
+                  :code="item.task"
+                  :status="detail.linked[item.task]?.status"
+                  :title="detail.linked[item.task]?.title"
+                /></span>
+                <span v-else>{{ t('workTasks.overview.doneBy', { name: item.by }) }}</span>
+                <span v-if="item.at">{{ formatClock(item.at, now) }}</span>
+              </div>
+            </div>
+            <el-button
+              v-if="!item.done"
+              class="c-side"
+              link
+              size="small"
+              data-test="followup-task"
+              @click="emit('followup', item.index, { as_task: true })"
+            >
+              {{ t('workTasks.overview.asTask') }}
+            </el-button>
           </li>
         </ul>
       </section>
@@ -355,6 +395,43 @@ async function copyDrive(): Promise<void> {
           >
             <span class="c-code"><span class="box" /></span>
             <span class="c-main">{{ item }}</span>
+          </li>
+        </ul>
+      </section>
+
+      <section
+        v-if="view.decisions.length"
+        class="group"
+        data-test="overview-decisions"
+      >
+        <h4 class="label">
+          {{ t('workTasks.overview.decisions') }}<span class="n">{{ view.decisions.length }}</span>
+        </h4>
+        <ul>
+          <li
+            v-for="item in view.decisions"
+            :key="item.code"
+            class="row"
+            :data-back-key="item.code"
+            data-test="overview-decision"
+            @click="router.push({ name: 'work-task', params: { code: item.code } })"
+          >
+            <WorkTaskCode
+              class="c-code"
+              :code="item.code"
+              status="done"
+              :title="item.question"
+              @click.stop
+            />
+            <div class="c-main">
+              <div class="title-line">
+                <span class="step-title">{{ item.question }}</span>
+              </div>
+              <div class="note answer">
+                <span>{{ t('workTasks.overview.answer') }}{{ item.answer }}</span>
+              </div>
+            </div>
+            <span class="c-side">{{ item.by }}<template v-if="item.at"> {{ formatClock(item.at, now) }}</template></span>
           </li>
         </ul>
       </section>
@@ -490,6 +567,15 @@ async function copyDrive(): Promise<void> {
   border: 1.5px solid var(--el-text-color-placeholder); border-radius: 4px; background: var(--el-bg-color);
 }
 .box.attention { border-color: var(--el-color-warning); }
+/* 能点的小方框：点一下勾掉，再点改回。 */
+.box.tick { padding: 0; cursor: pointer; position: relative; }
+.box.tick:hover { border-color: var(--el-color-primary); }
+.box.tick.on { background: var(--el-color-primary); border-color: var(--el-color-primary); }
+.box.tick.on::after {
+  content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px;
+  border: solid var(--el-bg-color); border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.row.ticked .followup-text { color: var(--el-text-color-secondary); text-decoration: line-through; }
 .narrow-only { display: none; }
 
 @media (max-width: 640px) {
