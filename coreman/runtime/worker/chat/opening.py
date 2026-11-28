@@ -991,6 +991,7 @@ class OpenStage(ChatStageBase):
             names,
             solo=bool(ctx.task.payload.get("solo")),
             mentioned=bool(ctx.task.payload.get("mentioned")),
+            awaited=[str(code) for code in ctx.task.payload.get("awaited") or []],
         )
 
     def _structured_reply(self, ctx: TaskContext) -> bool:

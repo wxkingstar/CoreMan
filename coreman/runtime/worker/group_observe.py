@@ -20,19 +20,30 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask, enqueue
 from coreman.core.chat import decider as decider_mod
 from coreman.core.chat import dispatch, group_observe
 from coreman.core.config import get_settings
-from coreman.core.db.models import Bot, GroupObserveDecision, GroupObserveState, InboundEvent, Task
+from coreman.core.db.models import (
+    Bot,
+    GroupObserveDecision,
+    GroupObserveState,
+    InboundEvent,
+    Task,
+    UserIdentity,
+    WorkTask,
+)
+from coreman.core.work_tasks import progress
 from coreman.runtime.worker.context import TaskContext
 
 BUSY_RETRY_SECONDS = 5.0
 # 有回复在跑时一直等它做完再判断这一批；等了这么久还没做完（卡住或排了很长的队）才放弃。
 BUSY_MAX_WAIT = timedelta(minutes=30)
+# 牵头的事办完后多久之内，代表人在群里说的话还算在交代它留下的后续。
+AWAITED_AFTER_DONE = timedelta(hours=24)
 # 同群还有别的机器人开着旁听时，判断该说话后等这么久再选谁接话。各机器人判断同一条消息
 # 的时间差在一两秒内（同时收到、同样的安静时长）；晚于这个窗口才判断完的，见到已有人接话就让开。
 PICK_DELAY_SECONDS = 3.0
@@ -104,7 +115,14 @@ class GroupObserveHandler:
                 and mode == "on"
                 and await self._mentioned(session, bot.id, chat_id, state.pending_since)
             )
-            if mentioned:
+            # 这一批里有它牵头的事正在等的人说话（被问的人、代表人）：多半是在回答，
+            # 同样不问判断模型——那句「同意」在判断模型看来不像在请人办事，会被当成闲聊漏掉。
+            awaited = (
+                await self._awaited(session, bot, chat_id, state.pending_since, now)
+                if dispatcher and mode == "on" and not mentioned
+                else []
+            )
+            if mentioned or awaited:
                 quiet = min(quiet, dispatch.SOLO_QUIET_SECONDS)
             waited = (now - state.pending_since).total_seconds()
             idle = (now - (state.last_message_at or now)).total_seconds()
@@ -138,7 +156,7 @@ class GroupObserveHandler:
             state.pending_since = None
             muted = state.muted_until is not None and state.muted_until > now
             streak = state.bot_streak
-            if (muted or streak >= streak_limit) and not mentioned:
+            if (muted or streak >= streak_limit) and not mentioned and not awaited:
                 outcome = "muted" if muted else "bot_streak"
                 await self._record(session, bot, chat_id, event_id, mode, outcome)
                 await self._finish(session, ctx, "succeeded", None, {"skipped": outcome})
@@ -158,8 +176,8 @@ class GroupObserveHandler:
         }
         # 单人群：那位真人说的每句话都由调度员回应，不用判断模型筛。
         decision: decider_mod.Decision | None = None
-        if solo or mentioned:
-            outcome = "solo" if solo else "mentioned"
+        if solo or mentioned or awaited:
+            outcome = "solo" if solo else "mentioned" if mentioned else "awaited"
         else:
             decider = self._get_decider()
             if decider is None:
@@ -187,7 +205,11 @@ class GroupObserveHandler:
                 session, bot, chat_id, event_id, mode, outcome, decision=decision, state=payload
             )
             turn: Task | None = None
-            if outcome in ("interject", "solo", "mentioned") and dispatcher and anchor is not None:
+            if (
+                outcome in ("interject", "solo", "mentioned", "awaited")
+                and dispatcher
+                and anchor is not None
+            ):
                 if await self._busy(session, bot.id, busy_key):
                     row.outcome = "busy"
                 else:
@@ -202,6 +224,7 @@ class GroupObserveHandler:
                         session_key=busy_key,
                         solo=solo,
                         mentioned=mentioned,
+                        awaited=awaited,
                     )
                     row.task_id = turn.id if turn else None
             elif outcome == "interject" and mode == "on" and anchor is not None:
@@ -303,6 +326,51 @@ class GroupObserveHandler:
         )
         return found is not None
 
+    async def _awaited(
+        self, session: Any, bot: Bot, chat_id: str, since: datetime, now: datetime
+    ) -> list[str]:
+        """这一批里说话的人，正被调度员牵头的哪几件事等着（任务编号）。
+
+        等着的人见 `progress.awaited_users`：被问的人、代表人；办完不久、还留着要人处理的事时
+        是代表人。
+        """
+        roots = await session.scalars(
+            select(WorkTask)
+            .where(
+                WorkTask.chat_id == chat_id,
+                WorkTask.source == "dispatch",
+                WorkTask.dispatcher_bot_id == bot.id,
+                WorkTask.assignee_bot_id == bot.id,
+                or_(WorkTask.closed_at.is_(None), WorkTask.closed_at >= now - AWAITED_AFTER_DONE),
+            )
+            .order_by(WorkTask.id.desc())
+            .limit(dispatch.RECENT_TASKS)
+        )
+        waiting: dict[Any, list[str]] = {}
+        for root in roots:
+            for user_id in await progress.awaited_users(session, root):
+                waiting.setdefault(user_id, []).append(root.code)
+        if not waiting:
+            return []
+        identities = await session.execute(
+            select(UserIdentity.platform_user_id, UserIdentity.user_id).where(
+                UserIdentity.platform == bot.platform, UserIdentity.user_id.in_(waiting)
+            )
+        )
+        people = {pid: user_id for pid, user_id in identities}
+        if not people:
+            return []
+        senders = await session.scalars(
+            select(InboundEvent.sender_platform_user_id).where(
+                InboundEvent.bot_id == bot.id,
+                InboundEvent.chat_id == chat_id,
+                InboundEvent.kind == "message",
+                InboundEvent.received_at >= since,
+                InboundEvent.sender_platform_user_id.in_(people),
+            )
+        )
+        return sorted({code for pid in senders for code in waiting[people[pid]]})
+
     async def _has_rivals(self, session: Any, bot: Bot, chat_id: str) -> bool:
         """这个群里还有别的机器人开着旁听（on）。"""
         count = await session.scalar(
@@ -374,6 +442,7 @@ class GroupObserveHandler:
         session_key: str | None = None,
         solo: bool = False,
         mentioned: bool = False,
+        awaited: list[str] | None = None,
     ) -> Task | None:
         event = await session.get(InboundEvent, event_id) if event_id else None
         if event is None:
@@ -393,6 +462,7 @@ class GroupObserveHandler:
                     **({"observe_since": since.isoformat()} if since else {}),
                     **({"solo": True} if solo else {}),
                     **({"mentioned": True} if mentioned else {}),
+                    **({"awaited": awaited} if awaited else {}),
                 },
                 session_key=session_key or chat_id,
                 inbound_event_id=event.id,

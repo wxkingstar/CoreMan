@@ -597,7 +597,8 @@ async def test_follow_up_turns_stay_out_of_the_group_and_the_card_closes_the_goa
         "**还要人处理**\n- 请发起人同意合并仓储侧的 PR\n- 结算口径还没定，请业务负责人定",
         "共 1 步，都做完了，明细见任务页",
     ]
-    assert _subtitle(final) == "已完成 ■■■■■■■■ 1/1"
+    # 办完了但还留着要人处理的事：状态里写明，不让人以为没有他的事了。
+    assert _subtitle(final) == "已完成，还有 2 件事要人处理 ■■■■■■■■ 1/1"
 
 
 async def test_two_questions_on_one_card_keep_their_form_names_apart(db_session):
@@ -695,3 +696,20 @@ def _rows(labels: list[str]) -> list[tuple[str, int]]:
 )
 def test_option_buttons_share_a_row_only_when_their_labels_fit(labels, rows):
     assert _rows(labels) == rows
+
+
+async def test_a_led_goal_cannot_be_delivered_while_a_question_is_still_open(db_session):
+    """还有问题挂在卡上没人答就交付，卡片变成「已完成」，问题和按钮跟着没了：不让交付。"""
+    lead, _, _, root = await _setup(db_session)
+    asked = await _tool(
+        db_session,
+        root,
+        lead,
+        "ask_human",
+        {"question": "两个改动同意合并吗？", "options": ["同意", "先不合并"], "context": "背景"},
+    )
+    result = {"result": "联调通过", "output": "明细", "digest": "记要", "report": "完整汇报"}
+    refused = await _tool(db_session, root, lead, "submit_result", result)
+    assert refused["error"] == "invalid_arguments"
+    assert f"还有 1 个问题在等人回答（{asked['code']}）" in refused["message"]
+    assert "wait_for" in refused["message"]

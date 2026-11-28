@@ -220,7 +220,7 @@ def sender_id(root: WorkTask) -> uuid.UUID | None:
     return root.dispatcher_bot_id or root.assignee_bot_id
 
 
-async def _pending_asks(session: AsyncSession, root: WorkTask) -> list[WorkTask]:
+async def pending_asks(session: AsyncSession, root: WorkTask) -> list[WorkTask]:
     """这件事上上下下还没人答的问题（问人、派给同事要不要接、待验收）。"""
     rows = await session.scalars(
         select(WorkTask)
@@ -243,6 +243,38 @@ async def shows_ask(session: AsyncSession, row: WorkTask, to: uuid.UUID) -> bool
     if root is None or bot_id is None or not group_root(root):
         return False
     return await cards.group_mention(session, root, bot_id, to) is not None
+
+
+async def awaited_users(session: AsyncSession, root: WorkTask) -> set[uuid.UUID]:
+    """这件事现在在等哪些人开口：被问的人、能代答的代表人；办完后留了要人处理的事时是代表人。
+
+    他们在群里说的话多半是在回答这件事，调度员不该靠判断模型猜要不要理（见旁听的判断任务）。
+    """
+    if not group_root(root) or root.status == "cancelled":
+        return set()
+    if root.status == "done":
+        left = await followups(session, root)
+        return {root.principal_user_id} if left and root.principal_user_id else set()
+    users = {
+        uuid.UUID(str((row.ask or {})["to_user_id"])) for row in await pending_asks(session, root)
+    }
+    waiting = root.waiting_on or {}
+    if users or (root.status == "waiting" and waiting.get("kind") == "human"):
+        if root.principal_user_id:
+            users.add(root.principal_user_id)
+    return users
+
+
+async def followups(session: AsyncSession, root: WorkTask) -> list[str]:
+    """交付时写下的、还要人处理的事。"""
+    submitted = await session.scalar(
+        select(WorkTaskEvent)
+        .where(WorkTaskEvent.work_task_id == root.id, WorkTaskEvent.kind == "submitted")
+        .order_by(WorkTaskEvent.id.desc())
+        .limit(1)
+    )
+    left = (submitted.agent_detail or {}).get("followups") if submitted is not None else None
+    return [str(x) for x in left] if isinstance(left, list) else []
 
 
 def _bar(done: int, total: int) -> str:
@@ -300,7 +332,7 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
         await feishu_user_id(session, root.principal_user_id) if root.principal_user_id else None
     )
     questions: list[tuple[WorkTask, dict[str, Any], str, list[str]]] = []
-    for item in [] if closed else await _pending_asks(session, root):
+    for item in [] if closed else await pending_asks(session, root):
         ask = item.ask or {}
         to = ask.get("to_user_id")
         found = (
@@ -348,8 +380,10 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
         attn.append("done")
 
     # ---- 状态与进度 ----
+    left = await followups(session, root) if root.status == "done" else []
     if root.status == "done":
-        state, template = "已完成", "green"
+        # 办完了但还留着要人处理的事：写在状态里，不让人以为没有他的事了。
+        state, template = (f"已完成，还有 {len(left)} 件事要人处理" if left else "已完成"), "green"
     elif root.status == "cancelled":
         state, template = "已取消", "grey"
     elif need or private or any(kind == "waiting_human" for _, kind in step_states):
@@ -370,15 +404,8 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
             {"tag": "markdown", "content": f"{lead}**结果**：{root.summary or '已完成'}"}
         )
         # 交付时写下的、还要人处理的事。完整汇报是给 Agent 看的那条线，留在任务页，不贴到群里。
-        submitted = await session.scalar(
-            select(WorkTaskEvent)
-            .where(WorkTaskEvent.work_task_id == root.id, WorkTaskEvent.kind == "submitted")
-            .order_by(WorkTaskEvent.id.desc())
-            .limit(1)
-        )
-        left = (submitted.agent_detail or {}).get("followups") if submitted is not None else None
-        if isinstance(left, list) and left:
-            todo = [f"- {clip(str(x), LINE_MAX)}" for x in left]
+        if left:
+            todo = [f"- {clip(x, LINE_MAX)}" for x in left]
             elements.append({"tag": "markdown", "content": "\n".join(["**还要人处理**", *todo])})
     elif root.summary:
         elements.append({"tag": "markdown", "content": f"**目标**：{root.summary}"})
