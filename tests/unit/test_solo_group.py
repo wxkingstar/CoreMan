@@ -171,20 +171,33 @@ async def test_the_answer_is_cached_for_an_hour(cached):
 
 
 async def test_someone_else_speaking_ends_it_at_once(cached):
-    fake, _ = cached
+    fake, clock = cached
     assert await ask() is True
-    # 新来的人说话：不等缓存过期，这一条和之后发话人自己的消息都按普通群。
+    # 新来的人说话：不等缓存过期，这一条和之后发话人自己的消息都按普通群，并按普通群记 7 天。
     assert await ask("u_new") is False
+    clock.now += solo_group.GROUP_CACHE_SECONDS - 1
     assert await ask() is False
     assert len(fake.calls) == 2
 
 
-async def test_an_ordinary_group_is_cached_too(cached):
-    fake, _ = cached
+async def test_an_ordinary_group_is_not_asked_again_for_seven_days(cached):
+    fake, clock = cached
     fake.chat = chat(user_count="3")
     assert await ask() is False
+    # 有人退群变成单人群：7 天内不再调接口，仍按普通群（产品上接受）。
+    fake.chat = chat()
+    clock.now += solo_group.GROUP_CACHE_SECONDS - 1
     assert await ask() is False
     assert len(fake.calls) == 1
+    # 7 天后再查一次，认出单人群。
+    clock.now += 2
+    assert await ask() is True
+    assert len(fake.calls) == 3
+
+
+def test_ordinary_groups_are_kept_longer_than_solo_groups():
+    assert solo_group.GROUP_CACHE_SECONDS == 7 * 24 * 3600
+    assert solo_group.CACHE_SECONDS == 3600
 
 
 async def test_a_failed_lookup_is_retried_after_a_few_minutes(cached):

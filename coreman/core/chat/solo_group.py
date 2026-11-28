@@ -9,10 +9,10 @@ worker 每一轮开头判断一次，是单人群就在任务上记 `PAYLOAD_KEY
 机器人不计入真人（飞书的 user_count 与成员列表都不含机器人）。任何一项查不到、超时或报错，
 都按普通群处理。
 
-这是个小场景，不能拖慢普通群：每个 worker 进程按（机器人，群）缓存「群里唯一的真人是谁」
-一小时，查不到的缓存几分钟，绝大多数轮次不发请求。缓存期间群里有别人说话，就说明不止一个人，
-立即按普通群处理并记住；拉人进群但新来的人还没说话时，最多要等缓存过期才回到群规则（产品上
-接受这段延迟）。
+这是个小场景，不能拖慢普通群：每个 worker 进程按（机器人，群）缓存结果。确认是普通群的记
+7 天，期间不再调接口；单人群记一小时；查不到的记几分钟。单人群缓存期间群里有别人说话，就说明
+不止一个人，立即改记为普通群；拉人进群但新来的人还没说话时，最多要等一小时才回到群规则；普通群
+有人退出变成单人群，最多 7 天（或 worker 重启）后才按私聊处理（产品上接受这些延迟）。
 """
 
 from __future__ import annotations
@@ -35,8 +35,10 @@ log = get_logger(__name__)
 PAYLOAD_KEY = "solo_group"
 # 两次查询合计的上限：查不到就按普通群，不能拖住这一轮。
 TIMEOUT_SECONDS = 5.0
-# 查到的结果（是不是单人群、唯一的真人是谁）记多久；查不到记多久（免得飞书出问题时每轮都等超时）。
+# 单人群记多久（进了人最晚这么久回到群规则）；确认是普通群记多久（期间不再调接口）；
+# 查不到记多久（免得飞书出问题时每轮都等超时）。
 CACHE_SECONDS = 3600.0
+GROUP_CACHE_SECONDS = 7 * 24 * 3600.0
 FAILURE_CACHE_SECONDS = 300.0
 _CACHE_LIMIT = 4096
 # （机器人, 群）→（到期时刻, 群里唯一真人的 user_id；不是单人群或查不到为空串）
@@ -65,8 +67,8 @@ async def solo(cipher: Cipher, bot: Bot, chat_id: str, platform_user_id: str) ->
     cached = _CACHE.get(key)
     if cached is not None and cached[0] > now:
         if cached[1] and cached[1] != platform_user_id:
-            # 别人在这个群里说话：不止一个人了，不等缓存过期。
-            _remember(key, "", now + CACHE_SECONDS)
+            # 别人在这个群里说话：不止一个人了，不等缓存过期，改记为普通群。
+            _remember(key, "", now + GROUP_CACHE_SECONDS)
             return False
         return cached[1] == platform_user_id
     try:
@@ -83,7 +85,7 @@ async def solo(cipher: Cipher, bot: Bot, chat_id: str, platform_user_id: str) ->
         return False
     finally:
         await client.aclose()
-    _remember(key, human, now + CACHE_SECONDS)
+    _remember(key, human, now + (CACHE_SECONDS if human else GROUP_CACHE_SECONDS))
     return human == platform_user_id
 
 
