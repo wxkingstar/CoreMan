@@ -328,6 +328,9 @@ class ChatSession(Base):
     last_active_at: Mapped[datetime] = _ts(server_default=text("now()"))
     # 换运行时没能带走原会话时，记下原 relay 会话；新会话首轮带上它最近的对话，随后清空。
     inherited_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # 这个会话键从上次换新以来用过的 relay 会话（旧 → 新，{"id", "backend"}）：换运行时带不走
+    # 原生会话时，续接文本按它取全，来回切换不丢最初那一段。
+    lineage: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     # 话题选了继承群主会话：首轮从这个 relay 会话分叉，成功后清空。
     forked_from: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     # 个人助理的主会话每天换新：这个 relay 会话是所有者时区里哪一天开始的。别的会话不写。

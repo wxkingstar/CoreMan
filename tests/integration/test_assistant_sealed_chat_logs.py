@@ -84,7 +84,7 @@ async def test_carry_and_recent_sessions_read_plaintext(
     assert SECRET not in str(await raw(db_session, CONTENT, task_id=1))
     assert SECRET not in str(await raw(db_session, CONTENT, task_id=2))
     carried = await carried_context(
-        db_session, bot_id=bot.id, session_key="oc_1", relay_session_id=RELAY_SESSION
+        db_session, bot_id=bot.id, session_key="oc_1", relay_session_ids=[RELAY_SESSION]
     )
     assert carried is not None and f"问：{SECRET}" in carried and f"答：{SECRET}" in carried
     previews = await recent_sessions(
@@ -100,7 +100,7 @@ async def test_destroyed_key_leaves_nothing_to_carry(db_session: AsyncSession) -
     await db_session.commit()
     assert (
         await carried_context(
-            db_session, bot_id=bot.id, session_key="oc_1", relay_session_id=RELAY_SESSION
+            db_session, bot_id=bot.id, session_key="oc_1", relay_session_ids=[RELAY_SESSION]
         )
         is None
     )

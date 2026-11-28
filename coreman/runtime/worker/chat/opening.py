@@ -528,7 +528,8 @@ class OpenStage(ChatStageBase):
                 session,
                 bot_id=bot.id,
                 session_key=intake.session_key,
-                relay_session_id=info.inherited_from,
+                # 沿革在前：来回换过运行时的，最初那一段也在里面。
+                relay_session_ids=list(dict.fromkeys([*info.lineage, info.inherited_from])),
             )
             if carried and info.inherited_from != info.relay_session_id:
                 ctx.turn_notes.append(carried)
@@ -544,7 +545,7 @@ class OpenStage(ChatStageBase):
                 session,
                 bot_id=bot.id,
                 session_key=topics.chat_of(intake.session_key),
-                relay_session_id=info.forked_from,
+                relay_session_ids=[info.forked_from],
                 header=topics.FORK_HEADER,
             )
             if await topics.fork_supported(session, relay.runtime_node_id, backend):
