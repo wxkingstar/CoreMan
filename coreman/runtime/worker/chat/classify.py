@@ -135,6 +135,8 @@ class ClassifyStage(ChatStageBase):
                 None,
                 text + msg("background_started_suffix", locale, n=n),
             )
+        # 本人接着发的一轮、后台还有任务在跑：这一轮答完了，事情还没做完，不配 ✅。
+        still_running = self._live_running_suffix(pre, out, locale)
         if out.live_joined:
             # 驱动在这条流里报了后台任务在这一轮里完成：CLI 多半把完成通知并进了这一轮（也可能
             # 另起一轮，由观察任务单独发），所以只说「可能」。
@@ -145,7 +147,11 @@ class ClassifyStage(ChatStageBase):
                 which = "、".join(background_runs.number(i) for i, _ in merged)
                 note = msg("live_merged_note", locale, which=which)
                 return Verdict(
-                    "success", "succeeded", None, None, text + note + msg("done_suffix", locale)
+                    "success",
+                    "succeeded",
+                    None,
+                    None,
+                    text + note + (still_running or msg("done_suffix", locale)),
                 )
         if out.text_events == 0:
             body = (
@@ -153,8 +159,30 @@ class ClassifyStage(ChatStageBase):
                 if out.tool_events
                 else self._empty_success_text(ctx)
             )
-            return Verdict("success", "succeeded", None, None, text + body)
-        return Verdict("success", "succeeded", None, None, text + msg("done_suffix", locale))
+            return Verdict("success", "succeeded", None, None, text + body + still_running)
+        return Verdict(
+            "success",
+            "succeeded",
+            None,
+            None,
+            text + (still_running or msg("done_suffix", locale)),
+        )
+
+    def _live_running_suffix(self, pre: Prepared, out: Outcome, locale: str) -> str:
+        """本人接着发的一轮收尾时后台还在跑的项：写明还有几项、做完回复在哪条消息下。
+
+        没有在跑的（不是这类轮次，或后台任务都在这一轮里结束了）返回空串，照常收尾。
+        """
+        if not out.live_joined:
+            return ""
+        from coreman.core.chat import background_runs
+
+        n = len(background_runs.running(out.background_tasks))
+        if not n:
+            return ""
+        if pre.live_origin:
+            return msg("live_running_suffix", locale, n=n, origin=pre.live_origin)
+        return msg("live_running_suffix_plain", locale, n=n)
 
     def _incomplete(self, ctx: TaskContext, pre: Prepared, text: str) -> Verdict:
         """没拿到确认终态：已经流出的正文照留（驱动常把失败原因写在里面），后面接一句错误说明。"""

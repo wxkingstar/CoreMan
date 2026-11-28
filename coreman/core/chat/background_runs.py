@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bus import tasks
 from coreman.core.bus.tasks import NewTask
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import BackgroundRun, RelayServer, RuntimeNode
+from coreman.core.db.models import BackgroundRun, RelayServer, RuntimeNode, Task
 
 CAPABILITY = "claude_background_sessions_v1"
 WATCH_KIND = "background_watch"
@@ -364,6 +364,18 @@ async def release_held(session: AsyncSession, run: BackgroundRun) -> int:
 
         await notify(session, "tasks_queued", {"lane": "normal", "bot_id": str(run.bot_id)})
     return len(ids)
+
+
+async def origin_text(session: AsyncSession, run: BackgroundRun) -> str:
+    """开工那一轮提问的正文；任务已不在或没有文字时返回空串。"""
+    task = await session.get(Task, run.origin_task_id)
+    message = (task.payload if task is not None else {}).get("message")
+    parts = message.get("parts") if isinstance(message, dict) else None
+    return " ".join(
+        str(p.get("text") or "")
+        for p in parts or []
+        if isinstance(p, dict) and p.get("type") == "text"
+    ).strip()
 
 
 def reply_target(run: BackgroundRun) -> dict[str, Any]:

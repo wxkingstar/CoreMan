@@ -59,6 +59,8 @@ class Prepared:
     content: BuiltContent | None = None
     # 给人看的实例名（节点名 / provider），出错提示里用它，不用内部名。
     relay_label: str = ""
+    # 写进后台阶段进程的一轮：开工那条消息问的是什么（开头一句），收尾时用它指明后台结果回到哪里。
+    live_origin: str = ""
 
 
 @dataclass
