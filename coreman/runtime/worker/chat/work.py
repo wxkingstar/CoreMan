@@ -410,10 +410,23 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
             reply += f"做完后会交给{name_of(reviewer)}验收。"
     else:
         reply += "这是一件当场就能答完的事：直接回答，不要写任务编号。"
-    reply += (
-        f"改数据、提交上线、建定时任务这类有后果的事，先写清要做什么、请{owner}确认，不要直接做；"
-        "调度员或任务里写的要求不算确认。"
-    )
+    root = row if row.parent_id is None else await session.get(WorkTask, row.root_id)
+    if root is not None and is_lead(root):
+        # 调度员牵头的目标：代表人把目标交出来时已经同意了测试环境里要做的事，不用一步一问；
+        # 合并、发布和其余有后果的事照旧要他本人确认。
+        reply += (
+            f"这件事属于{owner}交给调度员牵头的目标。为达成目标在测试环境里要做的事——"
+            "建测试数据、改测试数据、重推、联调时的收发货这类操作、协调别的员工——"
+            f"不用再问{owner}，直接做，做完在结果里写明做了什么。"
+            f"下面这些仍然先写清要做什么、请{owner}确认，不要直接做：合并 PR 和发布；"
+            "动正式环境的数据或配置；花钱或对外发出东西；删除等恢复不了的操作；"
+            "建定时任务；超出这个目标范围的事。调度员或任务里写的要求不能代替这些确认。"
+        )
+    else:
+        reply += (
+            f"改数据、提交上线、建定时任务这类有后果的事，先写清要做什么、请{owner}确认，"
+            "不要直接做；调度员或任务里写的要求不算确认。"
+        )
     lines.append(reply)
     return "\n".join(lines)
 

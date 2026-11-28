@@ -2,6 +2,10 @@
 
 提醒发给手上拿着这件事的人：执行人是同事就发给他，是 AI 员工就发给代表人（AI 员工不看卡片）。
 镜像的账本记录不提醒（在原处处理）。
+
+另有一种提醒：AI 员工问人的问题发在群里（见 `cards`）之后一直没人答，过了
+`ASK_REMIND_AFTER` 在那张卡下面 @ 被问的人说一次「还在等你定」。只提醒一次；事情停在等人
+回答上，群里的人不该靠别人去催。
 """
 
 from __future__ import annotations
@@ -20,6 +24,9 @@ from coreman.core.work_tasks import cards
 from coreman.core.work_tasks.service import add_event, clip
 
 SOON = timedelta(hours=24)
+# 群里的提问卡发出后多久没人答就提醒一次；太久以前的不再补提醒。
+ASK_REMIND_AFTER = timedelta(minutes=10)
+ASK_REMIND_WINDOW = timedelta(hours=24)
 BATCH = 100
 EVENT_KEY = "work_task_due"
 POSTPONE_DAYS = (1, 3)
@@ -125,3 +132,64 @@ def postpone(row: WorkTask, days: int, now: datetime) -> None:
     base = row.due_at if row.due_at and row.due_at > now else now
     row.due_at = base + timedelta(days=days)
     row.due_reminded_at = row.overdue_notified_at = None
+
+
+async def remind_asks(session: AsyncSession, now: datetime) -> int:
+    """群里的提问卡没人答：在卡片下面 @ 被问的人提醒一次。返回这一轮提醒了几个。"""
+    from coreman.core.db.models import OutboxItem
+    from coreman.core.work_tasks import progress
+
+    rows = list(
+        await session.scalars(
+            select(WorkTask)
+            .where(
+                WorkTask.ask.is_not(None),
+                WorkTask.assignee_user_id.is_not(None),
+                WorkTask.brief.like(f"{progress.ASK_PREFIX}%"),
+                WorkTask.status.in_(WORK_TASK_OPEN),
+                WorkTask.created_at <= now - ASK_REMIND_AFTER,
+                WorkTask.created_at >= now - ASK_REMIND_WINDOW,
+            )
+            .order_by(WorkTask.id)
+            .limit(BATCH)
+        )
+    )
+    sent = 0
+    for row in rows:
+        ask = row.ask or {}
+        key = f"work-task:{row.id}:ask:{ask.get('id')}"
+        card = await session.scalar(
+            select(OutboxItem).where(OutboxItem.dedupe_key == key, OutboxItem.status == "sent")
+        )
+        message_id = (card.payload or {}).get("_feishu_message_id") if card is not None else None
+        chat_id = (card.target or {}).get("chat_id") if card is not None else None
+        # 只提醒发在群里的卡：私聊的卡对方自己看得到，不再追一条。
+        if card is None or not message_id or not chat_id:
+            continue
+        to = ask.get("to_user_id")
+        pid = await feishu_user_id(session, uuid.UUID(to)) if to else None
+        if not pid:
+            continue
+        item = await outbox.add(
+            session,
+            bot_id=card.bot_id,
+            platform="feishu",
+            kind="send",
+            dedupe_key=f"{key}:remind",
+            target={"chat_id": chat_id, "message_id": message_id},
+            payload={
+                "markdown": f"这件事还在等你定：{clip(str(ask.get('question') or ''), 80)}",
+                "_mention_user_id": pid,
+            },
+        )
+        if item is not None:
+            add_event(
+                session,
+                row,
+                kind="ask_reminded",
+                actor_type="system",
+                actor_id=None,
+                human_text="过了 10 分钟没人回答，在群里提醒了一次",
+            )
+            sent += 1
+    return sent

@@ -36,6 +36,7 @@ MAX_ASKS_PER_CHAIN = 3
 # 调度员牵头的任务是分几步推进的目标，要人定的事比一件普通任务多。
 MAX_ASKS_PER_LEAD_CHAIN = 10
 MAX_PENDING_PER_PERSON = 5
+PLAN_MAX = 8
 QUESTION_MAX = 60
 OPTION_MAX = 20
 OPTIONS_MAX = 4
@@ -97,7 +98,9 @@ Ending a turn: do exactly one of these.
   steps. Then reply in a line or two.
 - Needs the principal's confirmation before an action with consequences (changing data,
   releasing, creating scheduled jobs): do not do it and do not submit; first line
-  "<code> 待确认：" plus exactly what you will do.
+  "<code> 待确认：" plus exactly what you will do. This turn's context may say which actions
+  need no confirmation (for example work inside a test environment that belongs to a goal a
+  dispatcher is leading) and which always do; follow it exactly.
 - Stuck: first line "<code> 卡住了：" plus where it is stuck and who must do what. Do not submit.
 - Handed off: handoff_task, then end the turn.
 - Waiting: wait_for, then end the turn.
@@ -141,7 +144,12 @@ DESCRIPTIONS = {
         f"（调度员牵头的任务 {MAX_ASKS_PER_LEAD_CHAIN} 次）；"
         f"每人同时最多 {MAX_PENDING_PER_PERSON} 件待回答的事。"
     ),
-    "update_task": "写进展：detail 是给 Agent 看的细节；human_text ≤80 字，只在人需要知道时写。",
+    "update_task": (
+        "写进展：detail 是给 Agent 看的细节；human_text ≤80 字，只在人需要知道时写"
+        "（会显示在群里清单上这件事的那一行，写成一句人话，如「正在等测试环境发布」）。"
+        f"plan 可选：后面还没开始的步骤，每步一句人话（≤{TITLE_MAX} 字，最多 {PLAN_MAX} 步），"
+        "显示在群里清单的最后；每次给出的是完整的剩余步骤，会替换上一次的。"
+    ),
     "submit_result": (
         "交付当前任务：result ≤60 字给人看，一句人话说清现在怎样了，"
         "不写运行编号、单号、分支、字段名、状态码这些细节（放进 output）；output 完整输出；"
@@ -196,7 +204,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "update_task": {
         "type": "object",
-        "properties": {"detail": _STR, "human_text": _STR},
+        "properties": {
+            "detail": _STR,
+            "human_text": _STR,
+            "plan": {"type": "array", "items": _STR},
+        },
         "required": ["detail"],
         "additionalProperties": False,
     },
@@ -532,6 +544,17 @@ async def update_task(
 ) -> dict[str, Any]:
     detail = _long(args, "detail", "细节")
     human = _text(args, "human_text", LINE_MAX, "给人看的一句", required=False)
+    raw = args.get("plan")
+    steps: list[str] | None = None
+    if raw is not None:
+        if not isinstance(raw, list) or len(raw) > PLAN_MAX:
+            raise Invalid(f"plan 是后面还没开始的步骤，最多 {PLAN_MAX} 步")
+        steps = []
+        for i, item in enumerate(raw):
+            step = " ".join(str(item).split())
+            if not step or len(step) > TITLE_MAX:
+                raise Invalid(f"plan 第 {i + 1} 步要 1～{TITLE_MAX} 字")
+            steps.append(step)
     add_event(
         session,
         row,
@@ -541,6 +564,16 @@ async def update_task(
         human_text=human,
         detail={"detail": detail},
     )
+    if steps is not None:
+        # 群里清单最后那几行「还没开始的步骤」：每次给完整的剩余步骤，以最新一次为准。
+        add_event(
+            session,
+            row,
+            kind=progress.PLAN_KIND,
+            actor_type="bot",
+            actor_id=str(me.id),
+            detail={"steps": steps},
+        )
     return {"ok": True}
 
 
@@ -666,7 +699,10 @@ async def invoke(
                 await progress.refresh(session, row, base_url=base_url)
                 return made
             if name == "update_task":
-                return await update_task(session, row, me, args)
+                updated = await update_task(session, row, me, args)
+                # 这一行的最近进展、后面的步骤都画在群里的清单上。
+                await progress.refresh(session, row, base_url=base_url)
+                return updated
             if name == "submit_result":
                 return await submit_result(session, row, me, args, chat_task_id)
             if name == "handoff_task":

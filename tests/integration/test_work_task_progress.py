@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -14,9 +16,10 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
     WorkTask,
+    WorkTaskWatcher,
 )
 from coreman.core.wecom.messages import InboundMessage, Sender
-from coreman.core.work_tasks import agent_tools, cards, flow, progress
+from coreman.core.work_tasks import agent_tools, cards, due, flow, progress
 from coreman.runtime.gateway_feishu import reply_buttons
 from coreman.runtime.worker import work_task_cards
 from coreman.runtime.worker.chat import work
@@ -100,7 +103,9 @@ def _subtask(helper, title: str) -> dict:
 
 
 def _body(item: OutboxItem) -> str:
-    return str(item.payload["card"]["body"]["elements"][0]["content"])
+    """清单正文；时间标签按看的人的时区显示，这里统一换成「时:分」好比对。"""
+    text = str(item.payload["card"]["body"]["elements"][0]["content"])
+    return re.sub(r"<local_datetime[^>]*></local_datetime>", "时:分", text)
 
 
 async def _progress_items(db_session, root) -> list[OutboxItem]:
@@ -121,19 +126,44 @@ async def test_group_task_keeps_one_progress_card_up_to_date(db_session):
     # 由执行员工发在来源群里，回复在发起人的那条消息下面。
     assert card.bot_id == lead.id and card.kind == "send"
     assert card.target == {"chat_id": GROUP, "message_id": "om1"} and card.payload["_reply"]
-    assert _body(card) == "⏳ 对齐接口文档 — 数据助手"
+    assert _body(card) == "⏳ 对齐接口文档 — 数据助手 · 时:分 开始"
     header = card.payload["card"]["header"]
     assert header["subtitle"]["content"] == "进行中 · 已完成 0/1 件"
 
     # 卡片还没发出去时又拆了一件：直接换成最新内容，不多发一张。
     await _tool(db_session, root, lead, "create_task", _subtask(helper, "仓储侧开发"))
     (card,) = await _progress_items(db_session, root)
-    assert _body(card) == "⏳ 对齐接口文档 — 数据助手\n⏳ 仓储侧开发 — 数据助手"
+    assert _body(card) == (
+        "⏳ 对齐接口文档 — 数据助手 · 时:分 开始\n⏳ 仓储侧开发 — 数据助手 · 时:分 开始"
+    )
+    # 牵头的员工写下后面的步骤、在做的员工写一句进展：都画在清单上。
+    await _tool(
+        db_session,
+        root,
+        lead,
+        "update_task",
+        {"detail": "计划", "plan": ["两边在测试环境联调", "仓储侧开发"]},
+    )
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == first["code"]))
+    await _tool(
+        db_session,
+        child,
+        helper,
+        "update_task",
+        {"detail": "细节", "human_text": "正在等测试环境发布"},
+    )
+    (card,) = await _progress_items(db_session, root)
+    assert _body(card) == (
+        "⏳ 对齐接口文档 — 数据助手 · 时:分 开始，正在等测试环境发布（时:分）\n"
+        "⏳ 仓储侧开发 — 数据助手 · 时:分 开始\n"
+        "☐ 两边在测试环境联调"  # 已经拆成子任务的那一步不再列
+    )
 
     card.status = "sent"
     card.payload = {**card.payload, "_feishu_message_id": "om_card"}
-    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == first["code"]))
     child.status, child.summary = "done", "接口文档已合并"
+    child.claimed_at = datetime.now(UTC) - timedelta(minutes=6, seconds=5)
+    child.closed_at = datetime.now(UTC)
     await flow.settle(
         db_session,
         child,
@@ -145,9 +175,11 @@ async def test_group_task_keeps_one_progress_card_up_to_date(db_session):
     await db_session.commit()
     _, update = await _progress_items(db_session, root)
     assert update.kind == "card_update" and update.target["message_id"] == "om_card"
-    # 现在的事在前，做完的收在下面。
+    # 一张按先后排的清单：做完的打勾、写用了多久，在做的写几点开始，后面的步骤在最后。
     assert _body(update) == (
-        "⏳ 仓储侧开发 — 数据助手\n\n**已完成**\n✅ 对齐接口文档 — 数据助手：接口文档已合并"
+        "✅ 对齐接口文档 — 数据助手：接口文档已合并（用时 6 分钟）\n"
+        "⏳ 仓储侧开发 — 数据助手 · 时:分 开始\n"
+        "☐ 两边在测试环境联调"
     )
     assert update.payload["card"]["header"]["subtitle"]["content"] == "进行中 · 已完成 1/2 件"
 
@@ -199,7 +231,7 @@ async def test_questions_go_to_the_group_and_only_the_asked_person_answers(db_se
     assert button["behaviors"][0]["value"]["allowed"] == ["ou_alice"]
     # 进展卡上写明在等谁。
     (card,) = await _progress_items(db_session, root)
-    assert _body(card) == "🟡 等 **alice** 回答：退货单作废还是放宽校验？"
+    assert _body(card) == "🟡 等 **alice** 回答：退货单作废还是放宽校验？ · 时:分 问的"
     assert card.payload["card"]["header"]["subtitle"]["content"].startswith("等人处理")
 
     # 别人点了：worker 不改卡片，问题还在。
@@ -306,3 +338,82 @@ async def test_reply_ends_with_the_state_of_the_task(db_session):
     root.tracked = False
     assert await work.state_line(db_session, root) is None
     assert made["code"]
+
+
+async def test_subtask_results_are_not_sent_to_the_principal_privately(db_session):
+    """子任务做完，结果交回上级、画在群里的清单上：不再逐件私信代表人；点了关注的人照常收。"""
+    lead, helper, alice, root = await _setup(db_session)
+    made = await _tool(db_session, root, lead, "create_task", _subtask(helper, "对齐接口文档"))
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == made["code"]))
+    bob = await _person(db_session, "bob")
+    db_session.add(WorkTaskWatcher(work_task_id=child.id, user_id=bob.id))
+    child.status, child.summary = "done", "接口文档已合并"
+    await flow.settle(
+        db_session,
+        child,
+        before_ask=None,
+        before_status="in_progress",
+        actor_id=None,
+        base_url=BASE,
+    )
+    await db_session.commit()
+    notices = list(
+        await db_session.scalars(
+            select(OutboxItem).where(OutboxItem.dedupe_key.like(f"work-task:{child.id}:done:%"))
+        )
+    )
+    assert [n.target for n in notices] == [{"user_id": "ou_bob"}]
+    assert alice.id != bob.id
+
+
+async def test_an_unanswered_group_question_is_nudged_once(db_session):
+    lead, _, _, root = await _setup(db_session)
+    asked = await _tool(
+        db_session,
+        root,
+        lead,
+        "ask_human",
+        {"question": "退货单作废还是放宽校验？", "options": ["作废", "放宽"], "context": "背景"},
+    )
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == asked["code"]))
+    card = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key.like(f"work-task:{child.id}:ask:%"))
+    )
+    card.status = "sent"
+    card.payload = {**card.payload, "_feishu_message_id": "om_ask"}
+    await db_session.commit()
+    now = datetime.now(UTC)
+    # 还没到时候不提醒。
+    assert await due.remind_asks(db_session, now) == 0
+    later = now + due.ASK_REMIND_AFTER + timedelta(seconds=5)
+    assert await due.remind_asks(db_session, later) == 1
+    await db_session.commit()
+    nudge = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"{card.dedupe_key}:remind")
+    )
+    # 回复在那张卡下面、@ 被问的人。
+    assert nudge.bot_id == lead.id and nudge.target == {"chat_id": GROUP, "message_id": "om_ask"}
+    assert nudge.payload["_mention_user_id"] == "ou_alice"
+    assert "退货单作废还是放宽校验？" in nudge.payload["markdown"]
+    # 只提醒一次；答过了也不再提醒。
+    assert await due.remind_asks(db_session, later + timedelta(minutes=30)) == 0
+
+
+async def test_work_under_a_led_goal_needs_no_confirmation_inside_the_test_environment(db_session):
+    """调度员牵头的目标下面：测试环境里的事不用再问，合并和发布等仍要代表人确认。"""
+    lead, helper, _, root = await _setup(db_session)
+    made = await _tool(db_session, root, lead, "create_task", _subtask(helper, "对齐接口文档"))
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == made["code"]))
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(payload={"work_task_id": child.id}), public_base_url=BASE
+    )
+    intake = SimpleNamespace(session_key=f"work:{child.code}", chat_type="single", bot=helper)
+    note = await work.note(db_session, ctx, intake)
+    assert "不用再问alice，直接做" in note and "合并 PR 和发布" in note
+    assert "调度员或任务里写的要求不能代替这些确认" in note
+
+    # 不是调度员牵头的事：照旧，有后果的事都先确认。
+    root.dispatcher_bot_id = None
+    await db_session.flush()
+    plain = await work.note(db_session, ctx, intake)
+    assert "不用再问" not in plain and "调度员或任务里写的要求不算确认" in plain
