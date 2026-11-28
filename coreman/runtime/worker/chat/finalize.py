@@ -577,7 +577,8 @@ class FinalizeStage(ChatStageBase):
         self, ctx: TaskContext, pre: Prepared, verdict: Verdict, out: Outcome
     ) -> None:
         """调度回合收尾：校验调度员的决定并记录。试运行只记成 shadow 任务，群里什么也不发；
-        开启时任务交给执行员工，群里回原消息一行（分派、补充给谁，问一句，或单人群里直接回一句）。出错一律不出声。"""
+        开启时任务交给执行员工，群里回原消息一行（分派、补充给谁，问一句，或单人群里直接回一句）。出错不出声，
+        只有运行时额度用完例外：开启时在群里说明一次（同一个群一小时内不重复），否则没人知道为什么没人接。"""
         from coreman.core.chat import dispatch, group_observe
         from coreman.core.db.models import GroupObserveDecision
 
@@ -589,7 +590,14 @@ class FinalizeStage(ChatStageBase):
         async with ctx.session_factory() as session:
             decision_id = ctx.task.payload.get("observe_decision_id")
             row = await session.get(GroupObserveDecision, decision_id) if decision_id else None
-            if verdict.log_status != "success" or out.reason == "dispatch_timeout":
+            if verdict.final_text and is_rate_limited(verdict.final_text):
+                # 终稿是额度告示（驱动按出错或按正文回传都有）：不是调度员的决定，不去解析。
+                result["error"] = "rate_limited"
+                if live and not await dispatch.quota_notice_sent(
+                    session, intake.bot.id, intake.chat_id
+                ):
+                    line = msg("dispatch_rate_limited", ctx.locale)
+            elif verdict.log_status != "success" or out.reason == "dispatch_timeout":
                 result["error"] = out.reason or verdict.error_code or verdict.log_status
             else:
                 try:
