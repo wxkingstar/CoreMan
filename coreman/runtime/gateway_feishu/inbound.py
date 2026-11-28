@@ -209,6 +209,10 @@ def _normalize_event(
             "event_key": str(value.get("event_key") or ""),
             "selected": selected,
         }
+        allowed = value.get("allowed")
+        if isinstance(allowed, list) and allowed:
+            # 发在群里的任务提问卡：能回答的人，见 core/work_tasks/cards。
+            card_action["allowed"] = [str(item) for item in allowed][:10]
         if request_id is not None:
             # 个人凭证：表单值在落库之前加密封存，入站事件与任务载荷里只有密文。
             # 没有加密器就丢弃这次回调——宁可让用户重填，也不能落一份明文。

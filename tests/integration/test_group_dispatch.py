@@ -344,6 +344,8 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
     assert reply.reply_context["message_id"] == "om1"  # 回复发起人的原消息
     await db_session.refresh(task)
     assert task.status == "done" and task.summary == "上周退货率 4.2%"
+    # 跟进的任务：回复末尾写任务的状态，不写「回复已生成」。
+    assert reply.final_text.endswith("✅ 已完成") and "回复已生成" not in reply.final_text
     kinds = [
         e.kind
         for e in await db_session.scalars(
@@ -716,6 +718,8 @@ async def test_live_dispatcher_leads_a_goal_in_its_own_task_session(
     assert "这件事由你牵头" in turn and LEAD["brief"] in turn
     assert "调度员写的要求" not in turn
     assert reply.reply_context["message_id"] == "om1"
+    assert reply.final_text.endswith("处理") and "🟡 卡住了，等" in reply.final_text
+    assert "回复已生成" not in reply.final_text
 
     # 调度回合的名录里，它牵头的任务写明是它自己的。
     note = dispatch.note(STAFF, [], [task], {bot.id: bot.name})
