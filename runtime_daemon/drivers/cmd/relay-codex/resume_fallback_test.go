@@ -54,10 +54,40 @@ echo '{"type":"turn.completed"}'
 	if !strings.Contains(rec.Body.String(), "hello again") {
 		t.Fatalf("body:\n%s", rec.Body.String())
 	}
+	if strings.Contains(rec.Body.String(), "之前的会话记录已不存在") {
+		t.Errorf("carried context must not be announced as lost:\n%s", rec.Body.String())
+	}
 	data, _ := os.ReadFile(stdinLog)
 	runs := strings.SplitN(string(data), "----\n", 2)
 	if len(runs) != 2 || strings.Contains(runs[0], "carried") || !strings.Contains(runs[1], "- speaker\n- carried\n[/SYS_TURN:t]") {
 		t.Errorf("stdin per run = %q", runs)
+	}
+}
+
+// Without a text continuation the conversation really starts over, and the
+// answer says so.
+func TestStaleThreadRetryWithoutFallbackSaysTheRecordIsGone(t *testing.T) {
+	dir := fakeCodex(t, `for a in "$@"; do
+  if [ "$a" = resume ]; then /bin/cat > /dev/null; echo 'Error: no rollout found for thread id dead-thread' >&2; exit 1; fi
+done
+/bin/cat > /dev/null
+echo '{"type":"thread.started","thread_id":"fresh-thread"}'
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"hello again"}}'
+echo '{"type":"turn.completed"}'
+`)
+	withSessionState(t)
+	if err := threads.Set("s1", "dead-thread"); err != nil {
+		t.Fatal(err)
+	}
+	req := &openai.ChatCompletionRequest{
+		SessionID: "s1",
+		Messages:  []openai.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	input := buildCodexInput(req, "m", threads.Get("s1"), "")
+	rec := httptest.NewRecorder()
+	handleStreamResponse(rec, httptest.NewRequest("POST", "/", nil), input, "r", 1, "m", false, dir, nil, "s1", newRebuildFresh(threads, req, "m", ""))
+	if body := rec.Body.String(); !strings.Contains(body, "之前的会话记录已不存在") || !strings.Contains(body, "hello again") {
+		t.Fatalf("body:\n%s", body)
 	}
 }
 

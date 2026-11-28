@@ -65,6 +65,9 @@ class SwitchResult:
     new_model: str
     effort_level: str | None
     memory_status: str = "unchanged"
+    # 切换时这个员工的会话数，以及其中原生会话原样续用的：回执据此如实说明上下文。
+    sessions_total: int = 0
+    sessions_native: int = 0
 
 
 async def validate_switch(
@@ -261,9 +264,12 @@ async def switch_relay(
 
     await background_runs.close_for_bot(session, bot.id)
     # 会话键都保留：带过去的原样续用，带不过去的换新会话、首轮补上原会话最近的对话。
-    await sessions.carry_over(
-        session, bot.id, backend=backend_of(new_model, target.model_provider), keep=carried
+    new_backend = backend_of(new_model, target.model_provider)
+    rows = await sessions.list_for_bot(session, bot.id)
+    native = sum(
+        1 for row in rows if row.relay_session_id in carried and row.backend == new_backend
     )
+    await sessions.carry_over(session, bot.id, backend=new_backend, keep=carried)
     if moved_skills and cipher is not None:
         await reinstall_after_switch(session, cipher, bot=bot, rows=moved_skills, actor=actor)
     await record_audit(
@@ -292,5 +298,12 @@ async def switch_relay(
     )
     await notify_bot_changed(session, bot.id)
     return SwitchResult(
-        old_relay_id, target.id, old_model, new_model, bot.effort_level, memory_status
+        old_relay_id,
+        target.id,
+        old_model,
+        new_model,
+        bot.effort_level,
+        memory_status,
+        sessions_total=len(rows),
+        sessions_native=native,
     )

@@ -335,10 +335,63 @@ async def test_relay_switch_handler_switches_and_notifies(
         current="r1",
         target="r-idle",
         detail=msg("relay_switch_detail", model="claude-sonnet-5-5"),
+        context=msg("relay_switch_context_partial", n=1),
     )
     assert (await db_session.execute(select(InteractionState))).scalars().all() == []
     row = await tasks.get(db_session, t.id)
     assert row and row.status == "succeeded"
+
+
+async def test_receipt_says_context_was_kept_when_the_native_session_moved(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    idle = await _second_relay(db_session)
+    creator = await _creator_identity(db_session, bot)
+    before = await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="zs",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=creator.id,
+    )
+
+    async def moved(*_args: object, **_kwargs: object) -> tuple[str, bool, set]:
+        return "not_configured", False, {before.relay_session_id}
+
+    monkeypatch.setattr(switch_relay, "prepare_switch", moved)
+    st = await interactions.open_state(
+        db_session,
+        bot_id=bot.id,
+        kind="relay_switch",
+        scope_key=interactions.choice_scope(bot.id, "zs"),
+        state={
+            "idx": 0,
+            "platform_user_id": "zs",
+            "user_id": str(creator.id),
+            "current_relay_id": str(relay.id),
+            "current_name": "r1",
+            "target_relay_id": str(idle.id),
+            "target_name": "r-idle",
+            "target_pct_7d": 5.0,
+            "chat_id": "zs",
+            "chat_type": "single",
+        },
+        task_id_prefix="ratelimit_switch@sales_bot@zs@1",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    await interactions.set_status(db_session, st.id, "submitted")
+    await db_session.commit()
+    t = await _switch_task(db_session, bot, st, user_id=creator.id, target_id=idle.id)
+    await RelaySwitchHandler().run(build_ctx(db_engine, t))
+    (row,) = await sessions.list_for_bot(db_session, bot.id)
+    await db_session.refresh(row)
+    assert row.relay_session_id == before.relay_session_id
+    items = (await db_session.execute(select(OutboxItem))).scalars().all()
+    text = items[-1].payload["markdown"]
+    assert msg("relay_switch_context_kept") in text
+    assert "没能原样带过去" not in text
 
 
 async def test_relay_switch_handler_reports_policy_failure(

@@ -141,7 +141,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "- 来源：{current}\n"
             "- 目标：{target}\n"
             "- 详情：{detail}\n\n"
-            "_提示：对话上下文已随运行时带过去，接着聊就行；刚才因额度中断的那条请重新发送一次。_"
+            "_提示：{context}刚才因额度中断的那条请重新发送一次。_"
+        ),
+        "relay_switch_context_kept": "对话上下文已原样带过去，接着聊就行；",
+        "relay_switch_context_partial": (
+            "有 {n} 个对话没能原样带过去，已按最近的对话记录接上，较早的细节可能要再说一次；"
         ),
         "relay_switch_failed": (
             "❌ **切换运行时失败**\n\n"
@@ -521,8 +525,13 @@ MESSAGES: dict[str, dict[str, str]] = {
             "- 切替元：{current}\n"
             "- 切替先：{target}\n"
             "- 詳細：{detail}\n\n"
-            "_ご注意：会話の文脈は切替先に引き継がれているので、そのまま続けてください。"
+            "_ご注意：{context}"
             "利用上限で中断したメッセージはもう一度送信してください。_"
+        ),
+        "relay_switch_context_kept": "会話の文脈はそのまま引き継がれました。続けて話せます。",
+        "relay_switch_context_partial": (
+            "{n} 件の会話はそのまま引き継げなかったため、直近のやり取りの記録で続きを補いました。"
+            "古い内容はもう一度伝える必要があるかもしれません。"
         ),
         "relay_switch_failed": (
             "❌ **ランタイム インスタンスの切替に失敗しました**\n\n"

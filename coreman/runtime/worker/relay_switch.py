@@ -109,12 +109,18 @@ class RelaySwitchHandler:
                     "new_model": result.new_model,
                     "memory_status": result.memory_status,
                 }
+                lost = result.sessions_total - result.sessions_native
                 text = msg(
                     "relay_switch_ok",
                     ctx.locale,
                     current=current,
                     target=target_name,
                     detail=msg("relay_switch_detail", ctx.locale, model=result.new_model),
+                    context=(
+                        msg("relay_switch_context_partial", ctx.locale, n=lost)
+                        if lost > 0
+                        else msg("relay_switch_context_kept", ctx.locale)
+                    ),
                 )
                 ctx.log.info(
                     "relay_switch_done", new_relay=str(result.new_relay_id), model=result.new_model

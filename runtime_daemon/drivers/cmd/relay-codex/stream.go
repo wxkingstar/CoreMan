@@ -384,7 +384,7 @@ probe:
 		}
 	}
 
-	if rebuilt {
+	if rebuilt && !input.Carried {
 		// Say that the earlier context is gone before any answer text.
 		textDelta(staleThreadNotice)
 	}
@@ -614,7 +614,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input codex
 	}
 	actualModel := turn.model(thread, readRolloutTail(thread))
 	ensureCompaction(threadIDSeen, workingDir, model)
-	if rebuilt {
+	if rebuilt && !input.Carried {
 		body = staleThreadNotice + body
 	}
 

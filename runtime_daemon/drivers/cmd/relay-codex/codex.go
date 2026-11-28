@@ -71,6 +71,10 @@ type codexInput struct {
 	IsResume  bool              // true = `codex exec resume <thread_id>` pattern
 	ImagePath []string          // images to attach via -i (collected from latest user message)
 	Env       map[string]string // literal env values of project MCP servers
+	// Carried is set on a rebuilt input whose request brought a text
+	// continuation: the earlier context reaches the new thread, so the answer
+	// must not claim the conversation record is gone.
+	Carried bool
 }
 
 // buildCodexInput converts the high-level OpenAI request into a fully-resolved
@@ -347,6 +351,7 @@ func newRebuildFresh(threads *threadMap, req *openai.ChatCompletionRequest, mode
 		}
 		input := buildCodexInput(req, model, "", sessionDir)
 		input.Stdin = withResumeFallback(input.Stdin, req.ResumeFallback)
+		input.Carried = req.ResumeFallback != ""
 		return input
 	}
 }

@@ -188,7 +188,8 @@ echo '{"type":"step_finish","sessionID":"ses_new","part":{"reason":"stop","token
 	rec := httptest.NewRecorder()
 	handleStreamResponse(rec, httptest.NewRequest("POST", "/", nil), input, "r", 1, "m", false, "", nil, "client", newRebuildFresh(bindings, req, "m", "", ""))
 	body := rec.Body.String()
-	if !strings.Contains(body, "之前的会话记录已不存在") || !strings.Contains(body, "hello again") {
+	// The request carried a text continuation: the context is not lost, so no notice.
+	if strings.Contains(body, "之前的会话记录已不存在") || !strings.Contains(body, "hello again") {
 		t.Fatal(body)
 	}
 	if got := bindings.Get("client"); got != "ses_new" {

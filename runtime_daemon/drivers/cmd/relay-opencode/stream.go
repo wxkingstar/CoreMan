@@ -413,7 +413,7 @@ probe:
 		}
 	}
 
-	if rebuilt {
+	if rebuilt && !input.Carried {
 		textDelta(staleSessionNotice)
 	}
 	if haveFirst {
@@ -584,7 +584,7 @@ func handleNonStreamResponse(w http.ResponseWriter, r *http.Request, input openc
 		openai.WriteError(w, http.StatusInternalServerError, "server_error", "Empty response from opencode")
 		return
 	}
-	if rebuilt {
+	if rebuilt && !input.Carried {
 		body = staleSessionNotice + body
 	}
 	finish := "stop"
