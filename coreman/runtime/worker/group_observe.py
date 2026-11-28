@@ -136,6 +136,8 @@ class GroupObserveHandler:
                 return
             lines = await group_observe.transcript(session, bot, chat_id, now=now, new_since=since)
             await session.commit()
+        # 别的机器人发的卡片事件里没有正文：放开状态行的锁之后再去飞书读。
+        lines = await group_observe.read_cards(lines, bot, chat_id, ctx.cipher)
         # 它自己最后说话不算答过：那多半是在回复上一批，写的时候还没看到这一批。
         if not any(line.new for line in lines):
             async with ctx.session_factory() as session:
