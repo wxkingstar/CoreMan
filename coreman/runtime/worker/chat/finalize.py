@@ -290,9 +290,19 @@ class FinalizeStage(ChatStageBase):
                 verdict = await human_collaboration.final_transition(session, ctx, pre, verdict)
                 from coreman.runtime.worker.chat import work
 
-                await work.final_transition(
-                    session, ctx, intake, verdict, msg("done_suffix", ctx.locale)
-                )
+                done_suffix = msg("done_suffix", ctx.locale)
+                state = await work.final_transition(session, ctx, intake, verdict, done_suffix)
+                if (
+                    state
+                    and not ctx.task.payload.get("work_silent")
+                    and verdict.final_text.endswith(done_suffix)
+                ):
+                    # 任务会话的回合：末尾写这件事此刻的状态，不写「回复已生成」——派出子任务、
+                    # 在等结果的一轮看起来不该像办完了。
+                    verdict = replace(
+                        verdict,
+                        final_text=verdict.final_text.removesuffix(done_suffix) + f"\n\n{state}",
+                    )
                 # 子任务的一轮不出声：结果已经由平台交回上级任务。
                 collaboration_silent = collaboration_silent or bool(
                     ctx.task.payload.get("work_silent")

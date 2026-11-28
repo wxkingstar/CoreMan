@@ -18,7 +18,7 @@ from coreman.core.api_tasks.service import allowed_to_use
 from coreman.core.assistants.records import is_assistant
 from coreman.core.chat.dispatch import is_lead
 from coreman.core.db.models import WORK_TASK_OPEN, Bot, User, WorkTask
-from coreman.core.work_tasks import cards, execute
+from coreman.core.work_tasks import cards, execute, progress
 from coreman.core.work_tasks.service import (
     SUMMARY_MAX,
     TITLE_MAX,
@@ -653,10 +653,13 @@ async def invoke(
         async with session.begin_nested():
             if name == "find_assignees":
                 return await find_assignees(session, row, me, args)
-            if name == "create_task":
-                return await create_task(session, row, me, args, base_url)
-            if name == "ask_human":
-                return await ask_human(session, row, me, args, base_url)
+            if name in ("create_task", "ask_human"):
+                made = await (create_task if name == "create_task" else ask_human)(
+                    session, row, me, args, base_url
+                )
+                # 群里发起的事：多了一件子任务或一个问题，进展卡跟着变。
+                await progress.refresh(session, row, base_url=base_url)
+                return made
             if name == "update_task":
                 return await update_task(session, row, me, args)
             if name == "submit_result":
@@ -664,7 +667,9 @@ async def invoke(
             if name == "handoff_task":
                 return await handoff_task(session, row, me, args)
             if name == "wait_for":
-                return await wait_for(session, row, me)
+                waited = await wait_for(session, row, me)
+                await progress.refresh(session, row, base_url=base_url)
+                return waited
     except Invalid as exc:
         return {"error": "invalid_arguments", "stop": False, "message": str(exc)}
     except WorkTaskError as exc:

@@ -476,10 +476,58 @@ async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) 
         )
 
 
+async def state_line(session: AsyncSession, row: WorkTask) -> str | None:
+    """这件事此刻的状态，接在这一轮回复的末尾：做完了、还在推进（在等谁），还是在等人。
+
+    回复末尾一律写「回复已生成」会让人以为事情办完了；任务会话的回合可能只是派出了子任务、
+    在等结果。不跟进的事（当场答完，群里没有编号）不加，照旧。
+    """
+    if not row.tracked:
+        return None
+    waiting = row.waiting_on or {}
+    if row.status == "done":
+        return "✅ 已完成"
+    if row.status == "review":
+        reviewer = await session.get(User, row.reviewer_user_id or principal_of(row))
+        return f"🟡 等{name_of(reviewer)}验收"
+    if row.status == "waiting" and waiting.get("kind") == "human":
+        owner = await session.get(User, principal_of(row)) if principal_of(row) else None
+        who = name_of(owner) if owner else "发起人"
+        stuck = str(waiting.get("human_text") or "").startswith("卡住")
+        return f"🟡 卡住了，等{who}处理" if stuck else f"🟡 等{who}确认"
+    if row.status == "waiting" and waiting.get("kind") == "task":
+        pending = [
+            c
+            for c in await session.scalars(
+                select(WorkTask).where(
+                    WorkTask.parent_id == row.id, WorkTask.code.in_(waiting.get("codes") or [])
+                )
+            )
+            if not flow.settled(c)
+        ]
+        names: list[str] = []
+        for child in pending:
+            if child.assignee_bot_id:
+                bot = await session.get(Bot, child.assignee_bot_id)
+                name = bot.name if bot else ""
+            else:
+                name = name_of(await session.get(User, child.assignee_user_id))
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            return "⏳ 进行中"
+        count = f"的 {len(pending)} 件事" if len(pending) > 1 else ""
+        return f"⏳ 进行中 · 在等{'、'.join(names)}{count}，有结果我接着安排"
+    return "⏳ 进行中"
+
+
 async def final_transition(
     session: AsyncSession, ctx: TaskContext, intake: Intake, verdict: Verdict, suffix: str
-) -> None:
-    """和任务终态同一个事务：按这一轮的回复更新任务状态、给人看的一句话和运行记录。"""
+) -> str | None:
+    """和任务终态同一个事务：按这一轮的回复更新任务状态、给人看的一句话和运行记录。
+
+    返回接在回复末尾的状态行（见 `state_line`）；这一轮不动任务时返回 None。
+    """
     code = code_of(intake.session_key)
     row = (
         await session.scalar(select(WorkTask).where(WorkTask.code == code).with_for_update())
@@ -492,7 +540,7 @@ async def final_transition(
     if row is None or row.status in ("shadow", "cancelled") or row.assignee_bot_id != intake.bot.id:
         if run is not None and run.ended_at is None:
             run.status, run.ended_at = "cancelled", datetime.now(UTC)
-        return
+        return None
     before_ask, before_status = row.ask, row.status
     body = verdict.final_text.removesuffix(suffix).strip()
     first = next((line.strip() for line in body.splitlines() if line.strip()), "")
@@ -505,7 +553,7 @@ async def final_transition(
         # 以下一轮为准，这一轮不改任务。
         if run is not None:
             run.status, run.outcome, run.ended_at = "waiting", first[:SUMMARY_LIMIT], now
-        return
+        return await state_line(session, row)
     # 这一轮用 submit_result 交付过：以它写的一句话为准，不从回复里猜。
     submitted = await session.scalar(
         select(WorkTaskEvent)
@@ -580,3 +628,4 @@ async def final_transition(
         actor_id=None,
         base_url=ctx.public_base_url,
     )
+    return await state_line(session, row)

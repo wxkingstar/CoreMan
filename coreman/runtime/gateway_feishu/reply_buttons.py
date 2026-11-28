@@ -56,6 +56,8 @@ Outcome = Literal[
     "queued",
     "duplicate",
     "not_requester",
+    # 发在群里的任务提问卡：点的人不是被问的人。
+    "not_asked",
     "busy_wait",
     "busy_stop",
     "busy_progress",
@@ -172,6 +174,8 @@ WRITE_CARD_EVENTS = frozenset(
     }
 )
 SCHEDULE_EVENT = "personal_schedule"
+# 任务平台的提问卡（core/work_tasks/cards.EVENT_KEY）。
+WORK_TASK_ASK_EVENT = "work_task_ask"
 TOPIC_EVENTS: dict[str, Outcome] = {"topic_new": "topic_new", "topic_fork": "topic_fork"}
 COLD_START_EVENT = "assistant_cold_start_card"
 STOP_EVENT = "assistant_stop"
@@ -187,6 +191,19 @@ SWITCH_SUBMIT = "ratelimit_switch_submit"
 SWITCH_OPTIONS: dict[str, Outcome] = {"opt_switch": "switch_runtime", "opt_wait": "switch_wait"}
 _WRITE_VERBS: dict[str, Outcome] = {"confirm": "write_confirm", "cancel": "write_cancel"}
 _SCHEDULE_VERBS: dict[str, Outcome] = {"confirm": "schedule_confirm", "cancel": "schedule_cancel"}
+
+
+def _not_asked(message: InboundMessage) -> bool:
+    """任务提问卡带着能回答的人的名单（群里的卡才有），点的人不在里面。"""
+    action = message.card_action or {}
+    allowed = action.get("allowed")
+    return (
+        message.kind == "card_action"
+        and action.get("event_key") == WORK_TASK_ASK_EVENT
+        and isinstance(allowed, list)
+        and bool(allowed)
+        and message.sender.platform_user_id not in allowed
+    )
 
 
 def _card_click(message: InboundMessage) -> Outcome | None:
@@ -321,6 +338,9 @@ async def admit(
     if isinstance(expires, int) and time.time() > expires:
         # 建议追问过期了：不入队，告诉他直接发消息。
         return "reply_expired"
+    if _not_asked(message):
+        # 群里的任务提问卡只有被问的人（和代表人）能回答：别人点了不入队，卡片也不动。
+        return "not_asked"
     task = await enqueue_inbound(session, bot, message, lease_generation=lease_generation)
     if not is_reply_click(message):
         outcome = (
