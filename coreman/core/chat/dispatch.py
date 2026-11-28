@@ -253,17 +253,32 @@ def note(
     names: dict[uuid.UUID, str],
     *,
     solo: bool = False,
+    mentioned: bool = False,
 ) -> str:
-    """调度回合的本轮块：员工名录、这个群最近的任务和输出格式。单人群多一个 reply。"""
+    """调度回合的本轮块：员工名录、这个群最近的任务和输出格式。
+
+    单人群和有人 @ 它的回合多一个 reply：对方在直接对它说话，每条都要回应。
+    """
     roster = "\n".join(f"- `{e.key}`（{e.name}）：{e.role or '没有写职责说明'}" for e in staff)
-    opening = (
-        "这一轮没有人 @ 你：这个群里只有一位真人，他说的每句话都由你回应。"
-        "你是调度员，只负责安排，自己不查询、不动手；要办的事交给员工，"
-        "闲聊、致谢这类不需要安排人的话，用 reply 简短回一句。"
-        if solo
-        else "这一轮没有人 @ 你：判断模型认为新来的消息里有在请人办事的，需要你调度。"
-        "你是调度员，只负责安排，自己不回答、不查询、不动手。"
-    )
+    direct = solo or mentioned
+    if mentioned:
+        opening = (
+            "这一轮有人 @ 了你：他在直接对你说话，你必须回应。"
+            "你是调度员，只负责安排，自己不查询、不动手；要办的事交给员工，"
+            "要几位员工分步配合的目标由你牵头；问你进展、闲聊、致谢这类不需要安排人的话，"
+            "用 reply 简短回一句。"
+        )
+    elif solo:
+        opening = (
+            "这一轮没有人 @ 你：这个群里只有一位真人，他说的每句话都由你回应。"
+            "你是调度员，只负责安排，自己不查询、不动手；要办的事交给员工，"
+            "闲聊、致谢这类不需要安排人的话，用 reply 简短回一句。"
+        )
+    else:
+        opening = (
+            "这一轮没有人 @ 你：判断模型认为新来的消息里有在请人办事的，需要你调度。"
+            "你是调度员，只负责安排，自己不回答、不查询、不动手。"
+        )
     lines = [
         opening,
         "这个群里能接任务的 AI 员工（标识：职责）：",
@@ -280,7 +295,7 @@ def note(
             lines.append(
                 f"- {t.code}（{t.created_at:%m-%d}，{who}，{t.status}）{t.title}：{t.summary}"
             )
-    lines.append("@ 了某位 AI 员工的消息，那位员工会自己回答：不要为它新建，也不要追加。")
+    lines.append("@ 了某位 AI 员工（不是你）的消息，那位员工会自己回答：不要为它新建，也不要追加。")
     lines.append(
         "怎么决定：\n"
         "- create：交给最合适的一位员工。能一个人做完的不拆；确实分属不同员工、能各自交付时才拆，"
@@ -303,7 +318,7 @@ def note(
             f"不超过 {REPLY_LIMIT} 字；不要回答需要查询或动手才能答的问题，那些交给员工。"
             "没有合适的员工时，也用 reply 说明这件事暂时没人能接。"
             "除了上面 @ 员工的情况，不要选 none。\n"
-            if solo
+            if direct
             else "- none：其实不需要安排人（闲聊、已经有人在处理、点名问了具体的人、"
             "没有合适的员工）。\n"
         )
@@ -319,7 +334,7 @@ def note(
         '          "related": ["相关的任务编号"]},\n'
         ' "task_code": "append 时填已有任务编号", "note": "append 时补充的内容",\n'
         ' "question": "clarify 时问的一句话"'
-        + (', "text": "reply 时回的话"' if solo else "")
+        + (', "text": "reply 时回的话"' if direct else "")
         + "}\n```"
     )
     return "\n".join(lines)

@@ -802,3 +802,42 @@ async def test_the_quota_notice_is_not_repeated_within_the_hour(db_engine, db_se
     )
     await db_session.refresh(latest)
     assert latest.dispatch["error"] == "rate_limited" and "said" not in latest.dispatch
+
+
+async def test_mentioning_a_live_dispatcher_goes_to_a_dispatch_turn(
+    db_engine, db_session, monkeypatch
+):
+    """人 @ 开启中的调度员交代事情：不走普通对话，攒进这一批、不问判断模型，直接排调度回合。"""
+
+    async def human_count(bot, chat_id, cipher):
+        return 5
+
+    monkeypatch.setattr(dispatch, "human_count", human_count)
+    bot = await dispatcher_bot(db_session, "on")
+    turn = await say(
+        db_session, bot, "om1", "@调度员 把订单和仓储的对接跟进起来", mentions_bot=True
+    )
+    assert turn is None and await tasks_of(db_session, bot, "chat") == []
+    (observe,) = await tasks_of(db_session, bot, "group_observe")
+    assert observe.payload["mentioned"] is True
+    await quiet_down(db_session, bot)
+    decider = FakeDecider(0.0)
+    await run_observe(db_engine, db_session, observe, decider)
+    assert decider.instructions == []
+    (chat,) = await tasks_of(db_session, bot, "chat")
+    assert chat.payload["origin"] == "dispatch" and chat.payload["mentioned"] is True
+    assert "solo" not in chat.payload and chat.session_key == dispatch.session_key(CHAT)
+    decision = await db_session.scalar(select(GroupObserveDecision))
+    assert decision.outcome == "mentioned" and decision.task_id == chat.id
+
+    note = dispatch.note(STAFF, [], [], {}, mentioned=True)
+    assert "有人 @ 了你" in note and "- reply：" in note and "- none" not in note
+
+
+@pytest.mark.parametrize(("mode", "text"), [("shadow", "@调度员 跟进一下对接"), ("on", "/new")])
+async def test_trial_dispatchers_and_commands_keep_the_normal_turn(db_session, mode, text):
+    """试运行的调度员不在群里说话，@ 它照常对话；命令也不交给调度。"""
+    bot = await dispatcher_bot(db_session, mode)
+    turn = await say(db_session, bot, "om1", text, mentions_bot=True)
+    assert turn is not None and turn.payload.get("origin") is None
+    assert await tasks_of(db_session, bot, "group_observe") == []

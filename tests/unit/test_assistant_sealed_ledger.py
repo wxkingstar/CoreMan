@@ -167,6 +167,8 @@ COLUMN_REFERENCES = {
     "coreman/runtime/gateway_feishu/transport.py": 2,  # 下划线开头的明文键
     "coreman/runtime/scheduler/reaper.py": 1,  # 任务报错：取值后 open_value
     "coreman/runtime/worker/busy_choice.py": 1,  # 明文键 platform_user_id
+    # 判断任务的明文载荷键 mentioned：只有群聊调度员的判断任务带，个人助理不旁听群聊
+    "coreman/runtime/worker/group_observe.py": 1,
     # 停下前的确认卡：下划线开头的明文键（消息编号、目标任务）
     "coreman/runtime/worker/stream_stop.py": 2,
     "coreman/runtime/worker/card_actions.py": 2,  # 明文键与 card.task_id 的明文镜像

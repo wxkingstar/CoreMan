@@ -251,7 +251,14 @@ async def final_transition(
             raise ValueError("原会话已重置或切换，旧协作结果已作废")
         if row.expires_at <= datetime.now(UTC):
             raise ValueError("协作等待超时")
-        if verdict.log_status != "success":
+        # 求助方拿到反馈后汇总的那一轮可以接着问人（例如反馈里有要人定的选项）：照常结束这次
+        # 协作，问题按普通回合发给提问人。其余阶段问人不算完成：协作伙伴的回答要交回求助方。
+        asked = (
+            verdict.log_status == "ask_user"
+            and bool(cid)
+            and ctx.task.payload.get("collaboration_phase") == "resume"
+        )
+        if verdict.log_status != "success" and not asked:
             raise ValueError("协作任务未正常完成")
         if cid and ctx.task.payload.get("collaboration_phase") == "helper":
             # B's unadorned final model answer is the transport payload; no cards/footers.

@@ -299,9 +299,7 @@ async def send_message(
     if response and (request_item is None or not request_item.payload.get("_feishu_message_id")):
         raise ValueError("request delivery not confirmed")
     reply_mid = (
-        str(request_item.payload["_feishu_message_id"])
-        if request_item
-        else reply_to(origin.platform_msg_id)
+        str(request_item.payload["_feishu_message_id"]) if request_item else _origin_message(origin)
     )
     mention = route.source_open_id if response else route.target_open_id
     text = (row.response if response else row.question) or ""
@@ -331,6 +329,19 @@ async def send_message(
             row.response_outbox_id, row.status = item.id, "waiting_source"
         else:
             row.request_outbox_id, row.status = item.id, "waiting_helper"
+
+
+def _origin_message(origin: InboundEvent) -> str | None:
+    """求助消息回复在哪条消息下面。
+
+    求助那一轮可能是点卡片按钮引出的：那条入站事件的 id 是合成的（`action:…`），飞书不认，
+    拿它当回复目标会发不出去。这时回复在被点的那张卡片下面；找不到就直接发在群里。
+    """
+    mid = reply_to(origin.platform_msg_id)
+    if mid is None or not mid.startswith("action:"):
+        return mid
+    card = (origin.reply_context or {}).get("message_id")
+    return card if isinstance(card, str) and card and not card.startswith("action:") else None
 
 
 async def close(session: AsyncSession, row: BotCollaboration, status: str, error: str) -> None:

@@ -97,6 +97,15 @@ class GroupObserveHandler:
                 state.pending_since = None
                 await self._finish(session, ctx, "succeeded", None, {"skipped": "dispatcher"})
                 return
+            # 这一批里有人 @ 了开启中的调度员：他在直接对它说话，不问判断模型，也不因静音或
+            # 机器人连发跳过，等群安静的时长按单人群算。
+            mentioned = (
+                dispatcher
+                and mode == "on"
+                and await self._mentioned(session, bot.id, chat_id, state.pending_since)
+            )
+            if mentioned:
+                quiet = min(quiet, dispatch.SOLO_QUIET_SECONDS)
             waited = (now - state.pending_since).total_seconds()
             idle = (now - (state.last_message_at or now)).total_seconds()
             latest = state.last_event_id == event_id
@@ -129,7 +138,7 @@ class GroupObserveHandler:
             state.pending_since = None
             muted = state.muted_until is not None and state.muted_until > now
             streak = state.bot_streak
-            if muted or streak >= streak_limit:
+            if (muted or streak >= streak_limit) and not mentioned:
                 outcome = "muted" if muted else "bot_streak"
                 await self._record(session, bot, chat_id, event_id, mode, outcome)
                 await self._finish(session, ctx, "succeeded", None, {"skipped": outcome})
@@ -149,8 +158,8 @@ class GroupObserveHandler:
         }
         # 单人群：那位真人说的每句话都由调度员回应，不用判断模型筛。
         decision: decider_mod.Decision | None = None
-        if solo:
-            outcome = "solo"
+        if solo or mentioned:
+            outcome = "solo" if solo else "mentioned"
         else:
             decider = self._get_decider()
             if decider is None:
@@ -178,7 +187,7 @@ class GroupObserveHandler:
                 session, bot, chat_id, event_id, mode, outcome, decision=decision, state=payload
             )
             turn: Task | None = None
-            if outcome in ("interject", "solo") and dispatcher and anchor is not None:
+            if outcome in ("interject", "solo", "mentioned") and dispatcher and anchor is not None:
                 if await self._busy(session, bot.id, busy_key):
                     row.outcome = "busy"
                 else:
@@ -192,6 +201,7 @@ class GroupObserveHandler:
                         origin=dispatch.ORIGIN,
                         session_key=busy_key,
                         solo=solo,
+                        mentioned=mentioned,
                     )
                     row.task_id = turn.id if turn else None
             elif outcome == "interject" and mode == "on" and anchor is not None:
@@ -276,6 +286,23 @@ class GroupObserveHandler:
             )
         ctx.log.info("group_observe_picked", outcome=row.outcome, rivals=len(rivals) - 1)
 
+    async def _mentioned(self, session: Any, bot_id: Any, chat_id: str, since: datetime) -> bool:
+        """这一批里有没有 @ 调度员、入站时交给调度的消息（见 `group_observe.note`）。"""
+        found = await session.scalar(
+            select(Task.id)
+            .join(InboundEvent, InboundEvent.id == Task.inbound_event_id)
+            .where(
+                Task.bot_id == bot_id,
+                Task.kind == "group_observe",
+                Task.session_key == group_observe.task_session_key(chat_id),
+                Task.payload["mentioned"].astext == "true",
+                # 这一批的起点和消息的 received_at 是同一个数据库时间（见 `note`）。
+                InboundEvent.received_at >= since,
+            )
+            .limit(1)
+        )
+        return found is not None
+
     async def _has_rivals(self, session: Any, bot: Bot, chat_id: str) -> bool:
         """这个群里还有别的机器人开着旁听（on）。"""
         count = await session.scalar(
@@ -346,6 +373,7 @@ class GroupObserveHandler:
         origin: str = "observe",
         session_key: str | None = None,
         solo: bool = False,
+        mentioned: bool = False,
     ) -> Task | None:
         event = await session.get(InboundEvent, event_id) if event_id else None
         if event is None:
@@ -364,6 +392,7 @@ class GroupObserveHandler:
                     # 这一批的起点：回合里把它之后的群消息标成【新】，一并处理。
                     **({"observe_since": since.isoformat()} if since else {}),
                     **({"solo": True} if solo else {}),
+                    **({"mentioned": True} if mentioned else {}),
                 },
                 session_key=session_key or chat_id,
                 inbound_event_id=event.id,
