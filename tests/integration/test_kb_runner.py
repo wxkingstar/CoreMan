@@ -325,8 +325,9 @@ async def test_run_extracts_filters_compiles_and_records(db_engine: AsyncEngine,
     assert "## T-7 " in sent and "上级任务：T-1" in sent and "执行：AI 员工「订单助手」" in sent
 
     wiki_text = model.node.files[LEAD_DIR]["docs/roles.md"]
-    assert "（T-2，K-" in wiki_text and "（规则文档 alpha，K-" in wiki_text
-    assert "（系统目录 orders，K-" in wiki_text and "（名录，K-" in wiki_text
+    # 来源标记写员工名、系统名，不写标识。
+    assert "（T-2，K-" in wiki_text and "（规则文档 订单助手，K-" in wiki_text
+    assert "（系统目录 订单系统，K-" in wiki_text and "（名录，K-" in wiki_text
     assert model.node.files[LEAD_DIR]["AGENTS.md"].startswith("# 调度员")
 
     async with factory() as session:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -138,6 +139,20 @@ def test_parse_drops_items_whose_source_is_not_in_the_batch() -> None:
     assert [d.source_ref for d in drafts] == ["T-2"]
 
 
+def test_parse_caps_the_number_of_items_per_batch() -> None:
+    rows = [
+        {"kind": "term", "topic": "口径", "text": f"第 {n} 条。", "source": "T-1"}
+        for n in range(extract.MAX_ITEMS + 5)
+    ]
+    drafts = extract.parse(json.dumps(rows, ensure_ascii=False), batch("T-1"))
+    assert len(drafts) == extract.MAX_ITEMS
+
+
+def test_extract_prompt_tells_the_model_what_a_dispatcher_does_not_need() -> None:
+    for phrase in ("调度员", "操作手册", "每个 AI 员工都一样的通用约定", "宁少勿多"):
+        assert phrase in extract.SYSTEM_PROMPT
+
+
 def test_parse_rejects_output_without_an_array() -> None:
     with pytest.raises(extract.ParseError):
         extract.parse("没有可抽的内容。", batch("T-1"))
@@ -182,14 +197,20 @@ def test_cited_and_summary() -> None:
     assert wiki.summary("没按格式写") == "没按格式写"
 
 
-def test_source_label() -> None:
+def test_source_label_uses_names_and_falls_back_to_keys() -> None:
     def item(kind: str, ref: str) -> SimpleNamespace:
         return SimpleNamespace(source_kind=kind, source_ref=ref)
 
-    assert wiki.source_label(item("task", "T-128")) == "T-128"  # type: ignore[arg-type]
-    assert wiki.source_label(item("rules", "rules:alpha/docs/a.md")) == "规则文档 alpha"  # type: ignore[arg-type]
-    assert wiki.source_label(item("catalog", "catalog:orders")) == "系统目录 orders"  # type: ignore[arg-type]
-    assert wiki.source_label(item("roster", "roster")) == "名录"  # type: ignore[arg-type]
+    names = {"rules:alpha": "订单助手", "catalog:orders": "订单系统"}
+    assert wiki.source_label(item("task", "T-128"), names) == "T-128"  # type: ignore[arg-type]
+    assert (
+        wiki.source_label(item("rules", "rules:alpha/docs/a.md"), names)  # type: ignore[arg-type]
+        == "规则文档 订单助手"
+    )
+    assert wiki.source_label(item("catalog", "catalog:orders"), names) == "系统目录 订单系统"  # type: ignore[arg-type]
+    assert wiki.source_label(item("rules", "rules:beta/AGENTS.md"), names) == "规则文档 beta"  # type: ignore[arg-type]
+    assert wiki.source_label(item("catalog", "catalog:crm"), {}) == "系统目录 crm"  # type: ignore[arg-type]
+    assert wiki.source_label(item("roster", "roster"), names) == "名录"  # type: ignore[arg-type]
 
 
 def config(hour: int = 2) -> runner.Config:
