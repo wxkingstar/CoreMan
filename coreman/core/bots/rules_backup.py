@@ -93,8 +93,14 @@ class Collected:
     redacted: int = 0
 
 
-async def collect(relay: RelayServer, bot: Bot) -> Collected | None:
-    """从员工所在节点读出规则文档；根目录自己是带远端的 Git 仓库时返回 None。"""
+async def collect(
+    relay: RelayServer, bot: Bot, *, own_repo: bool = False, redact_secrets: bool = True
+) -> Collected | None:
+    """从员工所在节点读出规则文档；根目录自己是带远端的 Git 仓库时返回 None。
+
+    知识库（core/kb）也用它读：`own_repo` 为真时自带仓库的员工照读，`redact_secrets` 为假时
+    原样返回（编译后检查要按原文定位）。
+    """
     base = {"working_dir": bot.working_dir, "bot_id": str(bot.id)}
 
     async def call(operation: str, **payload: Any) -> dict[str, Any]:
@@ -107,10 +113,12 @@ async def collect(relay: RelayServer, bot: Bot) -> Collected | None:
     except AgentError as exc:
         # 节点只在根目录确有 .git 时才执行 git；拒绝执行（仓库配置了凭证助手、url 改写等）
         # 或执行失败，说明它自己是个仓库，规则随那个仓库维护。
-        if exc.detail and "Git" in exc.detail:
+        if not (exc.detail and "Git" in exc.detail):
+            raise
+        if not own_repo:
             return None
-        raise
-    if status.get("initialized") and status.get("remote"):
+        status = {}
+    if not own_repo and status.get("initialized") and status.get("remote"):
         return None
     out, total = Collected(), 0
 
@@ -124,7 +132,7 @@ async def collect(relay: RelayServer, bot: Bot) -> Collected | None:
         if not isinstance(content, str) or not data.get("eof"):
             out.skipped.append(path)
             return
-        text, hits = redact(content)
+        text, hits = redact(content) if redact_secrets else (content, 0)
         out.files[path], out.redacted, total = text, out.redacted + hits, total + size
 
     entries = (await call("workspace-list", path="")).get("entries", [])
