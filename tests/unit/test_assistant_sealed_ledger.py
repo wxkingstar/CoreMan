@@ -184,6 +184,8 @@ RAW_STATEMENTS = {
     "coreman/core/bus/tasks.py": 1,  # 认领：只读明文键
     "coreman/core/escalations/media_recovery.py": 1,  # 只读明文键
     "coreman/runtime/worker/chat/feishu_docs.py": 1,  # `payload || …` 追加明文键 doc_links
+    # `payload || …` / `payload - …` 加减明文键 solo_group；只对普通员工（个人助理不判断）
+    "coreman/runtime/worker/chat/solo.py": 2,
     "coreman/runtime/worker/credential_cards.py": 2,  # `#-` 之后对助理的行再经 ORM 删一次
 }
 # 文件 → insert / update / 构造这些模型的语句条数：内容列都经过 sealed.seal_values，或只写元数据。
