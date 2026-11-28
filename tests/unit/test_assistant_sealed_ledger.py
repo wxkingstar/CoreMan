@@ -141,7 +141,8 @@ COLUMN_REFERENCES = {
     "coreman/core/chat/busy_choice.py": 1,  # 明文键 platform_user_id
     # 后台阶段的观察任务、排队消息：明文键 run_id / background_hold；个人助理不进后台阶段
     "coreman/core/chat/background_runs.py": 4,
-    "coreman/core/chat/group_observe.py": 2,  # 只处理群消息，助理不收群消息
+    # 只处理群消息，助理不收群消息；别的机器人卡片的存档只取普通机器人的行（没有封存）
+    "coreman/core/chat/group_observe.py": 3,
     # patch_state：助理的行取值后 open_value 再整块封存；普通机器人的行在库里 `||` 合并
     "coreman/core/chat/interactions.py": 2,
     "coreman/core/chat/session_switch.py": 2,  # 取值后 open_value
