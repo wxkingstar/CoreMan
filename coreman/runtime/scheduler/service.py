@@ -15,7 +15,8 @@
 
 cron 调度每 10 秒独立运行，通知消费者单独投递；企微扫码会话每 3 秒兜底轮询一次；通讯录每
 `CONTACT_SYNC_INTERVAL_HOURS` 全量同步一次（每 5 分钟看一眼是否到期）；配了 `RULES_BACKUP_REPO`
-与令牌时，员工规则文档每天备份一次（每 10 分钟看一眼是否到期）。个人助理的开通与停用、盯消息、
+与令牌时，员工规则文档每天备份一次（每 10 分钟看一眼是否到期）；开了调度员知识库时每天抽取并
+编译一次（同样每 10 分钟看一眼）。个人助理的开通与停用、盯消息、
 投递（交回事项与顺带检查）各有一条独立的循环，每 5 秒一次：里面有对节点与飞书的网络调用，慢了、
 出错了只影响它们自己。
 """
@@ -45,6 +46,7 @@ MAX_HEARTBEAT_SECONDS = 10.0
 RECONCILE_SECONDS = 300.0
 CONTACT_SYNC_CHECK_SECONDS = 300.0
 RULES_BACKUP_CHECK_SECONDS = 600.0
+KNOWLEDGE_CHECK_SECONDS = 600.0
 # 任务平台的账本镜像与截止提醒。
 WORK_TASKS_SECONDS = 30
 # 个人助理的开通与停用：多久推进一次（授权完成后最多这么久就开通好）。
@@ -137,6 +139,7 @@ class SchedulerService(Service):
                 ("scheduler-tower-reconcile", self._tower_reconcile_loop()),
                 ("scheduler-contact-sync", self._contact_sync_loop()),
                 ("scheduler-rules-backup", self._rules_backup_loop()),
+                ("scheduler-knowledge", self._knowledge_loop()),
                 ("scheduler-assistant-lifecycle", self._assistant_lifecycle_loop()),
                 ("scheduler-assistant-watch", self._assistant_watch_loop()),
                 ("scheduler-assistant-delivery", self._assistant_delivery_loop()),
@@ -474,6 +477,36 @@ class SchedulerService(Service):
             except Exception:
                 self._log.exception("rules_backup_failed")
             await self._sleep(RULES_BACKUP_CHECK_SECONDS)
+
+    async def _knowledge_loop(self) -> None:
+        """调度员知识库每天抽取并编译一次；没开或没指定承接员工时不起作用。"""
+        from coreman.core.kb import runner
+
+        while not self._stop.is_set():
+            try:
+                if self.is_leader:
+                    report = await runner.run_due(self._factory, self._store, datetime.now(UTC))
+                    if report is not None:
+                        self._log.info(
+                            "knowledge_run_done",
+                            **{
+                                key: report.get(key)
+                                for key in (
+                                    "status",
+                                    "mode",
+                                    "provider",
+                                    "batches",
+                                    "extracted",
+                                    "dropped",
+                                    "compiled",
+                                    "more",
+                                    "error",
+                                )
+                            },
+                        )
+            except Exception:
+                self._log.exception("knowledge_run_failed")
+            await self._sleep(KNOWLEDGE_CHECK_SECONDS)
 
     async def _assistant_lifecycle_loop(self) -> None:
         """个人助理的开通与停用：单独一条循环，里面对节点与飞书的调用慢了、出错了都只影响它自己。"""

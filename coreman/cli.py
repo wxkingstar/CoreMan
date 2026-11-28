@@ -11,6 +11,9 @@
 `rules-backup [--apply]`：立即备份一轮员工规则文档（scheduler 每天自动跑），
 见 core.bots.rules_backup。
 
+`knowledge status | set | run [--cold-start] [--apply]`：调度员知识库的设置、状态与立即运行
+（scheduler 每天自动跑），见 core.kb。
+
 `assistant-keys rewrap [--apply]`：轮换 MASTER_KEY 之后，把个人助理的数据密钥改由新主密钥包裹，
 见 core.assistants.keys。
 
@@ -247,6 +250,55 @@ async def _rules_backup(apply: bool) -> int:
     return 0
 
 
+async def _knowledge(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
+    from coreman.core.kb import runner
+    from coreman.core.runtime_nodes import transport as runtime_transport
+    from coreman.core.settings_store import SettingsStore
+
+    settings = get_settings()
+    configure_logging(
+        service="cli", instance="knowledge", level=settings.log_level, stream=sys.stderr
+    )
+    engine = make_engine(settings.database_url)
+    factory = make_session_factory(engine)
+    store = SettingsStore(factory)
+    runtime_transport.configure(factory)
+    try:
+        if args.operation == "set":
+            enabled = True if args.enable else False if args.disable else None
+            await runner.configure(
+                factory,
+                store,
+                bot_key=args.bot,
+                enabled=enabled,
+                hour=args.hour,
+                timezone=args.timezone,
+                seven_day=args.quota_7d,
+                five_hour=args.quota_5h,
+            )
+        if args.operation == "run":
+            result = await runner.run(
+                factory,
+                store,
+                datetime.now(UTC),
+                apply=args.apply,
+                cold_start=args.cold_start,
+                limit=args.limit,
+            )
+        else:
+            result = await runner.status(factory, store)
+    except runner.KnowledgeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        runtime_transport.configure(None)
+        await engine.dispose()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 async def _assistant_keys_rewrap(apply: bool) -> int:
     """把个人助理的数据密钥改由当前主密钥包裹；不加 --apply 只统计、不落库。"""
     settings = get_settings()
@@ -335,6 +387,22 @@ def main(argv: list[str] | None = None) -> int:
     tower_ops.add_parser("reconcile", help="翻 Tower 状态接口，补上丢失回调的审批决定")
     backup = sub.add_parser("rules-backup", help="立即备份员工规则文档到共用 GitHub 仓库")
     backup.add_argument("--apply", action="store_true", help="真正提交；不加只读取并列出改动")
+    kb = sub.add_parser("knowledge", help="调度员知识库")
+    kb_ops = kb.add_subparsers(dest="operation", required=True)
+    kb_ops.add_parser("status", help="查看设置、条目计数和最近几次运行")
+    kb_set = kb_ops.add_parser("set", help="指定承接员工、开关和运行时间")
+    kb_set.add_argument("--bot", default=None, help="承接知识库的 AI 员工标识（必须是调度员）")
+    kb_toggle = kb_set.add_mutually_exclusive_group()
+    kb_toggle.add_argument("--enable", action="store_true", help="开启每天自动运行")
+    kb_toggle.add_argument("--disable", action="store_true", help="关闭每天自动运行")
+    kb_set.add_argument("--hour", type=int, default=None, help="每天几点开始（0-23）")
+    kb_set.add_argument("--timezone", default=None, help="上面这个钟点的时区，如 Asia/Shanghai")
+    kb_set.add_argument("--quota-7d", type=int, default=None, help="7 天额度用到百分之几就不再用")
+    kb_set.add_argument("--quota-5h", type=int, default=None, help="5 小时额度用到百分之几就不再用")
+    kb_run = kb_ops.add_parser("run", help="立即抽取并编译一次")
+    kb_run.add_argument("--apply", action="store_true", help="真正运行；不加只列出会读多少材料")
+    kb_run.add_argument("--cold-start", action="store_true", help="清空进度，从头对已有数据跑一轮")
+    kb_run.add_argument("--limit", type=int, default=None, help="这次最多抽取多少批")
     akeys = sub.add_parser("assistant-keys", help="个人助理数据密钥")
     akeys_ops = akeys.add_subparsers(dest="operation", required=True)
     rewrap = akeys_ops.add_parser("rewrap", help="主密钥轮换后重新包裹数据密钥")
@@ -366,6 +434,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_contact_sync(args.app))
     if args.command == "assistant-keys" and args.operation == "rewrap":
         return asyncio.run(_assistant_keys_rewrap(args.apply))
+    if args.command == "knowledge":
+        return asyncio.run(_knowledge(args))
     if args.command == "rules-backup":
         return asyncio.run(_rules_backup(args.apply))
     return 2

@@ -301,6 +301,13 @@ from coreman.core.db.models.group_observe import (
     GroupObserveDecision,
     GroupObserveState,
 )
+from coreman.core.db.models.kb import (
+    KNOWLEDGE_ITEM_STATUSES,
+    KNOWLEDGE_KINDS,
+    KNOWLEDGE_SOURCES,
+    KnowledgeItem,
+    KnowledgeRun,
+)
 from coreman.core.db.models.personal_credentials import (
     CREDENTIAL_ORIGINS,
     CREDENTIAL_REQUEST_STATUSES,
@@ -413,3 +420,11 @@ __all__ += [
 ]
 
 __all__ += ["OAuthAccessToken", "OAuthClient", "OAuthGrant"]
+
+__all__ += [
+    "KNOWLEDGE_ITEM_STATUSES",
+    "KNOWLEDGE_KINDS",
+    "KNOWLEDGE_SOURCES",
+    "KnowledgeItem",
+    "KnowledgeRun",
+]
