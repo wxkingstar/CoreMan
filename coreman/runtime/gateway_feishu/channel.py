@@ -68,6 +68,7 @@ TOASTS: dict[str, dict[str, str]] = {
     "queued": {"type": "success", "content": "已收到，马上处理"},
     "duplicate": {"type": "info", "content": "已选过"},
     "not_requester": {"type": "warning", "content": "只有提问人可以选择"},
+    "not_asked": {"type": "warning", "content": "这件事在等被问的人来定，你可以在群里说你的意见"},
     "busy_wait": {"type": "success", "content": "好的，排在后面"},
     "busy_stop": {"type": "info", "content": "正在停下上一条…"},
     "busy_progress": {"type": "info", "content": "正在查看进度…"},

@@ -1,8 +1,10 @@
 """任务平台的飞书卡片：待选择事项（派给你、待你验收）与完成、取消通知。
 
 待选择事项在网页和卡片上是同一份（spec §3.4）：问题变了（新问题、被回答、被撤掉）就把旧卡片
-改成结果，再给新问题发一张卡。卡片只发到被问的人的私聊；按钮回调走 `personal:<任务 id>`、
-事件 `work_task_ask`，由 worker 的 `work_task_cards.handle` 处理。
+改成结果，再给新问题发一张卡。卡片发到被问的人的私聊；从群里发起的事（调度员交接出来的任务
+和它下面的子任务、问题），被问的人在那个群里说过话时改发到群里并 @ 他：别人看得到在等谁定
+什么，只有他（和代表人）点了才算。按钮回调走 `personal:<任务 id>`、事件 `work_task_ask`，
+由 worker 的 `work_task_cards.handle` 处理。
 
 用哪个飞书员工发：跟这件事有关的 AI 员工（执行员工、发起的员工、调度员），都没有时用系统设置
 里的「任务通知员工」（`work_task_notifier_bot_id`）。对方不在这个应用的可用范围内时发不出去，
@@ -17,11 +19,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coreman.core.api_tasks import reply_to
 from coreman.core.api_tasks.service import feishu_user_id
 from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import outbox
 from coreman.core.db.models import (
     Bot,
+    InboundEvent,
     OutboxItem,
     Setting,
     User,
@@ -29,7 +33,8 @@ from coreman.core.db.models import (
     WorkTaskEvent,
     WorkTaskWatcher,
 )
-from coreman.core.work_tasks.service import NEEDS_TEXT, OTHER, clip
+from coreman.core.work_tasks import progress
+from coreman.core.work_tasks.service import NEEDS_TEXT, OTHER, clip, name_of
 
 EVENT_KEY = "work_task_ask"
 TEXT_FIELD = "text"
@@ -61,35 +66,52 @@ async def sender(session: AsyncSession, row: WorkTask) -> Bot | None:
     return None
 
 
-def _button(row: WorkTask, ask_id: str, key: str, label: str, primary: bool) -> dict[str, Any]:
+def _button(
+    row: WorkTask,
+    ask_id: str,
+    key: str,
+    label: str,
+    primary: bool,
+    allowed: list[str] | None = None,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "task_id": card_task_id(row),
+        "event_key": EVENT_KEY,
+        "level": f"{ask_id}:{key}",
+    }
+    if allowed:
+        # 发在群里的卡：谁点了才算。网关据此当场提示别人「不是问你的」，worker 再核对一遍权限。
+        value["allowed"] = allowed
     return {
         "tag": "button",
         "text": {"tag": "plain_text", "content": label},
         "type": "primary" if primary else "default",
-        "behaviors": [
-            {
-                "type": "callback",
-                "value": {
-                    "task_id": card_task_id(row),
-                    "event_key": EVENT_KEY,
-                    "level": f"{ask_id}:{key}",
-                },
-            }
-        ],
+        "behaviors": [{"type": "callback", "value": value}],
     }
 
 
-def ask_card(row: WorkTask, ask: dict[str, Any], base_url: str) -> dict[str, Any]:
-    """一个问题、几个选项按钮；要写理由的选项和「其他」放进表单，和输入框一起提交。"""
-    elements: list[dict[str, Any]] = [
-        {"tag": "div", "text": {"tag": "plain_text", "content": ask["question"]}}
-    ]
+def ask_card(
+    row: WorkTask,
+    ask: dict[str, Any],
+    base_url: str,
+    *,
+    mention: str = "",
+    allowed: list[str] | None = None,
+) -> dict[str, Any]:
+    """一个问题、几个选项按钮；要写理由的选项和「其他」放进表单，和输入框一起提交。
+
+    发在群里时 `mention` 是开头点名的那一行，`allowed` 是能回答的人的飞书 user_id。
+    """
+    elements: list[dict[str, Any]] = []
+    if mention:
+        elements.append({"tag": "markdown", "content": mention})
+    elements.append({"tag": "div", "text": {"tag": "plain_text", "content": ask["question"]}})
     if ask.get("why"):
         elements.append({"tag": "markdown", "content": f"<font color='grey'>{ask['why']}</font>"})
     plain = [o for o in ask["options"] if o["key"] not in NEEDS_TEXT]
     texted = [o for o in ask["options"] if o["key"] in NEEDS_TEXT]
     for i, option in enumerate(plain):
-        elements.append(_button(row, ask["id"], option["key"], option["label"], i == 0))
+        elements.append(_button(row, ask["id"], option["key"], option["label"], i == 0, allowed))
     submits = [*texted, *([{"key": OTHER, "label": "其他"}] if ask.get("other") else [])]
     if submits:
         elements.append(
@@ -107,7 +129,7 @@ def ask_card(row: WorkTask, ask: dict[str, Any], base_url: str) -> dict[str, Any
                     },
                     *(
                         {
-                            **_button(row, ask["id"], o["key"], o["label"], False),
+                            **_button(row, ask["id"], o["key"], o["label"], False, allowed),
                             "name": o["key"],
                             "form_action_type": "submit",
                         }
@@ -153,11 +175,78 @@ def _ask_key(row: WorkTask, ask_id: str) -> str:
     return f"work-task:{row.id}:ask:{ask_id}"
 
 
+async def _in_group(
+    session: AsyncSession, row: WorkTask, to: uuid.UUID, pid: str, base_url: str
+) -> bool:
+    """从群里发起的事：被问的人在那个群里说过话，就把卡发到群里并 @ 他。发了返回 True。
+
+    由那个群的调度员（没有就用根任务的执行员工）发：它一定在群里，也收得到群里所有人的消息，
+    被问的人在它这里的 open_id 从入站记录里取；他没在这个群说过话（可能不在群里）就不发群。
+    """
+    root = (
+        row
+        if row.parent_id is None
+        else (await session.get(WorkTask, row.root_id) if row.root_id else None)
+    )
+    if root is None or not progress.group_root(root):
+        return False
+    bot = await session.get(Bot, root.dispatcher_bot_id or root.assignee_bot_id)
+    if bot is None or not bot.enabled or bot.platform != "feishu" or is_assistant(bot):
+        return False
+    seen = (
+        await session.execute(
+            select(InboundEvent.id, InboundEvent.sender_open_id)
+            .where(
+                InboundEvent.bot_id == bot.id,
+                InboundEvent.chat_id == root.chat_id,
+                InboundEvent.sender_platform_user_id == pid,
+            )
+            .order_by(InboundEvent.id.desc())
+            .limit(1)
+        )
+    ).first()
+    if seen is None:
+        return False
+    person = await session.get(User, to)
+    mention = (
+        f"<at id={seen.sender_open_id}></at> 请你来定"
+        if seen.sender_open_id
+        else f"**{name_of(person)}** 请你来定"
+    )
+    allowed = [pid]
+    principal = (
+        await feishu_user_id(session, row.principal_user_id) if row.principal_user_id else None
+    )
+    if principal and principal not in allowed:
+        allowed.append(principal)  # 代表人可以代答
+    origin = await session.get(InboundEvent, root.origin_event_id) if root.origin_event_id else None
+    message_id = reply_to(origin.platform_msg_id) if origin is not None else None
+    target: dict[str, Any] = {"chat_id": root.chat_id}
+    payload: dict[str, Any] = {
+        "card": ask_card(row, row.ask or {}, base_url, mention=mention, allowed=allowed)
+    }
+    if message_id and not message_id.startswith("action:"):
+        target["message_id"] = message_id
+        payload["_reply"] = True
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform="feishu",
+        kind="send",
+        dedupe_key=_ask_key(row, (row.ask or {})["id"]),
+        target=target,
+        payload=payload,
+    )
+    return True
+
+
 async def _send_ask(session: AsyncSession, row: WorkTask, base_url: str) -> None:
     ask = row.ask or {}
     to = ask.get("to_user_id")
-    bot = await sender(session, row)
     pid = await feishu_user_id(session, uuid.UUID(to)) if to else None
+    if pid and to and await _in_group(session, row, uuid.UUID(to), pid, base_url):
+        return
+    bot = await sender(session, row)
     if bot is None or not pid:
         return
     await outbox.add(

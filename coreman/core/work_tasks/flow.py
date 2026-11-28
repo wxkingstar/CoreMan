@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import Bot, User, WorkTask, WorkTaskEvent
-from coreman.core.work_tasks import cards, execute
+from coreman.core.work_tasks import cards, execute, progress
 from coreman.core.work_tasks.service import WorkTaskError, add_event, name_of
 
 DETAIL_LIMIT = 6000
@@ -52,6 +52,7 @@ async def settle(
     )
     if row.parent_id and settled(row) and not _was_settled(before_status, row):
         await resume_parent(session, row.parent_id, base_url=base_url)
+    await progress.refresh(session, row, base_url=base_url)
 
 
 def _was_settled(before_status: str, row: WorkTask) -> bool:

@@ -82,6 +82,9 @@ async def handle(
         if exc.status == 422:
             # 退回、拒绝没写理由：卡片不动，让他补上再点（网页上同样拒绝）。
             return "needs_text"
+        if exc.status == 403:
+            # 发在群里的卡被别人点了（网关已提示过）：卡片不动，留给被问的人。
+            return "not_allowed"
         await _show(
             session,
             bot,

@@ -41,6 +41,8 @@ export interface WorkTaskRun {
 export interface WorkTaskDetail extends WorkTask {
   watching: boolean; watchers: { id: string; name: string }[]
   parent: { code: string; title: string } | null; children: WorkTask[]
+  /** 页面上出现的别的任务编号 → 标题和状态（编号可点、旁边标状态）。 */
+  linked: Record<string, { title: string; status: WorkTaskStatus }>
   events: WorkTaskEvent[]
   /** 给 Agent 看的那一层：页面上默认折叠。 */
   agent: {
