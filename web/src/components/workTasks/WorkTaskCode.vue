@@ -18,6 +18,7 @@ const hint = computed(() => {
     :to="{ name: 'work-task', params: { code } }"
     class="task-code"
     :title="hint"
+    :data-back-key="code"
     data-test="task-code"
   >
     <WorkTaskStatusIcon

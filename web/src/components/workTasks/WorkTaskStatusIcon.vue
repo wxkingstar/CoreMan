@@ -37,7 +37,8 @@ const label = computed(() => {
 </template>
 
 <style scoped>
-.task-status-icon { vertical-align: -2px; }
+/* 比字大一号：打勾、转圈一眼看得清。 */
+.task-status-icon { font-size: 1.2em; vertical-align: -0.2em; }
 .tone-primary { color: var(--el-color-primary); }
 .tone-warning { color: var(--el-color-warning); }
 .tone-success { color: var(--el-color-success); }

@@ -454,7 +454,7 @@ const en = {
     summary: 'One line', related: 'Related tasks', timeline: 'History', noEvents: 'Nothing recorded yet',
     agentLayer: 'Details for AI', agentLayerHint: 'Folded by default; AI employees read them on their own. Anyone can expand them.',
     plainText: 'Plain text (for AI)', backToList: 'Tasks', progress: 'Progress',
-    allEvents: 'Show all ({n} more AI steps)', milestonesOnly: 'Milestones only',
+    allEvents: 'Show all ({n} more AI steps)', milestonesOnly: 'Milestones only', aiHint: 'This is an AI employee',
     report: 'Full report', artifacts: 'Deliverables',
     brief: 'Background and requirements', digest: 'Task digest', decision: 'Dispatch basis',
     probability: 'Decision probability', dispatchRaw: 'Raw dispatcher output', recentMessages: 'Group messages at the time', detail: 'Details',

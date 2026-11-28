@@ -493,7 +493,7 @@ export default {
     summary: '一句话', related: '相关任务', timeline: '经过', noEvents: '还没有记录',
     agentLayer: '给 AI 看的细节', agentLayerHint: '默认收起，AI 员工自己会读；所有人都能展开。',
     plainText: '纯文本版（给 AI 读）', backToList: '任务列表', progress: '进展',
-    allEvents: '显示全部（另有 {n} 条 AI 流水）', milestonesOnly: '只看里程碑',
+    allEvents: '显示全部（另有 {n} 条 AI 流水）', milestonesOnly: '只看里程碑', aiHint: '这是 AI 员工',
     report: '完整汇报', artifacts: '产出',
     brief: '背景与要求', digest: '任务记要', decision: '调度依据',
     probability: '判断概率', dispatchRaw: '调度员的原始输出', recentMessages: '当时的群聊', detail: '细节',

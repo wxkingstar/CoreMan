@@ -59,6 +59,7 @@ vi.mock('@/api/workTasks', () => ({
 }))
 
 import { workTasks } from '@/api/workTasks'
+import { installPageMemory } from '@/composables/usePageMemory'
 import { i18n } from '@/i18n'
 import WorkTaskDetailView from '@/views/WorkTaskDetailView.vue'
 import WorkTasksView from '@/views/WorkTasksView.vue'
@@ -85,7 +86,10 @@ describe('WorkTasksView', () => {
     expect(wrapper.text()).toContain('T-7')
     expect(wrapper.text()).toContain(i18n.global.t('workTasks.needsDrive'))
     expect(wrapper.text()).toContain('还没开工')
-    expect(wrapper.text()).toContain('数据助手（AI）')
+    // AI 员工名字后面是小图标（指上去提示是 AI），不再写「（AI）」。
+    expect(wrapper.text()).toContain('数据助手')
+    expect(wrapper.text()).not.toContain('（AI）')
+    expect(wrapper.find('[data-test="ai-mark"]').attributes('aria-label')).toBe(i18n.global.t('workTasks.aiHint'))
     // 问我的事项直接在行里点。
     const ask = wrapper.find('[data-test="work-task-ask"]')
     expect(ask.text()).toContain('接不接')
@@ -222,5 +226,31 @@ describe('WorkTasksView', () => {
     mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] } })
     await flushPromises()
     expect(vi.mocked(workTasks.list).mock.lastCall?.[0]).toMatchObject({ view: 'watching' })
+  })
+
+  it('comes back to where it was: the opened layers stay open and the clicked task flashes', async () => {
+    sessionStorage.clear()
+    const router = makeRouter()
+    installPageMemory(router)
+    await router.push('/work-tasks/T-7')
+    const wrapper = mount(
+      { template: '<router-view />' },
+      { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body },
+    )
+    await flushPromises()
+    await wrapper.find('[data-test="all-events"]').trigger('click')
+    // 点子任务表里的一行进 T-9。
+    await wrapper.find('[data-test="work-task-children"] .el-table__row').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.params.code).toBe('T-9')
+    // 按返回：先有 popstate，再导航。
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    router.back()
+    await flushPromises()
+    await new Promise(r => setTimeout(r, 200))
+    expect(router.currentRoute.value.params.code).toBe('T-7')
+    expect(wrapper.find('.el-timeline').text()).toContain('拆出 T-9')
+    expect(wrapper.find('[data-test="work-task-children"] tr.cm-flash').exists()).toBe(true)
+    wrapper.unmount()
   })
 })
