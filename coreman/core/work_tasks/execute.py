@@ -51,6 +51,8 @@ async def start(
     """排一轮执行员工的对话。`silent`：子任务这样没人在看的一轮，回复不发到任何会话。
 
     回复发到哪：不出声的一轮不发；调度员交来的任务回到原群；其余发到代表人和它的私聊。
+    代表人还没和它私聊过时也不出声：结果记在任务上，要他验收、回答时平台照常发卡片给他，
+    不用为了开工先去私聊一次。
     """
     if row.origin_ref:
         raise WorkTaskError(409, f"{row.code} 是自动记下的记录，不能领取")
@@ -71,6 +73,7 @@ async def start(
     if not pid:
         raise WorkTaskError(409, f"{name_of(principal)}没有飞书身份，没法以他的身份去做")
     chat_type = "single"
+    unreached = False
     if silent:
         chat_id = f"work:{row.code}"
     elif row.dispatcher_bot_id and row.platform == "feishu" and row.chat_id:
@@ -78,12 +81,11 @@ async def start(
     else:
         reached = await session.get(UserReached, (bot.id, principal.id))
         if reached is None or not reached.platform_chat_id:
-            raise WorkTaskError(
-                409,
-                f"{name_of(principal)}还没有在飞书私聊过「{bot.name}」，结果没处回报；"
-                f"请他先私聊「{bot.name}」一次",
-            )
-        chat_id = reached.platform_chat_id
+            # 没有私聊可回：这一轮不出声，结果只记在任务上（任务页看得到，验收、提问照常发卡片）。
+            silent, unreached = True, True
+            chat_id = f"work:{row.code}"
+        else:
+            chat_id = reached.platform_chat_id
     seq = int(
         await session.scalar(
             select(func.count()).select_from(WorkTaskRun).where(WorkTaskRun.work_task_id == row.id)
@@ -150,7 +152,13 @@ async def start(
         actor_type="system",
         actor_id=None,
         human_text=line,
-        detail={"trigger": trigger, "triggered_by": triggered_by, "note": note},
+        detail={
+            "trigger": trigger,
+            "triggered_by": triggered_by,
+            "note": note,
+            # 他还没和这位员工私聊过：回复不发到任何会话，结果看任务页。
+            **({"reply": "task_page"} if unreached else {}),
+        },
     )
     if chat_type == "single" and not silent:
         await _announce(session, row, bot, chat_id, principal, pid, event_id, line)

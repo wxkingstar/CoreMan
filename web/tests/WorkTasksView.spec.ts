@@ -301,6 +301,38 @@ describe('WorkTasksView', () => {
     wrapper.unmount()
   })
 
+  it('keeps an open task page fresh without a manual reload', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const full = await vi.mocked(workTasks.get)('T-7')
+      const router = makeRouter()
+      await router.push('/work-tasks/T-7')
+      const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
+      await flushPromises()
+      vi.mocked(workTasks.get).mockClear()
+      vi.mocked(workTasks.get).mockResolvedValueOnce({
+        ...full,
+        overview: { ...full.overview, latest: { text: '明细拉完了，正在算退货率', at: '2026-11-02T00:09:00Z', actor_name: '数据助手' } },
+      })
+      // 每 15 秒悄悄取一次：页面上换成最新的进展，不闪加载圈。
+      vi.advanceTimersByTime(15_000)
+      await flushPromises()
+      expect(workTasks.get).toHaveBeenCalledWith('T-7')
+      expect(wrapper.find('[data-test="overview-latest"]').text()).toContain('明细拉完了')
+      // 已经结束的任务不再取。
+      vi.mocked(workTasks.get).mockResolvedValueOnce({ ...full, status: 'done' })
+      vi.advanceTimersByTime(15_000)
+      await flushPromises()
+      vi.mocked(workTasks.get).mockClear()
+      vi.advanceTimersByTime(30_000)
+      await flushPromises()
+      expect(workTasks.get).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('gives AI a plain-text page with ?format=md', async () => {
     const router = makeRouter()
     await router.push('/work-tasks/T-7?format=md')

@@ -508,7 +508,7 @@ export default {
     other: '其他', onBehalf: '代 {name} 回答', reasonRequired: '请写一句理由', addNote: '写一句话（可选）', submitAnswer: '提交',
     titlePlaceholder: '动词开头，说清要什么结果', oneLine: '一句话说明', oneLinePlaceholder: '给人看的一句话，直击要害',
     manualStartHint: '先放着，不会自己开始：之后在任务页点「开工」，或在飞书里对它说「做 编号」，也可以给它配定时任务领取。默认由你验收。',
-    startNow: '现在开工', startNowHint: '建好就开工：以你的身份做，结果发到你和它的飞书私聊。默认由你验收。',
+    startNow: '现在开工', startNowHint: '建好就开工：以你的身份做，结果发到你和它的飞书私聊；还没私聊过它的，结果看任务页，要你验收或回答时会发卡片给你。默认由你验收。',
     start: '开工', resume: '接着做', started: '已经叫它开工了', startFailed: '任务已经建好、派好，但没能直接开工：{reason}',
     briefInput: '背景与要求（给 AI 员工看）', briefPlaceholder: '目标、背景、已知数据、约束、验收标准……写得越全，AI 员工越不用回头问你',
     priority: '优先级', priorities: { normal: '普通', high: '高', urgent: '紧急' }, due: '截止', reviewRequired: '做完要我验收',

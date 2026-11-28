@@ -196,6 +196,30 @@ const headStatus = computed(() => {
   return d.status === 'waiting' && d.overview.state === 'running' ? 'in_progress' : d.status
 })
 const closed = computed(() => !!detail.value && ['done', 'cancelled', 'shadow'].includes(detail.value.status))
+
+// 页面开着时每 15 秒悄悄取一次最新的：盯进展的人不用手动刷新。已经结束的任务、没在看的标签页、
+// 正在提交操作或正在选人指派时不取；取回来的和现在一样就不动页面。
+const REFRESH_MS = 15_000
+async function refresh(): Promise<void> {
+  if (plain.value || !detail.value || closed.value || busy.value || loading.value || assigning.value) return
+  if (document.hidden) return
+  const current = code.value
+  try {
+    const next = await workTasks.get(current)
+    if (code.value !== current || busy.value || assigning.value) return
+    if (JSON.stringify(next) !== JSON.stringify(detail.value)) detail.value = next
+  } catch {
+    // 悄悄取失败不打扰人，下一次再取。
+  }
+}
+const refreshTimer = window.setInterval(() => void refresh(), REFRESH_MS)
+// 切回这个标签页时马上取一次，不用等下一个 15 秒。
+const onVisible = (): void => { if (!document.hidden) void refresh() }
+document.addEventListener('visibilitychange', onVisible)
+onBeforeUnmount(() => {
+  window.clearInterval(refreshTimer)
+  document.removeEventListener('visibilitychange', onVisible)
+})
 const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.human_text))
 /** 「经过」默认只放里程碑；AI 员工开始/继续处理、拆子任务（表里有）这类流水点「显示全部」才出来。 */
 const shownEvents = computed(() => allEvents.value ? humanEvents.value : humanEvents.value.filter(e => e.milestone))

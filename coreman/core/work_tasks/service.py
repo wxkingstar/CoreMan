@@ -355,7 +355,12 @@ async def assign(
             row.status = "todo"
             row.ask = ask_accept(row, person.id, name_of(user))
         after = name_of(person)
-    text = f"{name_of(user)}：{before} → {after}" if before != "未指派" else f"交给{after}"
+    # 两种写法都写明是谁做的：「张三把这件事交给 X」「张三：甲 → 乙」。
+    text = (
+        f"{name_of(user)}：{before} → {after}"
+        if before != "未指派"
+        else f"{name_of(user)}交给{after}"
+    )
     if note:
         text += f"：{note}"
     human_event(

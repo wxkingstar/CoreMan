@@ -509,7 +509,7 @@ export default {
     other: 'その他', onBehalf: '{name} の代わりに回答', reasonRequired: '理由を一言書いてください', addNote: '一言（任意）', submitAnswer: '送信',
     titlePlaceholder: '動詞から始め、求める結果を書く', oneLine: 'ひとこと説明', oneLinePlaceholder: '人向けの一文、要点だけ',
     manualStartHint: 'あとで始める場合、自動では始まりません。タスクページで「開始」を押すか、Feishu で「做 番号」と伝えるか、定期タスクで受け取らせてください。既定ではあなたが検収します。',
-    startNow: 'いま開始', startNowHint: '作成するとすぐ始まります。あなたの立場で作業し、結果はあなたとの Feishu 個別チャットに届きます。既定ではあなたが検収します。',
+    startNow: 'いま開始', startNowHint: '作成するとすぐ始まります。あなたの立場で作業し、結果はあなたとの Feishu 個別チャットに届きます。まだ個別チャットがない場合、結果はタスクページに残り、検収や回答が必要なときにカードが届きます。既定ではあなたが検収します。',
     start: '開始', resume: '続ける', started: '開始を指示しました', startFailed: 'タスクは作成・割り当て済みですが、すぐには開始できませんでした：{reason}',
     briefInput: '背景と要件（AI 社員向け）', briefPlaceholder: '目的・背景・既知のデータ・制約・受け入れ基準など。詳しいほど聞き返しが減ります',
     priority: '優先度', priorities: { normal: '通常', high: '高', urgent: '緊急' }, due: '期限', reviewRequired: '完了後に自分が検収する',

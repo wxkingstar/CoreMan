@@ -469,7 +469,7 @@ const en = {
     other: 'Other', onBehalf: 'answering for {name}', reasonRequired: 'Please give a reason', addNote: 'Add a note (optional)', submitAnswer: 'Submit',
     titlePlaceholder: 'Start with a verb and name the result', oneLine: 'One-line summary', oneLinePlaceholder: 'One line for people, straight to the point',
     manualStartHint: 'Left for later, it will not start by itself: click "Start" on the task page, tell it "do T-12" (with the task code) in Feishu, or give it a scheduled task to claim work. You review the result by default.',
-    startNow: 'Start now', startNowHint: 'Starts as soon as it is created: it works as you, and reports in your Feishu chat with it. You review the result by default.',
+    startNow: 'Start now', startNowHint: 'Starts as soon as it is created: it works as you, and reports in your Feishu chat with it. If you have never chatted with it, the result stays on the task page and you get a card when it needs your review or an answer. You review the result by default.',
     start: 'Start', resume: 'Continue', started: 'Told it to start', startFailed: 'The task is created and assigned, but could not start right away: {reason}',
     briefInput: 'Background and requirements (for the AI employee)', briefPlaceholder: 'Goal, background, known data, constraints, acceptance criteria. The more complete, the fewer questions it has to ask you.',
     priority: 'Priority', priorities: { normal: 'Normal', high: 'High', urgent: 'Urgent' }, due: 'Due', reviewRequired: 'I review the result',

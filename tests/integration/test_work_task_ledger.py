@@ -110,6 +110,13 @@ async def test_records_name_the_calling_system_and_keep_markdown_out_of_the_one_
     # 写出是哪个业务系统：一排「业务系统发起的私聊任务」分不出谁是谁；私聊的内容仍然不抄。
     assert mirror.title == "监控系统发起的私聊任务" and mirror.summary == "alice经监控系统发起"
     assert mirror.brief == ""
+    # 早先记下的没写是哪个业务系统：下次同步路过时补上。
+    mirror.title, mirror.summary = "业务系统发起的私聊任务", "alice经业务系统发起"
+    await db_session.commit()
+    await ledger.sync(db_session, datetime.now(UTC))
+    await db_session.commit()
+    await db_session.refresh(mirror)
+    assert mirror.title == "监控系统发起的私聊任务" and mirror.summary == "alice经监控系统发起"
 
     # AI 的回复原文带加粗、标题、列表和链接：给人看的一句话里不留这些记号。
     assert (

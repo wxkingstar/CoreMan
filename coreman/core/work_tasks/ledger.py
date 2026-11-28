@@ -214,6 +214,14 @@ async def _api_tasks(session: AsyncSession, now: datetime) -> int:
             mirrors[ref] = mirror
             _event(session, mirror, f"{name_of(user)}经{via}发起", {"api_task_id": str(api.id)})
             created = True
+        elif api.client_key and mirror.title == "业务系统发起的私聊任务":
+            # 早先记下的没写是哪个业务系统：路过时补上。
+            client = await session.get(ApiClient, api.client_key)
+            if client is not None:
+                user = await session.get(User, api.user_id)
+                mirror.title = f"{client.name}发起的私聊任务"
+                mirror.summary = clip(f"{name_of(user)}经{client.name}发起", SUMMARY_MAX)
+                created = True
         waiting = "等运行时额度恢复" if api.quota_waiting_since and status in _RUNNING else ""
         target = (
             "done" if status == "succeeded" else "cancelled" if status in _FAILED else "running"
