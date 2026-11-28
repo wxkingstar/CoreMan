@@ -360,11 +360,81 @@ async def test_owner_message_joins_the_live_process_without_issuing_tokens(
     assert await db_session.scalar(select(func.count()).select_from(BusinessTokenIssue)) == issued
     stream = await streams.get(db_session, t.id)
     assert stream is not None and msg("live_joined_line", n=1) in stream.thinking_md
-    assert stream.final_text.endswith(msg("done_suffix"))
+    # 后台还有一项在跑：不标「回复已生成」，写明还在跑、做完回复在哪条消息下。
+    assert stream.final_text.endswith(msg("live_running_suffix", n=1, origin="开工"))
+    assert msg("done_suffix").strip() not in stream.final_text
     current = await tasks.get(db_session, t.id)
     assert current is not None and current.payload["live_join"]
     # 接进去的一轮不新建后台阶段。
     assert await db_session.scalar(select(func.count()).select_from(BackgroundRun)) == 1
+
+
+async def test_joined_reply_without_text_still_says_background_is_running(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _ = await feishu_bot(db_session)
+    await run_chat(
+        db_engine,
+        await feishu_task(db_session, bot, "@_user_1 帮我合并 361，等检查通过"),
+        LiveRelay(chats=[main_turn_with_background()]),
+    )
+    joined = LiveRelay(
+        chats=[
+            [
+                runtime({"live_joined": {"tasks": [bg_task("a"), bg_task("b")]}}),
+                FINISH,
+                _chunk(None, usage=USAGE),
+                DONE,
+            ]
+        ]
+    )
+    t = await feishu_task(db_session, bot, "先只合并 361")
+    await run_chat(db_engine, t, joined)
+    stream = await streams.get(db_session, t.id)
+    assert stream is not None
+    # 原消息按开头一句引用（去掉 @ 提及）。
+    assert stream.final_text.endswith(
+        msg("live_running_suffix", n=2, origin="帮我合并 361，等检查通过")
+    )
+    assert msg("done_suffix").strip() not in stream.final_text
+
+
+async def test_joined_reply_is_marked_done_when_nothing_is_left_running(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _ = await feishu_bot(db_session)
+    await run_chat(
+        db_engine,
+        await feishu_task(db_session, bot, "开工"),
+        LiveRelay(chats=[main_turn_with_background()]),
+    )
+    joined = LiveRelay(
+        chats=[
+            [
+                runtime({"live_joined": {"tasks": [bg_task("a")]}}),
+                runtime({"background_tasks": [bg_task("a", "completed")]}),
+                *plain_turn("A 做完了"),
+            ]
+        ]
+    )
+    t = await feishu_task(db_session, bot, "进展？")
+    await run_chat(db_engine, t, joined)
+    stream = await streams.get(db_session, t.id)
+    assert stream is not None
+    # 后台任务在这一轮里全部完成：照旧并入说明 + ✅。
+    assert stream.final_text.endswith(msg("live_merged_note", which="①") + msg("done_suffix"))
+    assert "⏳" not in stream.final_text
+
+
+async def test_turn_without_background_tasks_is_still_marked_done(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    bot, _ = await feishu_bot(db_session)
+    t = await feishu_task(db_session, bot, "你好")
+    await run_chat(db_engine, t, LiveRelay(chats=[plain_turn()]))
+    stream = await streams.get(db_session, t.id)
+    assert stream is not None and stream.final_text.endswith(msg("done_suffix"))
+    assert "⏳" not in stream.final_text
 
 
 async def test_joined_turn_falls_back_to_a_normal_turn_when_the_session_just_ended(
@@ -837,7 +907,11 @@ async def test_joined_reply_says_which_background_results_it_includes(
     await run_chat(db_engine, t, joined)
     stream = await streams.get(db_session, t.id)
     assert stream is not None
-    assert stream.final_text.endswith(msg("live_merged_note", which="①") + msg("done_suffix"))
+    # ① 在这一轮里完成、② 还在跑：写并入说明，但不标「回复已生成」。
+    assert stream.final_text.endswith(
+        msg("live_merged_note", which="①") + msg("live_running_suffix", n=1, origin="开工")
+    )
+    assert msg("done_suffix").strip() not in stream.final_text
 
 
 async def test_watch_delivers_partial_and_merged_text_once_across_replays(

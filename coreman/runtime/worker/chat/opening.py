@@ -337,8 +337,13 @@ class OpenStage(ChatStageBase):
             allow_join=allow_join,
         )
         joined = live is not None and live.joined
+        live_origin = ""
         if joined:
             assert live is not None and live.run is not None
+            from coreman.core.chat import background_runs
+            from coreman.runtime.worker.chat.finalize import _question
+
+            live_origin = _question(await background_runs.origin_text(session, live.run))
             current_task.payload = {**current_task.payload, "live_join": live.run.id}
             ctx.task.payload = {**ctx.task.payload, "live_join": live.run.id}
         # An alert turn is started by external text with nobody watching, so read-only is enforced
@@ -799,6 +804,7 @@ class OpenStage(ChatStageBase):
                 if relay.runtime_node_id
                 else None,
             ),
+            live_origin=live_origin,
         )
         self._after_supervisor(pre)
         if ctx.task.payload.get("work_silent") or ctx.task.payload.get(SILENT_KEY):

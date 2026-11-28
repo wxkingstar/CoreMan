@@ -176,6 +176,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "background_started_suffix": "\n\n⏳ 已在后台开始 {n} 项，完成后会逐条回复在这条消息下",
         "live_joined_line": "🔁 接着后台进行中的会话处理，后台还有 {n} 项在跑",
         "live_merged_note": "\n\n（后台任务 {which} 在这一轮里完成，结果可能已并入这条回复）",
+        "live_running_suffix": (
+            "\n\n⏳ 后台还有 {n} 项在跑，完成后会回复在「{origin}」那条消息下并 @ 你"
+        ),
+        "live_running_suffix_plain": (
+            "\n\n⏳ 后台还有 {n} 项在跑，完成后会回复在开工那条消息下并 @ 你"
+        ),
         "background_done_prefix": "**后台任务 {which} 完成**",
         "background_turn_prefix": "**后台任务有新进展**",
         "background_stopped_notice": (
@@ -576,6 +582,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "live_merged_note": (
             "\n\n（バックグラウンドタスク {which} がこの間に完了しました。"
             "結果はこの返信に含まれている場合があります）"
+        ),
+        "live_running_suffix": (
+            "\n\n⏳ バックグラウンドで残り {n} 件を実行中です。"
+            "完了したら「{origin}」のメッセージに返信してメンションします"
+        ),
+        "live_running_suffix_plain": (
+            "\n\n⏳ バックグラウンドで残り {n} 件を実行中です。"
+            "完了したら開始時のメッセージに返信してメンションします"
         ),
         "background_turn_prefix": "**バックグラウンドタスクに進展がありました**",
         "background_stopped_notice": (
