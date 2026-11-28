@@ -16,6 +16,7 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
     WorkTask,
+    WorkTaskEvent,
     WorkTaskWatcher,
 )
 from coreman.core.wecom.messages import InboundMessage, Sender
@@ -107,16 +108,37 @@ def _clean(text: str) -> str:
     return re.sub(r"<local_datetime[^>]*></local_datetime>", "时:分", text)
 
 
+def _walk(elements: list[dict]) -> list[dict]:
+    """按从上到下、从左到右的顺序摊平：并排的那一行、表单里的东西也算。"""
+    out: list[dict] = []
+    for element in elements:
+        if element.get("tag") == "column_set":
+            for column in element["columns"]:
+                out += _walk(column["elements"])
+        elif element.get("tag") == "form":
+            out += _walk(element["elements"])
+        else:
+            out.append(element)
+    return out
+
+
+def _buttons(item: OutboxItem) -> list[dict]:
+    elements = _walk(item.payload["card"]["body"]["elements"])
+    return [e for e in elements if e.get("tag") == "button"]
+
+
 def _blocks(item: OutboxItem) -> list[str]:
-    """卡上一块一块的文字（最后那行任务页链接不算）；按钮写成 [文字]。"""
+    """卡上一块一块的文字（最后那行任务页链接不算）；按钮写成 [文字]，输入框写成 〔提示〕。"""
     out: list[str] = []
-    for element in item.payload["card"]["body"]["elements"]:
+    for element in _walk(item.payload["card"]["body"]["elements"]):
         if element.get("tag") == "markdown":
             out.append(_clean(str(element["content"])))
         elif element.get("tag") == "div":
             out.append(str(element["text"]["content"]))
         elif element.get("tag") == "button":
             out.append(f"[{element['text']['content']}]")
+        elif element.get("tag") == "input":
+            out.append(f"〔{element['placeholder']['content']}〕")
     return out[:-1]
 
 
@@ -188,7 +210,7 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
         "**目标**：两个系统对齐接口并联调",
         "**正在做**\n⏳ 对齐接口文档 — 数据助手 · 时:分 开始",
     ]
-    assert _subtitle(card) == "进行中 ░░░░░░░░ 0/1"
+    assert _subtitle(card) == "进行中 □□□□□□□□ 0/1"
 
     # 卡片还没发出去时又拆了一件、写了后面的步骤和一句进展：直接换成最新内容，不多发一张。
     await _tool(db_session, root, lead, "create_task", _subtask(helper, "仓储侧开发"))
@@ -220,7 +242,7 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
         "**接下来**\n☐ 两边在测试环境联调",  # 已经拆成子任务的那一步不再列
         "<font color='grey'>最新：接口文档在对，仓储侧同时开工（时:分）</font>",
     ]
-    assert _subtitle(card) == "进行中 ░░░░░░░░ 0/3"
+    assert _subtitle(card) == "进行中 □□□□□□□□ 0/3"
 
     # 发出去之后做完一步：卡片后面没隔几条消息，原地更新。
     await _mark_sent(db_session, card, "om_card")
@@ -232,7 +254,7 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
         "**接下来**\n☐ 两边在测试环境联调",
         "**已完成（1）**\n✅ 对齐接口文档 — 数据助手（用时 6 分钟）",
     ]
-    assert _subtitle(update) == "进行中 ▓▓▓░░░░░ 1/3"
+    assert _subtitle(update) == "进行中 ■■■□□□□□ 1/3"
 
     # 状态没变不重复更新。
     await progress.refresh(db_session, child, base_url=BASE)
@@ -344,16 +366,24 @@ async def test_questions_sit_on_the_same_card_and_only_the_asked_person_answers(
     # 有新的事要人定：卡片挪到最新的位置（新发才 @ 得到人），旧的缩成一行。
     _, moved, stub = await _progress_items(db_session, root)
     assert moved.kind == "send" and stub.kind == "card_update"
-    assert _subtitle(moved) == "等人处理 ░░░░░░░░ 0/1"
-    assert _blocks(moved)[:5] == [
+    assert _subtitle(moved) == "等人处理 □□□□□□□□ 0/1"
+    assert _blocks(moved)[:7] == [
         "**现在要你定**",
         "<at id=ou_open_alice></at> 请你来定",
         "退货单作废还是放宽校验？",
         "[作废]",
         "[放宽]",
+        "〔都不合适？写下你的答案〕",
+        "[提交]",
     ]
-    buttons = [e for e in moved.payload["card"]["body"]["elements"] if e.get("tag") == "button"]
-    value = buttons[0]["behaviors"][0]["value"]
+    # 选项并排成一行，输入框和提交按钮也在同一行：不让一个问题把卡片撑出一屏。
+    rows = [
+        e
+        for e in moved.payload["card"]["body"]["elements"]
+        if e.get("tag") in ("column_set", "form")
+    ]
+    assert [len(rows[0]["columns"]), rows[1]["elements"][0]["tag"]] == [2, "column_set"]
+    value = _buttons(moved)[0]["behaviors"][0]["value"]
     assert value["task_id"] == cards.card_task_id(root) == moved.payload["card"]["task_id"]
     assert value["event_key"] == cards.PROGRESS_EVENT and value["allowed"] == ["ou_alice"]
     await _mark_sent(db_session, moved, "om_card")
@@ -394,8 +424,7 @@ async def test_someone_who_never_spoke_in_the_group_is_asked_privately(db_sessio
         select(OutboxItem).where(OutboxItem.dedupe_key.like(f"work-task:{child.id}:ask:%"))
     )
     assert item.target == {"user_id": "ou_carol"}
-    button = next(e for e in item.payload["card"]["body"]["elements"] if e.get("tag") == "button")
-    assert "allowed" not in button["behaviors"][0]["value"]
+    assert "allowed" not in _buttons(item)[0]["behaviors"][0]["value"]
     # 群里的卡上写明在等谁、已经私信了他，不带按钮。
     (card,) = await _progress_items(db_session, root)
     assert _blocks(card) == ["**正在做**\n🟡 等 **carol** 回答（已私信）：仓库地址以哪份为准？"]
@@ -565,4 +594,59 @@ async def test_follow_up_turns_stay_out_of_the_group_and_the_card_closes_the_goa
         "**还要人处理**\n- 请发起人同意合并仓储侧的 PR\n- 结算口径还没定，请业务负责人定",
         "共 1 步，都做完了，明细见任务页",
     ]
-    assert _subtitle(final) == "已完成 ▓▓▓▓▓▓▓▓ 1/1"
+    assert _subtitle(final) == "已完成 ■■■■■■■■ 1/1"
+
+
+async def test_two_questions_on_one_card_keep_their_form_names_apart(db_session):
+    """一张卡上同时画着两个问题：输入框、提交按钮的名字不能重复，否则飞书拒收整张卡。"""
+    lead, _, alice, root = await _setup(db_session)
+    codes = []
+    for question in ("退货单作废还是放宽校验？", "寄售先联调哪一种？"):
+        asked = await _tool(
+            db_session,
+            root,
+            lead,
+            "ask_human",
+            {"question": question, "options": ["甲", "乙"], "context": "背景"},
+        )
+        codes.append(asked["code"])
+    (card,) = await _progress_items(db_session, root)
+    named = [
+        e["name"]
+        for e in _walk(card.payload["card"]["body"]["elements"])
+        if e.get("tag") in ("input", "button") and "name" in e
+    ]
+    forms = [e["name"] for e in card.payload["card"]["body"]["elements"] if e.get("tag") == "form"]
+    assert len(named) == 4 and len(set(named)) == 4 and len(set(forms)) == 2
+
+    # 在第二个问题的输入框里写了自己的答案：按那个问题记下。
+    second = await db_session.scalar(select(WorkTask).where(WorkTask.code == codes[1]))
+    await _mark_sent(db_session, card, "om_card")
+    clicked = InboundEvent(
+        bot_id=lead.id,
+        platform="feishu",
+        platform_msg_id="action:evt-typed",
+        kind="card_action",
+        chat_type="group",
+        chat_id=GROUP,
+        sender_platform_user_id="ou_alice",
+        payload={},
+        reply_context={"chat_id": GROUP, "message_id": "om_card"},
+    )
+    db_session.add(clicked)
+    await db_session.flush()
+    action = {
+        "task_id": cards.card_task_id(root),
+        "event_key": cards.PROGRESS_EVENT,
+        "level": f"{second.ask['id']}:other",
+        "selected": {cards.text_field(second): ["两种都先不做"]},
+    }
+    result = await work_task_cards.handle(
+        db_session, SimpleNamespace(public_base_url=BASE), lead, clicked, action
+    )
+    await db_session.commit()
+    assert result in ("answered", "noted") and alice.id is not None
+    events = await db_session.scalars(
+        select(WorkTaskEvent).where(WorkTaskEvent.work_task_id == second.id)
+    )
+    assert any("两种都先不做" in (e.human_text or "") + str(e.agent_detail) for e in events)
