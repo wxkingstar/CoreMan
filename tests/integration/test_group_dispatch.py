@@ -341,6 +341,8 @@ async def test_live_dispatcher_hands_the_task_over_and_the_assignee_reports_back
     turn = body["messages"][-1]["content"]
     turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
     assert "口径按退货单数除以签收单数" in turn and f"「{link} 完成：」" in turn
+    # 任务会话里要别的员工配合走子任务，不挂在群里求助的入口。
+    assert "COREMAN_COLLABORATION_URL" not in body.get("env_vars", {})
     assert reply.reply_context["message_id"] == "om1"  # 回复发起人的原消息
     await db_session.refresh(task)
     assert task.status == "done" and task.summary == "上周退货率 4.2%"

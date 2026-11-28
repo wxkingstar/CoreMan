@@ -145,7 +145,10 @@ async def test_group_task_keeps_one_progress_card_up_to_date(db_session):
     await db_session.commit()
     _, update = await _progress_items(db_session, root)
     assert update.kind == "card_update" and update.target["message_id"] == "om_card"
-    assert _body(update).splitlines()[0] == "✅ 对齐接口文档 — 数据助手：接口文档已合并"
+    # 现在的事在前，做完的收在下面。
+    assert _body(update) == (
+        "⏳ 仓储侧开发 — 数据助手\n\n**已完成**\n✅ 对齐接口文档 — 数据助手：接口文档已合并"
+    )
     assert update.payload["card"]["header"]["subtitle"]["content"] == "进行中 · 已完成 1/2 件"
 
     # 状态没变不重复更新。
@@ -225,6 +228,14 @@ async def test_questions_go_to_the_group_and_only_the_asked_person_answers(db_se
     )
     await db_session.commit()
     assert result == "not_allowed" and child.ask is not None and child.status != "done"
+    # 被问的人答了：进展卡上写出定了什么。
+    child.status, child.ask, child.summary = "done", None, "作废"
+    await db_session.flush()
+    (card,) = await _progress_items(db_session, root)
+    await progress.refresh(db_session, child, base_url=BASE)
+    await db_session.commit()
+    (card,) = await _progress_items(db_session, root)
+    assert _body(card) == "✅ alice 定了：退货单作废还是放宽校验？ → 作废"
     updates = await db_session.scalars(
         select(OutboxItem).where(OutboxItem.dedupe_key == f"{clicked.id}:card_update")
     )

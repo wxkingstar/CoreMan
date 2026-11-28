@@ -87,6 +87,10 @@ Waiting (wait_for):
 
 Ending a turn: do exactly one of these.
 - Done: submit_result with result, output, digest, and artifacts for anything people should open.
+  result is shown to everyone on the progress card in the group: one plain sentence that says
+  what is now true, in words a colleague outside engineering understands ("退货已在测试环境
+  走通，货回到了仓库"). No run ids, document or order numbers, branch names, field names,
+  status codes or other internals; those belong in output.
   If the task has subtasks, report is required and covers: overall conclusion; for each subtask
   who did it, the conclusion, key data, where the output is, and whether you accepted it (failed
   and cancelled ones included); what you did yourself; open issues and risks; suggested next
@@ -120,7 +124,7 @@ DESCRIPTIONS = {
     ),
     "create_task": (
         "给当前任务拆一个子任务：assignee={type: bot|human, id}。"
-        "title ≤30 字、summary ≤60 字给人看，"
+        "title ≤30 字、summary ≤60 字给人看（title 会出现在群里的进展卡上，写成人能看懂的一件事），"
         "brief 给接手的人看（背景、数据、约束、验收标准）。"
         "AI 员工接手立即开工（不出声，结果交回你）；"
         "同事会收到飞书卡片。之后调用 wait_for 等结果。"
@@ -139,7 +143,8 @@ DESCRIPTIONS = {
     ),
     "update_task": "写进展：detail 是给 Agent 看的细节；human_text ≤80 字，只在人需要知道时写。",
     "submit_result": (
-        "交付当前任务：result ≤60 字给人看；output 完整输出；"
+        "交付当前任务：result ≤60 字给人看，一句人话说清现在怎样了，"
+        "不写运行编号、单号、分支、字段名、状态码这些细节（放进 output）；output 完整输出；"
         "digest 记要（背景、结论、关键数据或产出位置、决定、遗留问题）；"
         "artifacts=[{title,url}]；有子任务时 report（完整汇报）必填。"
         "只在做完时用；卡住或等确认时不要交付。"
