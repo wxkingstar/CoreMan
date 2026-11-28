@@ -107,14 +107,28 @@ async def _addressed_to_colleague(
 
 
 async def note(
-    session: AsyncSession, bot_id: uuid.UUID, message: InboundMessage, event_id: int
-) -> None:
+    session: AsyncSession,
+    bot_id: uuid.UUID,
+    message: InboundMessage,
+    event_id: int,
+    *,
+    request: bool = False,
+) -> bool:
     """一条群消息落库后记账：人说话清零机器人连发计数；人没 @ 它的消息排一个判断任务。
 
-    @ 机器人的消息照常走对话，清掉待判断：回答完不再主动补一句。
+    @ 机器人的消息照常走对话，清掉待判断：回答完不再主动补一句。例外是开启中的调度员：
+    人 @ 它说的话（`request`：不是命令、不是在回答它的求助）同样是要它安排的事，和没 @ 的
+    消息一样攒进这一批、交给调度回合（能分派、牵头、追加，也能直接回一句），不走普通对话。
+    返回这条消息是不是这样交给了调度；是的话调用方不再排对话任务。
     """
     now = datetime.now(UTC)
     human = message.sender.sender_type != "bot"
+    to_dispatch = False
+    if message.mentions_bot and human and request:
+        found = (
+            await session.execute(select(Bot.group_role, Bot.group_observe).where(Bot.id == bot_id))
+        ).first()
+        to_dispatch = found is not None and tuple(found) == ("dispatcher", "on")
     # 别的机器人发的消息（插话、答复、AI 员工之间求助）只记上下文，不排判断：
     # 该不该接话只看人说了什么；人那条还没判断的照旧等着。
     # 调度员收到 @ 了 AI 员工的消息也一样只记上下文：人已经点名了，不用它安排。
@@ -136,8 +150,8 @@ async def note(
                 },
             )
         )
-        return
-    pending = not message.mentions_bot
+        return False
+    pending = not message.mentions_bot or to_dispatch
     # 用数据库的 now()：和这条消息的 received_at 同一事务、同一个值，判断时按它认出这一批。
     values: dict[str, Any] = {
         "bot_id": bot_id,
@@ -160,20 +174,25 @@ async def note(
     )
     await session.execute(stmt)
     if not pending:
-        return
+        return False
     await enqueue(
         session,
         NewTask(
             bot_id=bot_id,
             kind="group_observe",
             lane="fast",
-            payload={"chat_id": message.chat_id, "event_id": event_id},
+            payload={
+                "chat_id": message.chat_id,
+                "event_id": event_id,
+                **({"mentioned": True} if to_dispatch else {}),
+            },
             session_key=task_session_key(message.chat_id),
             inbound_event_id=event_id,
             run_after=now + timedelta(seconds=FIRST_DELAY_SECONDS),
             dedupe_key=f"observe:{event_id}",
         ),
     )
+    return to_dispatch
 
 
 async def set_muted(session: AsyncSession, bot_id: uuid.UUID, chat_id: str, muted: bool) -> None:

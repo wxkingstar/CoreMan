@@ -88,7 +88,13 @@ async def enqueue_inbound(
     ):
         from coreman.core.chat import group_observe
 
-        await group_observe.note(session, bot.id, message, event_id)
+        routed = await group_observe.note(
+            session,
+            bot.id,
+            message,
+            event_id,
+            request=await _plain_request(session, bot, message),
+        )
         from coreman.core.chat import alert_sources
 
         source = await alert_sources.match(session, bot.id, message)
@@ -96,7 +102,7 @@ async def enqueue_inbound(
             return await alert_sources.trigger(
                 session, bot.bot_key, source, message, payload, event_id
             )
-        if not message.mentions_bot:
+        if not message.mentions_bot or routed:
             return None
     # Bot receipts are retained for collaboration reconciliation, never human intake.
     if message.sender.sender_type == "bot":
@@ -148,6 +154,20 @@ async def enqueue_inbound(
             lease_generation=lease_generation,
         )
     return None
+
+
+async def _plain_request(session: AsyncSession, bot: InboundBot, message: InboundMessage) -> bool:
+    """@ 它的这条是不是在交代事情：不是命令或「停止」，也不是同事在回答它的求助。"""
+    if not message.mentions_bot or message.sender.sender_type == "bot":
+        return False
+    text = text_of(message)
+    if classify_command(text) is not None or is_cancel_word(text):
+        return False
+    from coreman.core.chat.human_collaboration import is_helper_reply
+
+    return not await is_helper_reply(
+        session, bot.id, message.reply_context, message.sender.platform_user_id
+    )
 
 
 async def _enqueue_task(

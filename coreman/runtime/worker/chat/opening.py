@@ -985,7 +985,12 @@ class OpenStage(ChatStageBase):
         ctx.dispatch_staff = staff
         ctx.dispatch_codes = {t.code for t in recent}
         return dispatch.note(
-            staff, unverified, recent, names, solo=bool(ctx.task.payload.get("solo"))
+            staff,
+            unverified,
+            recent,
+            names,
+            solo=bool(ctx.task.payload.get("solo")),
+            mentioned=bool(ctx.task.payload.get("mentioned")),
         )
 
     def _structured_reply(self, ctx: TaskContext) -> bool:

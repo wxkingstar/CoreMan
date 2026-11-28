@@ -605,7 +605,10 @@ class FinalizeStage(ChatStageBase):
                         verdict.final_text,
                         ctx.dispatch_staff,
                         ctx.dispatch_codes,
-                        solo=bool(ctx.task.payload.get("solo")),
+                        # 单人群和有人 @ 它的回合都要回应：允许直接回一句。
+                        solo=bool(
+                            ctx.task.payload.get("solo") or ctx.task.payload.get("mentioned")
+                        ),
                     )
                 except ValueError as exc:
                     outcome, result["error"] = "dispatch_invalid", str(exc)

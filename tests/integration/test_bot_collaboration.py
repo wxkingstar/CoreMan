@@ -369,6 +369,51 @@ async def test_worker_uses_origin_human_and_resumes_original_session(
     assert row.status == ("failed" if feedback_status == "blocked" else "completed")
 
 
+@pytest.mark.parametrize("phase", ["helper", "resume"])
+async def test_only_the_summarising_turn_may_end_with_a_question(db_engine, db_session, phase):
+    """求助方拿到反馈后汇总时可以接着问人；协作伙伴那一轮问人不算完成。"""
+    import json
+
+    from coreman.runtime.worker.chat.collaboration import final_transition
+    from coreman.runtime.worker.chat.models import Verdict
+    from tests.integration.worker_helpers import build_ctx
+
+    a, b, actor, route, task, row = await setup(db_session)
+    await service.send_message(db_session, row, route)
+    item = await db_session.get(OutboxItem, row.request_outbox_id)
+    item.payload = {**item.payload, "_feishu_message_id": "request"}
+    item.status = "sent"
+    await receipt(db_session, b, mid="request", union="ua", message_type="post")
+    await db_session.flush()
+    await service.tick(db_session, datetime.now(UTC))
+    helper = await db_session.get(Task, row.helper_task_id)
+    helper.status = "running"
+    pre = SimpleNamespace(
+        writer=SimpleNamespace(
+            pending_text=json.dumps({"status": "completed", "answer": "库存 73"}), boundaries=[]
+        )
+    )
+    question = Verdict("ask_user", "succeeded", None, None, "退货单作废还是放宽校验？")
+    if phase == "helper":
+        final, _ = await final_transition(db_session, build_ctx(db_engine, helper), pre, question)
+        assert row.status == "failed" and final.log_status == "error"
+        assert "协作任务未正常完成" in final.final_text
+        return
+    done = Verdict("success", "succeeded", None, None, "库存 73")
+    await final_transition(db_session, build_ctx(db_engine, helper), pre, done)
+    item = await db_session.get(OutboxItem, row.response_outbox_id)
+    item.payload = {**item.payload, "_feishu_message_id": "reply"}
+    item.status = "sent"
+    await receipt(db_session, a, mid="reply", union="ub", parent="request")
+    await db_session.flush()
+    await service.tick(db_session, datetime.now(UTC))
+    resumed = await db_session.get(Task, row.resume_task_id)
+    resumed.status = "running"
+    final, silent = await final_transition(db_session, build_ctx(db_engine, resumed), pre, question)
+    assert row.status == "completed" and not silent
+    assert final.log_status == "ask_user" and final.final_text == question.final_text
+
+
 async def test_stop_cancels_waiting_and_late_receipt_cannot_resume(db_engine, db_session):
     from coreman.runtime.worker.commands import do_stop
     from tests.integration.worker_helpers import build_ctx
