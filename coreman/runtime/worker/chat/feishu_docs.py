@@ -1,6 +1,6 @@
 """飞书群聊回合挂群文档工具（coreman_feishu_docs），并处理放行卡片上的点击。
 
-见 docs/superpowers/specs/2026-11-06-feishu-group-docs.md。私聊不挂：本人私聊有个人工具。
+见 docs/superpowers/specs/2026-11-06-feishu-group-docs.md。私聊和单人群不挂：那里有本人的个人工具。
 """
 
 from __future__ import annotations
@@ -80,7 +80,8 @@ async def configure(
 ) -> tuple[str, dict[str, str]]:
     """群聊回合：先记下放行点击，再签发本轮凭证、追加规则。不合格时原样返回。"""
     env = {key: value for key, value in env.items() if not key.startswith(policy.PREFIX)}
-    if intake.bot.platform != "feishu" or intake.chat_type != "group":
+    if intake.bot.platform != "feishu" or intake.chat_type != "group" or intake.private:
+        # 单人群按私聊：用本人飞书工具，不挂群文档的收紧规则。
         return system_prompt, env
     try:
         cap = policy.Capability(ctx.task.id, intake.chat_id, base_session_id)

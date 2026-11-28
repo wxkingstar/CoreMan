@@ -66,6 +66,8 @@ class TaskContext:
     secrets: frozenset[str] = frozenset()
     # 这一轮挂了本人的企业微信工具：对话记录只给本人看。
     private_turn: bool = False
+    # 这一轮已经判断过是不是单人群（`chat.solo.apply`）：入站阶段判断过，开流前不再问一次飞书。
+    solo_checked: bool = False
     # 各能力写给本轮块的状态（授权状态、已保存的凭证、续接阶段等），一条一段。会变的内容只能
     # 放这里，不能拼进 system prompt：稳定段一变，Codex 要换 thread、Claude 要重写缓存。
     turn_notes: list[str] = field(default_factory=list)

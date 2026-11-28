@@ -37,6 +37,13 @@ class Intake:
     session_key: str
     text: str
     message_type: str
+    # 飞书群里真人只有发话人自己（`chat.solo`，每轮实时判断）：安全策略按私聊走，投递仍回这个群。
+    solo: bool = False
+
+    @property
+    def private(self) -> bool:
+        """这一轮按私聊的安全策略处理：真正的私聊，或单人群。"""
+        return self.chat_type == "single" or self.solo
 
     @property
     def relay_id(self) -> uuid.UUID | None:

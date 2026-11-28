@@ -81,14 +81,14 @@ async def session_link(
     """本轮回复里的会话查看链接。
 
     查看页按对话记录判断归属：开流时这一轮已经写进 chat_logs（见 `_open`），第一轮也不例外，
-    链接不需要另带凭据。群聊沿用管理员查看，私聊归本人。飞书私聊只有本人能看：发言人没绑定
+    链接不需要另带凭据。群聊沿用管理员查看，私聊（含单人群）归本人。飞书私聊只有本人能看：发言人没绑定
     员工身份时谁也打不开，就不给。个人助理的会话查看页对谁都不开，也不给。
     """
     url = session_viewer_url(ctx, relay, relay_session_id)
     if intake.bot.kind == "assistant":
         return ""
     if (
-        intake.chat_type == "single"
+        intake.private
         and intake.bot.platform == "feishu"
         and (intake.speaker.user_id is None or relay.runtime_node_id is None)
     ):
@@ -128,6 +128,10 @@ class LiveMode:
         return self.run is not None
 
 
+SOLO_NOTE = (
+    "- 这个群里此刻只有提问人自己（其余都是机器人），这一轮按私聊处理：本人飞书工具可用，"
+    "照私聊的规则做事。"
+)
 MOBILE_NOTE = (
     "- 提问人这条消息是在手机上发的：结论放最前，段落短，表格不超过 3 列，长内容放进可折叠段落。"
 )
@@ -419,6 +423,8 @@ class OpenStage(ChatStageBase):
         ctx.turn_notes = [LIVE_JOINED_NOTE if joined else access.note]
         if alert_turn:
             ctx.turn_notes.append(alert_sources.ALERT_NOTE)
+        if intake.solo:
+            ctx.turn_notes.append(SOLO_NOTE)
         from coreman.core.chat import group_observe
 
         if intake.chat_type == "group" and group_observe.observing(bot):
@@ -704,7 +710,10 @@ class OpenStage(ChatStageBase):
             notes=ctx.turn_notes,
         )
         # 个人助理调度来的一轮：记在这位员工名下，但只有所有者本人看得到内容。
-        ctx.private_turn = wecom_personal.mounted(env) or ctx.task.kind == BOT_HELP_KIND
+        # 单人群按私聊：对话记录和私聊一样只有本人能看。
+        ctx.private_turn = (
+            wecom_personal.mounted(env) or ctx.task.kind == BOT_HELP_KIND or intake.solo
+        )
         # env 到这里才齐（业务系统 + 协作 + 两套个人工具 + 本人定时任务 + 个人凭证），
         # 出站闸门必须按最终的这一份建；个人凭证按值强制脱敏，不看键名。
         # 写进后台阶段的进程时，进程里还是开工那一轮的凭据：出站按那一份一起过滤。

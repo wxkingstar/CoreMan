@@ -246,6 +246,15 @@ class ChatTaskHandler(
         if resolved is None:
             return None
         intake, relay, parts = resolved
+        if not ctx.solo_checked:
+            # 续接、选项提交等自己拼 Intake 的入口：同样按这一刻的群成员判断一次。
+            # 先提交再问飞书：`_resolve` 可能锁着续接记录，不能让它等网络。
+            from coreman.runtime.worker.chat import solo
+
+            is_solo = await solo.check(ctx, intake)
+            async with ctx.session_factory() as session:
+                intake = await solo.record(session, ctx, intake, is_solo)
+                await session.commit()
         if is_assistant(intake.bot):
             from coreman.runtime.worker.chat import assistant_runtime
 

@@ -2,6 +2,10 @@
 
 Two origins may use a personal grant: the owner's verified private chat, and a scheduled job
 that the owner created, that runs as the owner and that delivers only to the owner.
+
+A Feishu group whose only human is the owner counts as the private chat for the turn the worker
+checked it in (`core.chat.solo_group`): the worker asks Feishu at the start of every turn and
+marks the task; everything else about the origin is still verified here on every call.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from coreman.core.assistants import kinds
 from coreman.core.assistants.kinds import APPROVAL_RESULT_KIND, PLATFORM_TURN_KINDS
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks
+from coreman.core.chat import solo_group, topics
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.chat.reachability import private_chat
 from coreman.core.cloud_proxy.resume import RESUME_KIND as APPROVAL_RESUME_KIND
@@ -170,8 +175,13 @@ async def _platform_scope(session: AsyncSession, task: Task, actor: str) -> Scop
     return scope
 
 
-def _verified_message(header: dict[str, Any], source: dict[str, Any], event: InboundEvent) -> None:
-    """私聊里打字发来的消息：原始事件就是 p2p 消息，发送人与落库的列一致。"""
+def _verified_message(
+    header: dict[str, Any], source: dict[str, Any], event: InboundEvent, *, solo: bool = False
+) -> None:
+    """私聊里打字发来的消息：原始事件就是 p2p 消息，发送人与落库的列一致。
+
+    单人群（`solo`）的原始事件是这个群的 group 消息，其余各项照样核对。
+    """
     message, sender = source.get("message") or {}, source.get("sender") or {}
     if not isinstance(message, dict) or not isinstance(sender, dict):
         raise ValueError("verified_private_origin_required")
@@ -182,7 +192,7 @@ def _verified_message(header: dict[str, Any], source: dict[str, Any], event: Inb
         not header.get("tenant_key")
         or not header.get("app_id")
         or sender.get("sender_type") != "user"
-        or message.get("chat_type") != "p2p"
+        or message.get("chat_type") != ("group" if solo else "p2p")
         or message.get("chat_id") != event.chat_id
         or ids.get("open_id") != event.sender_open_id
         or ids.get("user_id") != event.sender_platform_user_id
@@ -218,13 +228,15 @@ async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -
         # 平台来源的任务没有入站事件：卡片回调等直接调到这里的路径一律不放行。
         raise ValueError("feishu_private_chat_required")
     event = await session.get(InboundEvent, task.inbound_event_id)
+    # 单人群：这一轮开头 worker 实时确认过群里只有发话人自己（话题群里按话题分会话）。
+    solo = event is not None and event.chat_type == "group" and solo_group.marked(task)
     if (
         event is None
         or event.bot_id != task.bot_id
         or event.platform != "feishu"
-        or event.chat_type != "single"
+        or event.chat_type != ("group" if solo else "single")
         or event.kind != "message"
-        or task.session_key != event.chat_id
+        or (topics.chat_of(task.session_key or "") if solo else task.session_key) != event.chat_id
         or not event.sender_open_id
         or not event.sender_platform_user_id
         or (event.payload.get("sender") or {}).get("sender_type") != "user"
@@ -240,14 +252,19 @@ async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -
     if click:
         _verified_click(header, source, event)
     else:
-        _verified_message(header, source, event)
+        _verified_message(header, source, event, solo=solo)
     speaker = await resolve_speaker(
         session, platform="feishu", platform_user_id=event.sender_platform_user_id
     )
     if not speaker.known or str(speaker.user_id) != actor or speaker.user_id is None:
         raise ValueError("personal_actor_mismatch")
-    # 回调不带会话类型：按钮点击只有落在本人与本机器人的私聊里（真实私聊消息留下的记录）才算。
-    if click and not await private_chat(session, task.bot_id, speaker.user_id, event.chat_id):
+    # 回调不带会话类型：按钮点击只有落在本人与本机器人的私聊里（真实私聊消息留下的记录）才算；
+    # 单人群里的点击由这一轮开头的实时判断代替私聊记录。
+    if (
+        click
+        and not solo
+        and not await private_chat(session, task.bot_id, speaker.user_id, event.chat_id)
+    ):
         raise ValueError("verified_private_origin_required")
     bot = await session.get(Bot, task.bot_id, populate_existing=True)
     allowed = list(
