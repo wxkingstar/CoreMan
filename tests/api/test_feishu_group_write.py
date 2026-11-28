@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
+    Bot,
     FeishuAuthWait,
     FeishuGroupAction,
     FeishuPersonalGrant,
@@ -22,7 +23,15 @@ from coreman.core.db.models import (
     User,
     UserIdentity,
 )
-from coreman.core.feishu_docs import confirm, policy, resume, tools, write_policy, write_tools
+from coreman.core.feishu_docs import (
+    access,
+    confirm,
+    policy,
+    resume,
+    tools,
+    write_policy,
+    write_tools,
+)
 from coreman.core.feishu_personal import endpoints, service
 from coreman.core.feishu_personal.tools import TOOLS
 from coreman.core.timeutils import utcnow
@@ -32,11 +41,21 @@ from coreman.runtime.worker.chat import queued_batch
 from coreman.runtime.worker.chat.feishu_docs import RULES, configure
 from coreman.runtime.worker.chat.personal import configure as personal_configure
 from coreman.runtime.worker.chat.personal import feishu_guidance
-from tests.api.test_feishu_group_docs import DOC, OPEN, SUPPORTED, group, headers
+from tests.api.test_feishu_group_docs import (
+    DOC,
+    OPEN,
+    SUPPORTED,
+    group,
+    headers,
+    permissions,
+    tenant,
+    user_fetch,
+)
 from tests.api.test_feishu_inflow import device
 from tests.api.test_feishu_personal import grant, rpc, value
 from tests.api.test_feishu_personal import setup as personal_setup
 from tests.api.test_feishu_personal_worker import intake_for
+from tests.integration.test_chat_handler import chat_task
 from tests.integration.worker_helpers import build_ctx
 
 URL = "/api/runtime/feishu-docs/mcp"
@@ -1191,3 +1210,182 @@ async def test_confirmed_save_keeps_the_upload_bound_to_the_grant(
 def test_group_rules_allow_the_askers_own_follow_up():
     assert "以提问人身份读到的内容可以用于完成提问人这次明确要求的事" in RULES
     assert "没有他的明确要求时不写进共享记忆或共享文件" in RULES
+
+
+# 上一轮自己建的文档：同一个机器人、同一位提问人、同一个群、时间窗内才算可信。
+OVERWRITE = {"document_id": "DocToken1234", "command": "overwrite", "content": "# 新版"}
+
+
+async def built_earlier(db_session, bot, user, task, **changes):
+    """上一轮建好一篇文档，返回同一个人在同一个群里后发的那一轮。"""
+    row = FeishuGroupAction(
+        bot_id=bot.id,
+        user_id=user.id,
+        chat_id="oc_group",
+        task_id=task.id,
+        tool="feishu_create_document",
+        target="DocToken1234",
+        category="create",
+        status="succeeded",
+        args_hash="earlier",
+    )
+    for key, item in changes.items():
+        setattr(row, key, item)
+    db_session.add(row)
+    await tasks.finish(db_session, task.id, status="succeeded")
+    await db_session.commit()
+    later = await chat_task(
+        db_session, bot, "按我说的改一下", sender="human", chat_type="group", chat_id="oc_group"
+    )
+    event = await db_session.get(InboundEvent, later.inbound_event_id)
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    event.payload, event.sender_open_id = origin.payload, origin.sender_open_id
+    await db_session.commit()
+    return later
+
+
+async def another_chat(db_session, bot):
+    return {"chat_id": "oc_other"}
+
+
+async def another_asker(db_session, bot):
+    other = User(login_name="someone-else", display_name="Else", source="sync")
+    db_session.add(other)
+    await db_session.flush()
+    return {"user_id": other.id}
+
+
+async def another_bot(db_session, bot):
+    other = Bot(
+        bot_key="other_bot",
+        platform=bot.platform,
+        name="另一个",
+        created_by=bot.created_by,
+        relay_server_id=bot.relay_server_id,
+        model=bot.model,
+        working_dir="/data/skills/other_bot",
+        system_prompt="x",
+        merged_system_prompt="x",
+        credentials_enc=bot.credentials_enc,
+        env_vars_enc=bot.env_vars_enc,
+    )
+    db_session.add(other)
+    await db_session.flush()
+    return {"bot_id": other.id, "task_id": None}
+
+
+async def too_old(db_session, bot):
+    return {"created_at": utcnow() - access.OWN_DOCUMENTS - timedelta(minutes=1)}
+
+
+async def create_failed(db_session, bot):
+    return {"status": "failed"}
+
+
+async def only_proposed(db_session, bot):
+    return {"status": "pending_confirmation", "category": "confirm"}
+
+
+async def not_a_create(db_session, bot):
+    return {"category": "target", "tool": "feishu_append_document"}
+
+
+NOT_OWN = [
+    another_chat,
+    another_asker,
+    another_bot,
+    too_old,
+    create_failed,
+    only_proposed,
+    not_a_create,
+]
+
+
+def rewrite(mock):
+    return mock.route(path="/open-apis/docs_ai/v1/documents/DocToken1234").mock(
+        return_value=httpx.Response(200, json={"code": 0, "data": {}})
+    )
+
+
+async def test_a_document_built_in_an_earlier_turn_can_be_edited(client, app, db_session):
+    bot, user, task = await group(db_session, app, "出一份修改意见")
+    await connected(db_session, app, bot, user)
+    later = await built_earlier(db_session, bot, user, task)
+    with respx.mock as mock:
+        route = append(mock)
+        out = await call(client, app, later, "feishu_append_document", BLOCKS)
+    assert "error" not in out and out.get("status") != "pending_confirmation"
+    assert route.calls[0].request.headers["authorization"] == "Bearer user-secret"
+
+
+async def test_a_document_built_in_an_earlier_turn_can_be_overwritten(client, app, db_session):
+    bot, user, task = await group(db_session, app, "出一份修改意见")
+    await connected(db_session, app, bot, user)
+    later = await built_earlier(db_session, bot, user, task)
+    with respx.mock as mock:
+        route = rewrite(mock)
+        out = await call(client, app, later, "feishu_edit_document", OVERWRITE)
+    assert "error" not in out and route.call_count == 1
+    assert route.calls[0].request.headers["authorization"] == "Bearer user-secret"
+
+
+async def test_a_document_built_this_turn_can_be_overwritten(client, app, db_session):
+    bot, user, task = await group(db_session, app, "新建一篇")
+    await connected(db_session, app, bot, user)
+    with respx.mock as mock:
+        mock.post(f"{OPEN}/docx/v1/documents").mock(
+            return_value=httpx.Response(
+                200, json={"code": 0, "data": {"document": {"document_id": "DocToken1234"}}}
+            )
+        )
+        route = rewrite(mock)
+        await call(client, app, task, "feishu_create_document", {"title": "周报"})
+        out = await call(client, app, task, "feishu_edit_document", OVERWRITE)
+    assert "error" not in out and route.call_count == 1
+
+
+@pytest.mark.parametrize("why", NOT_OWN)
+async def test_other_documents_still_need_confirmation(client, app, db_session, why):
+    bot, user, task = await group(db_session, app, "出一份修改意见")
+    await connected(db_session, app, bot, user)
+    later = await built_earlier(db_session, bot, user, task, **await why(db_session, bot))
+    with respx.mock as mock:
+        route = append(mock)
+        out = await call(client, app, later, "feishu_append_document", BLOCKS)
+        refused = await call(client, app, later, "feishu_edit_document", OVERWRITE)
+    assert out["status"] == "pending_confirmation" and route.call_count == 0
+    assert refused["error"] == "overwrite_not_allowed_in_group"
+
+
+async def test_a_linked_document_still_cannot_be_overwritten(client, app, db_session):
+    bot, user, task = await group(db_session, app, f"改 {DOC}")
+    await connected(db_session, app, bot, user)
+    with respx.mock(assert_all_called=False) as mock:
+        route = rewrite(mock)
+        out = await call(client, app, task, "feishu_edit_document", OVERWRITE)
+    assert out["error"] == "overwrite_not_allowed_in_group" and route.call_count == 0
+
+
+async def read_later(client, app, db_session, why=None):
+    bot, user, task = await group(db_session, app, "出一份修改意见")
+    await connected(db_session, app, bot, user)
+    changes = await why(db_session, bot) if why else {}
+    later = await built_earlier(db_session, bot, user, task, **changes)
+    with respx.mock(assert_all_called=False) as mock:
+        tenant(mock)
+        permissions(mock)
+        fetched = user_fetch(mock)
+        out = await call(client, app, later, "feishu_doc_read", {"url": DOC})
+    return out, fetched
+
+
+async def test_a_document_built_in_an_earlier_turn_can_be_read(client, app, db_session):
+    out, fetched = await read_later(client, app, db_session)
+    assert out["content"] == "# 方案" and out["read_as"] == "requester"
+    assert fetched.calls[0].request.headers["authorization"] == "Bearer user-secret"
+
+
+@pytest.mark.parametrize("why", NOT_OWN)
+async def test_other_documents_still_cannot_be_read(client, app, db_session, why):
+    out, fetched = await read_later(client, app, db_session, why)
+    assert out["reason"] == "link_not_from_chat" and fetched.call_count == 0

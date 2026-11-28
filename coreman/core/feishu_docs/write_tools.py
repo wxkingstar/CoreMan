@@ -19,6 +19,11 @@ from coreman.core.feishu_personal.service import PersonalError
 from coreman.core.feishu_personal.toolbase import Call, bounded
 from coreman.core.feishu_personal.tools import TOOLS
 
+OVERWRITE_HINT = (
+    "群里只能整篇重写你近 7 天在本群为这位提问人新建的文档；"
+    "其他文档用 str_replace 或 block_* 做局部修改。"
+)
+
 
 def record(
     session: AsyncSession,
@@ -48,24 +53,16 @@ def record(
 
 
 async def _trusted(call: Call, scope: DocsScope, target: str, *, container: bool = False) -> bool:
-    """目标来自提问人本条消息的链接，或本轮刚新建。知识库节点要解析成实际文档。
+    """目标来自提问人本条消息的链接，或是本机器人近期在本群为他新建的（含本轮刚建）。
+
+    知识库节点要解析成实际文档。
 
     container 时判的是「放到哪里」：链接所在的知识库也算可信。
     """
     links = [str(t) for t in (scope.task.payload.get("doc_links") or [])]
     if target in links:
         return True
-    created = await call.session.scalar(
-        select(FeishuGroupAction.id)
-        .where(
-            FeishuGroupAction.task_id == scope.task.id,
-            FeishuGroupAction.category == "create",
-            FeishuGroupAction.status == "succeeded",
-            FeishuGroupAction.target == target,
-        )
-        .limit(1)
-    )
-    if created is not None:
+    if target in await access.own_documents(call.session, scope):
         return True
     for token in links[:10]:
         try:
@@ -114,8 +111,13 @@ async def dispatch(
             for e in exc.errors(include_url=False, include_input=False)[:5]
         ]
         return {"error": "invalid_tool_or_arguments", "invalid": problems}
-    if name == "feishu_edit_document" and args.command == "overwrite":
-        return {"error": "overwrite_not_allowed_in_group"}
+    if (
+        name == "feishu_edit_document"
+        and args.command == "overwrite"
+        and args.document_id not in await access.own_documents(session, scope)
+    ):
+        # 整篇重写会抹掉别人写的内容：只放开机器人自己近期在本群为提问人建的文档。
+        return {"error": "overwrite_not_allowed_in_group", "hint": OVERWRITE_HINT}
     who = await access.requester(session, scope)
     if who is None or not who.reaches(item.endpoint):
         return await _ask_authorization(session, cipher, scope, item.endpoint)

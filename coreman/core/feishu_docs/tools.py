@@ -134,7 +134,9 @@ async def _read_any(
     as_app: bool = True,
     also: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """先用应用身份读（本群看得到才行），不行就直接以提问人本人身份读（他发过的链接才行）。
+    """先用应用身份读（本群看得到才行），不行就直接以提问人本人身份读。
+
+    以他的身份只读本群真人发过的链接，和本机器人近期在本群为他新建的文档。
 
     as_app 为假时只以提问人身份读（文件中转的下载链接要绑定他的授权）；also 是除读正文外
     还要用到的接口。
@@ -151,7 +153,9 @@ async def _read_any(
                     pass
         finally:
             await client.aclose()
-    if link.token not in await access.allowed_tokens(session, scope):
+    if link.token not in await access.allowed_tokens(
+        session, scope
+    ) and link.token not in await access.own_documents(session, scope):
         return _no_access("link_not_from_chat")
     state = await access.asker_state(session, cipher, scope)
     who = state.requester
@@ -203,7 +207,8 @@ async def _read_any(
 _CALLER_ERRORS = ("unsupported_type", "not_a_spreadsheet", "not_a_base", "table_id_required")
 _HINTS = {
     "link_not_from_chat": (
-        "这个链接不是本群有人发过的，不能以提问人身份读取。请提问人把链接发到群里。"
+        "这个链接不是本群有人发过的，也不是你近 7 天在本群为提问人新建的，"
+        "不能以提问人身份读取。请提问人把链接发到群里。"
     ),
     "unknown_speaker": (
         "本群看不到这篇文档，提问人也不是平台成员，没法以他的身份读。请文档所有者把它共享给本群。"

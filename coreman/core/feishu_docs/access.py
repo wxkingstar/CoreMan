@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     BotAllowedUser,
+    FeishuGroupAction,
     FeishuPersonalGrant,
     InboundEvent,
     Task,
@@ -51,6 +52,9 @@ _CHAT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _ANYONE = frozenset({"anyone_readable", "anyone_editable"})
 _TENANT = frozenset({"tenant_readable", "tenant_editable"})
 RECENT_LINKS = timedelta(hours=24)
+# 自己建的文档信多久：提意见、改稿常隔天或跨一个周末，24 小时不够；一周之后文档多半已经
+# 被别人接着改过，不再当成「机器人自己的」，要改就请提问人贴链接（贴了仍可局部修改）。
+OWN_DOCUMENTS = timedelta(days=7)
 
 
 def app_client(cipher: Cipher, scope: DocsScope) -> FeishuClient:
@@ -232,6 +236,33 @@ async def allowed_tokens(
     for payload in rows:
         found |= _tokens(payload)
     return found
+
+
+async def own_documents(
+    session: AsyncSession, scope: DocsScope, now: datetime | None = None
+) -> set[str]:
+    """本机器人近期在本群为这位提问人建成功的东西：读和改都算可信，不用他再贴链接。
+
+    三样都要对上：同一个机器人、同一位提问人、同一个群。只认审计表里建成功的记录，
+    模型自己报的 token 不算；别人建的、别的群里建的、过了时间窗的照旧。
+    """
+    if scope.speaker_user_id is None:
+        return set()
+    since = (now or datetime.now(UTC)) - OWN_DOCUMENTS
+    rows = await session.scalars(
+        select(FeishuGroupAction.target)
+        .where(
+            FeishuGroupAction.bot_id == scope.bot.id,
+            FeishuGroupAction.user_id == scope.speaker_user_id,
+            FeishuGroupAction.chat_id == scope.chat_id,
+            FeishuGroupAction.category == "create",
+            FeishuGroupAction.status == "succeeded",
+            FeishuGroupAction.target.is_not(None),
+            FeishuGroupAction.created_at >= since,
+        )
+        .limit(200)
+    )
+    return {str(item) for item in rows}
 
 
 def _tokens(payload: dict[str, Any] | None) -> set[str]:
