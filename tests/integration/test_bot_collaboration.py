@@ -369,6 +369,25 @@ async def test_worker_uses_origin_human_and_resumes_original_session(
     assert row.status == ("failed" if feedback_status == "blocked" else "completed")
 
 
+@pytest.mark.parametrize(
+    ("reply_context", "expected"), [({"message_id": "om_card"}, "om_card"), ({}, None)]
+)
+async def test_a_request_started_by_a_card_click_replies_under_the_card(
+    db_session, reply_context, expected
+):
+    """点卡片按钮引出的那一轮求助：入站事件的 id 是合成的，不能当回复目标。"""
+    from coreman.core.db.models import InboundEvent
+
+    _, _, _, route, task, row = await setup(db_session)
+    origin = await db_session.get(InboundEvent, task.inbound_event_id)
+    origin.platform_msg_id = "action:evt-1"
+    origin.reply_context = reply_context
+    await db_session.flush()
+    await service.send_message(db_session, row, route)
+    item = await db_session.get(OutboxItem, row.request_outbox_id)
+    assert item.target == {"chat_id": "group", "message_id": expected}
+
+
 @pytest.mark.parametrize("phase", ["helper", "resume"])
 async def test_only_the_summarising_turn_may_end_with_a_question(db_engine, db_session, phase):
     """求助方拿到反馈后汇总时可以接着问人；协作伙伴那一轮问人不算完成。"""
