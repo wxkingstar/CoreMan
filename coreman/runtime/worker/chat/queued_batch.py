@@ -163,6 +163,8 @@ async def hold_if_stale(
         or p.get("stale_confirmed")
         or p.get("busy_wait")
         or p.get("stopped_previous")
+        # 换运行时期间排的队：等得久是平台的原因，已经告诉过会自动处理。
+        or p.get("queued_migrating")
     ):
         return False
     limit = int(await ctx.settings_store.get("busy_confirm_minutes", default=10))
