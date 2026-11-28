@@ -164,6 +164,22 @@ class OpenStage(ChatStageBase):
                 await asyncio.wait_for(ctx.cancel_event.wait(), delay)
             delay = min(delay * 2, self.SUPERSEDE_POLL_MAX_SECONDS)
 
+    async def _read_group_cards(self, ctx: TaskContext, intake: Intake) -> None:
+        """开轮之前把群聊记录里别的机器人卡片的正文读好：开轮时持有 bot 行锁，不能去飞书读。
+
+        只是让群聊记录更完整，读不到或出了意外都不拦这一轮。
+        """
+        from coreman.core.chat import group_observe
+
+        if intake.chat_type != "group" or not group_observe.observing(intake.bot):
+            return
+        try:
+            async with ctx.session_factory() as session:
+                lines = await group_observe.transcript(session, intake.bot, intake.chat_id)
+            await group_observe.read_cards(lines, intake.bot, intake.chat_id, ctx.cipher)
+        except Exception as exc:  # noqa: BLE001 见上
+            ctx.log.warning("group_cards_read_failed", error_type=type(exc).__name__)
+
     async def _wait_transcript(self, ctx: TaskContext, intake: Intake) -> bool:
         """个人助理：上一轮被取消、它的转录还在从节点传回来的路上时，等它到了再开轮。
 
@@ -417,6 +433,8 @@ class OpenStage(ChatStageBase):
                 )
                 if line.event_id is None or line.event_id != ctx.task.inbound_event_id
             ]
+            # 别的机器人发的卡片事件里没有正文：用开轮前读好的（这里持有 bot 行锁，不发请求）。
+            lines = group_observe.known_cards(lines, bot, intake.chat_id)
             ctx.turn_notes.append(group_observe.transcript_note(lines, interject=interject))
             if interject:
                 ctx.turn_notes.append(group_observe.INTERJECT_NOTE)

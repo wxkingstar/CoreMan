@@ -4,12 +4,16 @@ import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select, update
 
+from coreman.core.bots.secrets import CREDENTIALS_AAD
 from coreman.core.chat import group_observe
 from coreman.core.chat.decider import Decision
+from coreman.core.crypto import Cipher
 from coreman.core.db.models import (
     Bot,
+    FeishuSentMessage,
     GroupObserveDecision,
     GroupObserveState,
     OutboxItem,
@@ -18,10 +22,12 @@ from coreman.core.db.models import (
     UserIdentity,
 )
 from coreman.core.i18n.messages import msg
+from coreman.core.platforms.feishu import FeishuClient, FeishuError
+from coreman.core.platforms.feishu_content import UPGRADE_PLACEHOLDER
 from coreman.core.wecom.messages import InboundMessage
 from coreman.runtime.gateway_common.inbound import enqueue_inbound
 from coreman.runtime.worker.group_observe import GroupObserveHandler
-from tests.integration.worker_helpers import build_ctx, seed_bot
+from tests.integration.worker_helpers import MASTER, build_ctx, seed_bot, turn_block
 
 CHAT = "oc_group"
 
@@ -581,3 +587,209 @@ async def test_the_same_persons_follow_up_waits_and_asks_whether_to_stop(db_sess
     card = await db_session.scalar(select(OutboxItem))
     assert card.payload["card"]["task_id"] == f"busy@{again.id}"
     assert card.target == {"chat_id": CHAT, "message_id": "om2"}
+
+
+# ---------------------------------------------------------------- 别的机器人发的卡片
+
+# Card JSON 2.0 在事件里只有这副骨架；网关把它的文字（那句占位）放进 parts。
+CARD_SKELETON = {"title": None, "elements": [[{"tag": "text", "text": UPGRADE_PLACEHOLDER}]]}
+CARD_2 = {
+    "schema": "2.0",
+    "header": {"title": {"tag": "plain_text", "content": "接口对齐"}},
+    "body": {"elements": [{"tag": "markdown", "content": "sku_id 用字符串"}]},
+}
+READ_CARD = {"card_msg_content_type": "user_card_content"}
+
+
+@pytest.fixture(autouse=True)
+def _forget_cards():
+    group_observe._CARDS.clear()
+
+
+async def say_card(session, bot, mid):
+    raw = {
+        "event": {
+            "message": {
+                "message_id": mid,
+                "chat_id": CHAT,
+                "chat_type": "group",
+                "message_type": "interactive",
+                "content": json.dumps(CARD_SKELETON, ensure_ascii=False),
+            }
+        }
+    }
+    message = InboundMessage(
+        platform="feishu",
+        bot_id=bot.id,
+        kind="message",
+        chat_type="group",
+        chat_id=CHAT,
+        sender={"platform_user_id": "", "open_id": "ou_peer", "sender_type": "bot"},
+        message_id=mid,
+        parts=[{"type": "text", "text": UPGRADE_PLACEHOLDER}],
+        raw=raw,
+        reply_context={"chat_id": CHAT, "chat_type": "group", "message_id": mid},
+    )
+    snapshot = SimpleNamespace(id=bot.id, bot_key=bot.bot_key, welcome_message=None, observe=True)
+    await enqueue_inbound(session, snapshot, message, lease_generation=1)
+    await session.commit()
+
+
+async def with_feishu_app(session, bot):
+    bot.credentials_enc = Cipher(MASTER).encrypt(
+        json.dumps({"app_id": "cli_observe", "app_secret": "secret"}), CREDENTIALS_AAD
+    )
+    await session.commit()
+    return bot
+
+
+def api_card(mid, card, *, chat_id=CHAT, **extra):
+    return {
+        "message_id": mid,
+        "chat_id": chat_id,
+        "msg_type": "interactive",
+        "sender": {"sender_type": "app", "id": "cli_peer"},
+        "body": {"content": json.dumps(card, ensure_ascii=False)},
+        **extra,
+    }
+
+
+def serve_messages(monkeypatch, *items, error=None):
+    calls = []
+
+    async def call(self, method, path, **kwargs):
+        calls.append((method, path, kwargs.get("params")))
+        if error is not None:
+            raise error
+        mid = path.rsplit("/", 1)[-1]
+        return {"data": {"items": [i for i in items if i["message_id"] == mid]}}
+
+    monkeypatch.setattr(FeishuClient, "call", call)
+    return calls
+
+
+async def test_transcript_reads_a_colleague_bots_card_from_its_sent_archive(db_session):
+    sales = await observing_bot(db_session)
+    ops = await another_observing_bot(db_session, sales, "ops_bot", "运维")
+    await say_card(db_session, sales, "om_card")
+    db_session.add(
+        FeishuSentMessage(bot_id=ops.id, message_id="om_card", chat_id=CHAT, text="sku_id 用字符串")
+    )
+    await db_session.commit()
+    (line,) = await group_observe.transcript(db_session, sales, CHAT)
+    assert (line.sender_kind, line.text, line.unread_card) == ("bot", "sku_id 用字符串", None)
+
+
+async def test_an_archive_from_another_chat_is_not_the_cards_text(db_session):
+    sales = await observing_bot(db_session)
+    ops = await another_observing_bot(db_session, sales, "ops_bot", "运维")
+    await say_card(db_session, sales, "om_card")
+    db_session.add(
+        FeishuSentMessage(bot_id=ops.id, message_id="om_card", chat_id="oc_other", text="别的群")
+    )
+    await db_session.commit()
+    (line,) = await group_observe.transcript(db_session, sales, CHAT)
+    assert (line.text, line.unread_card) == (UPGRADE_PLACEHOLDER, "om_card")
+
+
+async def test_a_card_missing_from_the_archive_is_read_back_from_feishu(db_session, monkeypatch):
+    bot = await with_feishu_app(db_session, await observing_bot(db_session))
+    await say_card(db_session, bot, "om_card")
+    calls = serve_messages(monkeypatch, api_card("om_card", CARD_2))
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    assert [line.text for line in lines] == [UPGRADE_PLACEHOLDER]
+    (line,) = await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert (line.text, line.unread_card) == ("接口对齐\nsku_id 用字符串", None)
+    assert calls == [("GET", "/open-apis/im/v1/messages/om_card", READ_CARD)]
+    # 同一张卡片短时间内不再读第二次（判断和随后的回合各取一次群聊记录）。
+    (again,) = await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert again.text == "接口对齐\nsku_id 用字符串" and len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "served",
+    [
+        {"error": FeishuError(230027, "no permission")},
+        {"error": TimeoutError()},
+        {"error": RuntimeError("boom")},
+        {"items": [api_card("om_card", CARD_2, chat_id="oc_other")]},
+        {"items": [api_card("om_card", CARD_2, deleted=True)]},
+        {"items": [api_card("om_card", CARD_SKELETON)]},
+        {"items": []},
+    ],
+    ids=["no_permission", "timeout", "crash", "other_chat", "recalled", "placeholder", "none"],
+)
+async def test_a_card_that_cannot_be_read_back_keeps_its_placeholder(
+    db_session, monkeypatch, served
+):
+    bot = await with_feishu_app(db_session, await observing_bot(db_session))
+    await say_card(db_session, bot, "om_card")
+    calls = serve_messages(monkeypatch, *served.get("items", []), error=served.get("error"))
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    (line,) = await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert line.text == UPGRADE_PLACEHOLDER
+    # 读不到的也记一小会儿，不在每次取群聊记录时都重试。
+    await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert len(calls) == 1
+
+
+async def test_cards_are_not_read_back_without_feishu_credentials(db_session, monkeypatch):
+    bot = await observing_bot(db_session)  # 夹具里的凭证没有 app_id
+    await say_card(db_session, bot, "om_card")
+    calls = serve_messages(monkeypatch, api_card("om_card", CARD_2))
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    (line,) = await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert line.text == UPGRADE_PLACEHOLDER and calls == []
+
+
+async def test_only_the_latest_few_cards_are_read_back_each_time(db_session, monkeypatch):
+    bot = await with_feishu_app(db_session, await observing_bot(db_session))
+    total = group_observe.CARD_READ_LIMIT + 2
+    for n in range(total):
+        await say_card(db_session, bot, f"om_card{n}")
+    calls = serve_messages(monkeypatch, *(api_card(f"om_card{n}", CARD_2) for n in range(total)))
+    lines = await group_observe.transcript(db_session, bot, CHAT)
+    lines = await group_observe.read_cards(lines, bot, CHAT, Cipher(MASTER))
+    assert len(calls) == group_observe.CARD_READ_LIMIT
+    assert [line.text == UPGRADE_PLACEHOLDER for line in lines] == [True, True] + [False] * (
+        total - 2
+    )
+
+
+async def test_the_judgement_sees_what_another_bots_card_says(db_engine, db_session, monkeypatch):
+    bot = await with_feishu_app(db_session, await observing_bot(db_session))
+    await say_card(db_session, bot, "om_card")
+    await say(db_session, bot, "om1", "这个字段你们那边怎么定的？")
+    serve_messages(monkeypatch, api_card("om_card", CARD_2))
+    (observe,) = await tasks_of(db_session, bot, "group_observe")
+    await quiet_down(db_session, bot)
+    decider = FakeDecider(0.1)
+    await run_observe(db_engine, db_session, observe, decider)
+    texts = [m["text"] for m in decider.calls[0]["recent_messages"]]
+    assert texts == ["接口对齐\nsku_id 用字符串", "这个字段你们那边怎么定的？"]
+
+
+async def test_a_mention_turn_sees_what_another_bots_card_says(db_engine, db_session, monkeypatch):
+    from coreman.core.bus import instances, tasks
+    from coreman.runtime.worker.chat_handler import ChatTaskHandler
+    from tests.fakes import fake_relay
+
+    record_schedule_configure(monkeypatch)
+    bot = await with_feishu_app(db_session, await observing_bot(db_session))
+    await say_card(db_session, bot, "om_card")
+    await say(db_session, bot, "om2", "按上面说的改一下", mentions_bot=True)
+    calls = serve_messages(monkeypatch, api_card("om_card", CARD_2))
+    await instances.register(
+        db_session, instance_id="worker-test", service="worker", version="dev", capacity=8
+    )
+    await db_session.commit()
+    turn = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    relay = fake_relay.FakeRelay("normal")
+    ctx = build_ctx(db_engine, turn, relay_client_factory=lambda _r: relay.client())
+    await ChatTaskHandler().run(ctx)
+    await ctx.chat_logs.drain(5)
+    block = turn_block(relay.requests[0])
+    assert "机器人 1（机器人）: 接口对齐\nsku_id 用字符串" in block
+    assert UPGRADE_PLACEHOLDER not in block
+    assert [path for _, path, _ in calls].count("/open-apis/im/v1/messages/om_card") == 1

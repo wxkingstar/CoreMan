@@ -281,6 +281,7 @@ class ChatTaskHandler(
         if is_assistant(intake.bot) and not await self._wait_transcript(ctx, intake):
             await self._cancelled_before_open(ctx)
             return None
+        await self._read_group_cards(ctx, intake)
         async with ctx.session_factory() as session:
             pre = await self._open(session, ctx, intake, relay, started)
             await session.commit()
