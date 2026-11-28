@@ -180,7 +180,7 @@ async def test_carry_over_keeps_moved_sessions_and_hands_others_their_history(
     assert first.relay_session_id != stuck.relay_session_id and not first.is_new
     assert first.inherited_from == stuck.relay_session_id
     note = await carried_context(
-        db_session, bot_id=bot.id, session_key="b", relay_session_id=first.inherited_from
+        db_session, bot_id=bot.id, session_key="b", relay_session_ids=[first.inherited_from]
     )
     assert note is not None
     assert note.index("张三：第一个问题") < note.index("你：第二个回答")
@@ -210,3 +210,72 @@ async def test_carry_over_keeps_moved_sessions_and_hands_others_their_history(
         speaker_user_id=None,
     )
     assert second.relay_session_id == first.relay_session_id and second.inherited_from is None
+
+
+async def test_round_trip_switch_still_carries_what_was_said_before_the_first_switch(
+    db_session: AsyncSession,
+) -> None:
+    from coreman.core.chat.session_carry import carried_context
+    from coreman.core.db.models import ChatLog, ChatSession
+
+    bot = await _bot(db_session)
+
+    async def turn(backend: str):  # type: ignore[no-untyped-def]
+        return await sessions.get_or_create(
+            db_session,
+            bot_id=bot.id,
+            session_key="a",
+            backend=backend,
+            ttl_hours=72,
+            speaker_user_id=None,
+        )
+
+    def log(sid: uuid.UUID, text: str, reply: str, at: datetime) -> None:
+        db_session.add(
+            ChatLog(
+                bot_id=bot.id,
+                bot_key=bot.bot_key,
+                platform="wecom",
+                chat_type="single",
+                session_key="a",
+                relay_session_id=sid,
+                user_name="张三",
+                message_type="text",
+                status="success",
+                request_at=at,
+                message_content=text,
+                response_content=reply,
+            )
+        )
+
+    now = datetime.now(UTC)
+    first = await turn("claude")
+    log(first.relay_session_id, "最早的问题", "最早的回答", now)
+    # 第一次切换：换到另一种底座，原生会话带不过去。
+    await sessions.carry_over(db_session, bot.id, backend="codex", keep=set())
+    second = await turn("codex")
+    assert second.relay_session_id != first.relay_session_id
+    assert second.lineage == (first.relay_session_id,)
+    log(second.relay_session_id, "中间的问题", "中间的回答", now + timedelta(seconds=1))
+    await sessions.settle_carry(
+        db_session, bot_id=bot.id, session_key="a", relay_session_id=second.relay_session_id
+    )
+    # 第二次切换：换回来。
+    await sessions.carry_over(db_session, bot.id, backend="claude", keep=set())
+    third = await turn("claude")
+    assert third.lineage == (first.relay_session_id, second.relay_session_id)
+    note = await carried_context(
+        db_session,
+        bot_id=bot.id,
+        session_key="a",
+        relay_session_ids=[*third.lineage, third.inherited_from],
+    )
+    assert note is not None
+    assert note.index("最早的问题") < note.index("中间的问题")
+    # 会话过期换新之后，沿革清空：之前的内容不再跟过来。
+    row = await db_session.get(ChatSession, (bot.id, "a"), populate_existing=True)
+    assert row is not None
+    row.last_active_at = now - timedelta(hours=100)
+    await db_session.flush()
+    fresh = await turn("claude")
+    assert fresh.is_new and fresh.lineage == () and fresh.inherited_from is None

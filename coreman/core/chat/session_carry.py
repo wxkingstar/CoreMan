@@ -1,12 +1,14 @@
 """换运行时后续上下文：原会话带不过去时，新会话首轮的本轮块里附上原会话最近的对话。
 
 对话取自 chat_logs（每轮都记了用户原话、回复与当时的 relay_session_id），按时间顺序排，
-从最近的往前取，超出总长度就丢最早的。
+从最近的往前取，超出总长度就丢最早的。同一个会话键来回换过几次运行时的，沿革里的几个 relay
+会话一起取。
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +37,7 @@ async def carried_context(
     *,
     bot_id: uuid.UUID,
     session_key: str,
-    relay_session_id: uuid.UUID,
+    relay_session_ids: Sequence[uuid.UUID],
     header: str = HEADER,
 ) -> str | None:
     rows = (
@@ -44,7 +46,7 @@ async def carried_context(
             .where(
                 ChatLog.bot_id == bot_id,
                 ChatLog.session_key == session_key,
-                ChatLog.relay_session_id == relay_session_id,
+                ChatLog.relay_session_id.in_(list(relay_session_ids)),
                 ChatLog.status.in_(("success", "ask_user")),
             )
             .order_by(ChatLog.request_at.desc())

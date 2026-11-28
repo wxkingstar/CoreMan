@@ -124,6 +124,10 @@ type opencodeInput struct {
 	Session  string            // the opencode session being continued
 	Files    []string          // attachments passed with -f
 	Env      map[string]string // OPENCODE_CONFIG_CONTENT and project MCP literals
+	// Carried is set on a rebuilt input whose request brought a text
+	// continuation: the earlier context reaches the new session, so the answer
+	// must not claim the conversation record is gone.
+	Carried bool
 }
 
 // buildInput converts the request into an `opencode run` invocation. With a
@@ -268,6 +272,7 @@ func newRebuildFresh(sessions *sessionMap, req *openai.ChatCompletionRequest, mo
 		sessions.Forget(req.SessionID)
 		input := buildInput(req, model, "", uploadDir, systemFile)
 		input.Stdin = withResumeFallback(input.Stdin, req.ResumeFallback)
+		input.Carried = req.ResumeFallback != ""
 		return input
 	}
 }

@@ -310,6 +310,11 @@ def test_activating_a_seat_switches_the_driver_and_reports_seats(daemon, monkeyp
     statuses.clear()
     switched = agent.dispatch({"type": "seat-activate", "seat_id": seat})
     assert [s["active"] for s in switched["seats"]] == [False, True]
+    # 当前席位的账号立刻是新席位的，不用等下一次发现。
+    seat_dir = str(daemon.seats.directory("claude", seat))
+    assert switched["seats"][1]["account"] == seat_dir
+    assert switched["seats"][0]["account"] == "default"
+    assert daemon.capabilities["claude"]["account"] == seat_dir
     assert os.environ["CLAUDE_CONFIG_DIR"] == str(daemon.seats.directory("claude", seat))
     assert daemon.started == ["claude"] and daemon.driver_gen["claude"] == 1
     saved = json.loads(daemon.config_path.read_text())

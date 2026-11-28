@@ -32,6 +32,12 @@ class SessionInfo:
     inherited_from: uuid.UUID | None = None
     # 飞书话题选了继承群主会话后的首轮：从这个 relay 会话分叉。
     forked_from: uuid.UUID | None = None
+    # 这个会话键从上次换新以来用过的 relay 会话（旧 → 新）：续接文本按它取全。
+    lineage: tuple[uuid.UUID, ...] = ()
+
+
+# 沿革最多记这么多项：再往前的对话早已超出续接文本的长度上限。
+LINEAGE_MAX = 10
 
 
 async def get_or_create(
@@ -68,6 +74,8 @@ async def get_or_create(
     sid = row.relay_session_id if (fresh and row is not None) else uuid.uuid4()
     inherited = row.inherited_from if (fresh and row is not None) else None
     forked = row.forked_from if (fresh and row is not None) else None
+    # 换了新会话（过期、换底座）就不再有沿革。
+    lineage = list(row.lineage or []) if (fresh and row is not None) else []
     stmt = insert(ChatSession).values(
         bot_id=bot_id,
         session_key=session_key,
@@ -75,6 +83,7 @@ async def get_or_create(
         backend=backend,
         last_speaker_user_id=speaker_user_id,
         last_active_at=func.now(),
+        lineage=lineage,
     )
     await session.execute(
         stmt.on_conflict_do_update(
@@ -89,10 +98,19 @@ async def get_or_create(
                 "inherited_from": inherited,
                 # 分叉同理：首轮成功收尾（settle_fork）才清。
                 "forked_from": forked,
+                "lineage": lineage,
             },
         )
     )
-    return SessionInfo(sid, not fresh, speaker_changed, previous, inherited, forked)
+    return SessionInfo(
+        sid,
+        not fresh,
+        speaker_changed,
+        previous,
+        inherited,
+        forked,
+        tuple(uuid.UUID(item["id"]) for item in lineage),
+    )
 
 
 async def renew(
@@ -178,6 +196,8 @@ async def switch_to(
                 "last_active_at": func.now(),
                 "inherited_from": None,
                 "forked_from": None,
+                # 指向历史会话或换新时沿革作废。
+                "lineage": [],
             },
         )
     )
@@ -216,11 +236,17 @@ async def carry_over(
 
     原样续用的也记下自己（inherited_from == relay_session_id）：首轮把续接文本交给驱动备用，
     目标上实际续不上（--resume 找不到会话）时驱动才用它，不至于悄悄从空会话开始。
+
+    带不过去的原会话记进沿革（lineage），下次再换时续接文本仍能取到。
     """
     for row in await list_for_bot(session, bot_id):
         row.inherited_from = row.inherited_from or row.relay_session_id
         if row.relay_session_id in keep and row.backend == backend:
             continue
+        # 带不过去的换新会话，原来那条记进沿革：下次再换时续接文本还能取到它。
+        entry = {"id": str(row.relay_session_id), "backend": row.backend}
+        earlier = [item for item in (row.lineage or []) if item.get("id") != entry["id"]]
+        row.lineage = [*earlier, entry][-LINEAGE_MAX:]
         row.relay_session_id = uuid.uuid4()
         row.backend = backend
 

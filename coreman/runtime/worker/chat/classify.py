@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 from coreman.core.api_tasks.service import SILENT_ASK_CODE, SILENT_ASK_MESSAGE, SILENT_KEY
+from coreman.core.chat.rate_limit import (
+    RATE_LIMITED_CODE,
+    RATE_LIMITED_MESSAGE,
+    ends_with_rate_limit,
+    is_rate_limited,
+)
 from coreman.core.i18n.messages import msg
 from coreman.core.relay.client import (
     IncompleteResultError,
@@ -28,6 +34,21 @@ class ClassifyStage(ChatStageBase):
         一枚还活着的令牌就进了聊天记录。
         """
         verdict = self._classify_outcome(ctx, pre, out)
+        if (
+            is_rate_limited(verdict.final_text)
+            if verdict.log_status == "error"
+            else verdict.log_status == "success" and ends_with_rate_limit(verdict.final_text)
+        ):
+            # 终稿是「额度用完」的告示，不是这一轮该有的结果：按失败收尾，不配完成标记。
+            # 驱动按正文回传（成功）和按出错回传的都走到这里，各类轮次不用各自再认一遍。
+            # 成功的回答只看末尾：额度告示是运行时的最后一句，正文中间引用这句话不算。
+            verdict = Verdict(
+                "error",
+                "failed",
+                RATE_LIMITED_CODE,
+                RATE_LIMITED_MESSAGE,
+                verdict.final_text.removesuffix(msg("done_suffix", ctx.locale)),
+            )
         if verdict.log_status == "ask_user" and ctx.task.payload.get(SILENT_KEY):
             # 静默执行的业务系统任务没有人能答题：不进 waiting_user、不开选择卡，按失败结束，
             # 题面留在回复里交给业务系统。

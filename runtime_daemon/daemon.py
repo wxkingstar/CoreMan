@@ -529,12 +529,20 @@ class RuntimeAgent(Agent):
                     "message": "已是当前席位",
                     "seats": self.daemon.seat_states(provider),
                 }
-            if cli_status(provider, seats.env(provider, seat_id))["login"] != "ready":
+            status = cli_status(provider, seats.env(provider, seat_id))
+            if status["login"] != "ready":
                 raise OperationError("该席位未登录，请先登录")
             with self.daemon.driver_lock:
                 seats.activate(provider, seat_id)
+                cap = self.daemon.capabilities[provider]
                 for key in ("plan_type", "account_verified"):
-                    self.daemon.capabilities[provider].pop(key, None)
+                    cap.pop(key, None)
+                # 当前席位的账号与登录状态立刻换成新席位的：等下一次发现要一分钟，这期间管理台
+                # 显示的是旧账号，平台也会按旧账号处理额度。
+                cap["account"], cap["login"] = status.get("account", ""), status["login"]
+                for key in ("plan_type", "account_verified"):
+                    if key in status:
+                        cap[key] = status[key]
                 self.daemon.rotate_driver(provider)
             with self.background_lock:
                 self.mcp_logins = None  # MCP 授权跟着 CLI 的当前席位走

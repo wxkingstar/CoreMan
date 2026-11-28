@@ -329,3 +329,83 @@ async def test_feishu_wait_keeps_a_working_preview(
 def test_other_results_keep_the_default_preview() -> None:
     card = busy_choice.result_card("feishu", "busy@1", title="t", desc="d")
     assert "config" not in card
+
+
+async def test_messages_sent_while_switching_runtimes_get_one_notice_and_no_busy_card(
+    db_session: AsyncSession,
+) -> None:
+    bot, _, _ = await seed_bot(db_session)
+    bot.workspace_state, bot.workspace_operation_id = "migrating", uuid.uuid4()
+    await db_session.commit()
+    first = await _say(db_session, bot, "第一条")
+    second = await _say(db_session, bot, "第二条")
+    items = (await db_session.scalars(select(OutboxItem).order_by(OutboxItem.id))).all()
+    # 这个会话只提示一次；没有「上一条还在处理」的卡片。
+    notices = [i for i in items if i.dedupe_key.startswith("migrating:")]
+    assert [n.payload["markdown"] for n in notices] == [msg("switch_in_progress")]
+    assert all("card" not in i.payload for i in items)
+    for task in (first, second):
+        await db_session.refresh(task)
+        assert task.payload["queued_migrating"] is True
+        assert "busy_offer" not in task.payload
+    # 第二条仍排在第一条后面按顺序处理。
+    assert second.payload.get("serialize_session") is True
+
+
+async def test_messages_queued_during_a_switch_are_not_asked_about_again(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.runtime.worker.chat import queued_batch
+
+    bot, _, _ = await seed_bot(db_session)
+    bot.workspace_state, bot.workspace_operation_id = "migrating", uuid.uuid4()
+    await db_session.commit()
+    await _say(db_session, bot, "第一条")
+    queued_second = await _say(db_session, bot, "第二条")
+    assert queued_second.payload.get("serialize_session") is True
+    # 换好了：任务开始被认领。
+    bot.workspace_state, bot.workspace_operation_id = "ready", None
+    await db_session.commit()
+    await instances.register(
+        db_session, instance_id="worker-test", service="worker", version="dev", capacity=8
+    )
+    head = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    if head is not None and head.id != queued_second.id:
+        await tasks.finish(db_session, head.id, status="succeeded")
+        head = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    assert head is not None and head.id == queued_second.id
+    ctx = build_ctx(db_engine, head)
+    long_ago = datetime.now(UTC) - timedelta(hours=1)
+    held = await queued_batch.hold_if_stale(
+        db_session,
+        ctx,
+        SimpleNamespace(bot=bot, chat_id="zs", inbound=SimpleNamespace(reply_context={})),  # type: ignore[arg-type]
+        head,
+        [queued_batch.Entry(text="第二条", at=long_ago)],
+    )
+    assert held is False
+    stale = await db_session.scalars(
+        select(OutboxItem).where(OutboxItem.dedupe_key.startswith(f"task:{head.id}:stale_hold"))
+    )
+    assert stale.all() == []
+
+
+async def test_migration_notice_on_feishu_quotes_the_message_with_text(
+    db_session: AsyncSession,
+) -> None:
+    from coreman.runtime.gateway_common import inbound
+
+    bot, _, _ = await seed_bot(db_session)
+    snapshot = SimpleNamespace(id=bot.id, bot_key=bot.bot_key, welcome_message=None)
+    message = SimpleNamespace(
+        platform="feishu", chat_id="oc_demo", reply_context={"message_id": "om_demo"}
+    )
+    await inbound._notice_migrating(db_session, snapshot, message, "oc_demo", uuid.uuid4())  # type: ignore[arg-type]
+    await db_session.commit()
+    item = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key.startswith("migrating:"))
+    )
+    assert item is not None
+    assert item.payload == {"text": msg("switch_in_progress"), "_reply": True}
+    assert item.target == {"chat_id": "oc_demo", "message_id": "om_demo"}

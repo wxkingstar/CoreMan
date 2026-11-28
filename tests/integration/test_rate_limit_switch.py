@@ -27,6 +27,7 @@ from coreman.core.db.models import (
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
+from tests.fakes import fake_relay
 from tests.fakes.fake_relay import FakeRelay
 from tests.fakes.runtime_node import attach_node
 from tests.integration.test_chat_handler import chat_task, run, stream_of
@@ -335,10 +336,63 @@ async def test_relay_switch_handler_switches_and_notifies(
         current="r1",
         target="r-idle",
         detail=msg("relay_switch_detail", model="claude-sonnet-5-5"),
+        context=msg("relay_switch_context_partial", n=1),
     )
     assert (await db_session.execute(select(InteractionState))).scalars().all() == []
     row = await tasks.get(db_session, t.id)
     assert row and row.status == "succeeded"
+
+
+async def test_receipt_says_context_was_kept_when_the_native_session_moved(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, relay, _ = await seed_bot(db_session, model="claude-sonnet-5-5")
+    idle = await _second_relay(db_session)
+    creator = await _creator_identity(db_session, bot)
+    before = await sessions.get_or_create(
+        db_session,
+        bot_id=bot.id,
+        session_key="zs",
+        backend="claude",
+        ttl_hours=72,
+        speaker_user_id=creator.id,
+    )
+
+    async def moved(*_args: object, **_kwargs: object) -> tuple[str, bool, set]:
+        return "not_configured", False, {before.relay_session_id}
+
+    monkeypatch.setattr(switch_relay, "prepare_switch", moved)
+    st = await interactions.open_state(
+        db_session,
+        bot_id=bot.id,
+        kind="relay_switch",
+        scope_key=interactions.choice_scope(bot.id, "zs"),
+        state={
+            "idx": 0,
+            "platform_user_id": "zs",
+            "user_id": str(creator.id),
+            "current_relay_id": str(relay.id),
+            "current_name": "r1",
+            "target_relay_id": str(idle.id),
+            "target_name": "r-idle",
+            "target_pct_7d": 5.0,
+            "chat_id": "zs",
+            "chat_type": "single",
+        },
+        task_id_prefix="ratelimit_switch@sales_bot@zs@1",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    await interactions.set_status(db_session, st.id, "submitted")
+    await db_session.commit()
+    t = await _switch_task(db_session, bot, st, user_id=creator.id, target_id=idle.id)
+    await RelaySwitchHandler().run(build_ctx(db_engine, t))
+    (row,) = await sessions.list_for_bot(db_session, bot.id)
+    await db_session.refresh(row)
+    assert row.relay_session_id == before.relay_session_id
+    items = (await db_session.execute(select(OutboxItem))).scalars().all()
+    text = items[-1].payload["markdown"]
+    assert msg("relay_switch_context_kept") in text
+    assert "没能原样带过去" not in text
 
 
 async def test_relay_switch_handler_reports_policy_failure(
@@ -390,3 +444,43 @@ async def test_relay_switch_handler_reports_policy_failure(
         detail="目标运行时不属于本团队或公共池",
     )
     assert quota_table([relay], current_id=relay.id, now=datetime.now(UTC))
+
+
+async def test_rate_limited_turn_is_recorded_as_failed_not_as_an_answer(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import ChatLog, Task
+
+    bot, relay, _ = await seed_bot(db_session)
+    fake = FakeRelay("rate_limit")
+    t = await chat_task(db_session, bot, "跑一下", sender="nobody")
+    await run(db_engine, t, fake)
+    task = await db_session.get(Task, t.id, populate_existing=True)
+    assert task is not None and task.status == "failed" and task.error_code == "rate_limited"
+    log = await db_session.scalar(select(ChatLog).where(ChatLog.bot_id == bot.id))
+    assert log is not None and log.status == "error" and log.error_code == "rate_limited"
+    s = await stream_of(db_session, t.id)
+    # 不配「✅ 回复已生成」；额度表照旧附在后面。
+    assert msg("done_suffix") not in s.final_text
+    assert "**📊 服务器额度总览**" in s.final_text
+
+
+async def test_answer_quoting_the_limit_phrase_stays_successful(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.db.models import Task
+
+    # 一份讲额度告示的正常回答：前面引用了那句话，后面还有大段别的内容。
+    text = (
+        "额度用完时会看到 You've hit your limit · resets 3pm 这句话。" + "后面是正常的说明。" * 80
+    )
+    monkeypatch.setitem(
+        fake_relay.SCENARIOS,
+        "quotes_limit",
+        lambda: [fake_relay._text(text), fake_relay.FINISH, fake_relay.DONE],
+    )
+    bot, relay, _ = await seed_bot(db_session)
+    t = await chat_task(db_session, bot, "讲讲额度告示", sender="nobody")
+    await run(db_engine, t, FakeRelay("quotes_limit"))
+    task = await db_session.get(Task, t.id, populate_existing=True)
+    assert task is not None and task.status == "succeeded" and task.error_code is None

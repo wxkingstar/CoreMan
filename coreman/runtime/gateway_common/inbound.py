@@ -170,6 +170,48 @@ async def _plain_request(session: AsyncSession, bot: InboundBot, message: Inboun
     )
 
 
+async def _migrating(session: AsyncSession, bot_id: uuid.UUID) -> uuid.UUID | None:
+    """员工正在换运行时：返回这次迁移的操作号（提示按它去重），不在迁移中返回 None。"""
+    from sqlalchemy import select
+
+    from coreman.core.db.models import Bot
+
+    row = (
+        await session.execute(
+            select(Bot.workspace_state, Bot.workspace_operation_id).where(Bot.id == bot_id)
+        )
+    ).one_or_none()
+    if row is None or row.workspace_state != "migrating":
+        return None
+    return row.workspace_operation_id or uuid.UUID(int=0)
+
+
+async def _notice_migrating(
+    session: AsyncSession,
+    bot: InboundBot,
+    message: InboundMessage,
+    session_key: str | None,
+    migration: uuid.UUID,
+) -> None:
+    """换运行时期间来的消息：每个会话每次迁移只说一次「换好后自动处理」。"""
+    target: dict[str, Any] = {"chat_id": message.chat_id}
+    payload: dict[str, Any] = {"markdown": msg("switch_in_progress")}
+    message_id = message.reply_context.get("message_id")
+    if message.platform == "feishu" and message_id:
+        # 飞书引用回复读的是 text，不读 markdown。
+        target["message_id"] = message_id
+        payload = {"text": msg("switch_in_progress"), "_reply": True}
+    await outbox.add(
+        session,
+        bot_id=bot.id,
+        platform=message.platform,
+        kind="send",
+        dedupe_key=f"migrating:{bot.id}:{migration}:{session_key}",
+        target=target,
+        payload=payload,
+    )
+
+
 async def _enqueue_task(
     session: AsyncSession,
     bot: InboundBot,
@@ -277,6 +319,12 @@ async def _enqueue_task(
             new.payload["topic_hold"] = True
             new.run_after = topics.hold_until()
             topic_offer = True
+    migration = (
+        await _migrating(session, bot.id) if new.kind == "chat" and not helper_reply else None
+    )
+    if migration is not None:
+        # 等的是换运行时：收尾时不按「等太久」再问一次要不要处理。
+        new.payload["queued_migrating"] = True
     background_offer = (
         new.kind == "chat"
         and not helper_reply
@@ -288,14 +336,23 @@ async def _enqueue_task(
         and not helper_reply
         and not background_offer
     ):
-        await _queue_behind_others(session, bot, message, new, event_id)
+        await _queue_behind_others(
+            session, bot, message, new, event_id, quiet=migration is not None
+        )
     offer = (
         new.kind == "chat"
         and not helper_reply
         and not new.payload.get("serialize_session")
         and await _queue_behind_own(session, bot, message, new)
     )
+    if migration is not None and offer:
+        # 换运行时期间不发「上一条还在处理」的卡（上一条要么还没开始，要么切换正等它跑完），
+        # 也不占发卡的名额；这期间另有一句「换好后自动处理」的提示。
+        new.payload.pop("busy_offer", None)
+        offer = False
     task = await enqueue(session, new)
+    if task is not None and migration is not None:
+        await _notice_migrating(session, bot, message, new.session_key, migration)
     if task is not None and offer:
         await _offer_busy_choice(session, bot, message, task.id, event_id)
     if task is not None and background_offer:
@@ -479,7 +536,13 @@ async def _offer_busy_choice(
 
 
 async def _queue_behind_others(
-    session: AsyncSession, bot: InboundBot, message: InboundMessage, new: NewTask, event_id: int
+    session: AsyncSession,
+    bot: InboundBot,
+    message: InboundMessage,
+    new: NewTask,
+    event_id: int,
+    *,
+    quiet: bool = False,
 ) -> None:
     """群里同一个机器人只有一条会话：别人交代的事还没做完时，这条排在后面，不打断它。
 
@@ -508,7 +571,8 @@ async def _queue_behind_others(
         return
     new.payload["serialize_session"] = True
     message_id = message.reply_context.get("message_id")
-    if message.platform == "feishu" and message_id:
+    # 换运行时期间另有一句提示，这句「先做完手上的」不再发。
+    if not quiet and message.platform == "feishu" and message_id:
         await outbox.add(
             session,
             bot_id=bot.id,

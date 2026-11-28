@@ -141,7 +141,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "- 来源：{current}\n"
             "- 目标：{target}\n"
             "- 详情：{detail}\n\n"
-            "_提示：对话上下文已随运行时带过去，接着聊就行；刚才因额度中断的那条请重新发送一次。_"
+            "_提示：{context}刚才因额度中断的那条请重新发送一次。_"
+        ),
+        "relay_switch_context_kept": "对话上下文已原样带过去，接着聊就行；",
+        "relay_switch_context_partial": (
+            "有 {n} 个对话没能原样带过去，已按最近的对话记录接上，较早的细节可能要再说一次；"
         ),
         "relay_switch_failed": (
             "❌ **切换运行时失败**\n\n"
@@ -186,6 +190,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "background_turn_prefix": "**后台任务有新进展**",
         "background_stopped_notice": (
             "⏹ 后台任务已停止（已跑 {elapsed}）。没做完的：\n{lines}\n\n"
+            "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
+        ),
+        "background_switched_notice": (
+            "⏹ 这位 AI 员工的运行时或模型刚换过，后台任务随之停止（已跑 {elapsed}）。没做完的：\n"
+            "{lines}\n\n"
             "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
         ),
         "background_expired_notice": (
@@ -259,6 +268,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "不需要我时 @我 说「安静」。）"
         ),
         "group_queued": "收到，我先把手上的事做完，接着就处理这个。",
+        "switch_in_progress": "正在换运行时，换好后自动处理这条消息，不用重发。",
         "assistant_private_only": (
             "这个应用是个人助理，只支持私聊，我已经退出刚才的群。有事请直接私聊我。"
         ),
@@ -521,8 +531,13 @@ MESSAGES: dict[str, dict[str, str]] = {
             "- 切替元：{current}\n"
             "- 切替先：{target}\n"
             "- 詳細：{detail}\n\n"
-            "_ご注意：会話の文脈は切替先に引き継がれているので、そのまま続けてください。"
+            "_ご注意：{context}"
             "利用上限で中断したメッセージはもう一度送信してください。_"
+        ),
+        "relay_switch_context_kept": "会話の文脈はそのまま引き継がれました。続けて話せます。",
+        "relay_switch_context_partial": (
+            "{n} 件の会話はそのまま引き継げなかったため、直近のやり取りの記録で続きを補いました。"
+            "古い内容はもう一度伝える必要があるかもしれません。"
         ),
         "relay_switch_failed": (
             "❌ **ランタイム インスタンスの切替に失敗しました**\n\n"
@@ -595,6 +610,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "background_stopped_notice": (
             "⏹ バックグラウンドタスクを停止しました（実行時間 {elapsed}）。未完了：\n{lines}\n\n"
             "「続けて」と送れば、会話記録から止まったところを続けます。"
+        ),
+        "background_switched_notice": (
+            "⏹ この AI 社員のランタイムまたはモデルが切り替わったため、バックグラウンドタスクを"
+            "停止しました（実行時間 {elapsed}）。未完了：\n{lines}\n\n"
+            "必要であれば「続けて」と伝えてください。会話の記録を見て、止まったところから続けます。"
         ),
         "background_expired_notice": (
             "⏹ タスクの制限時間に達したため停止しました（実行時間 {elapsed}）。"
@@ -701,6 +721,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "不要なときは @メンション で「静かに」と伝えてください。）"
         ),
         "group_queued": "了解です。今の作業が終わったら続けてこれに対応します。",
+        "switch_in_progress": (
+            "ランタイムを切り替え中です。完了後にこのメッセージを自動で処理しますので、再送は不要です。"
+        ),
         "assistant_private_only": (
             "このアプリは個人アシスタントで、個別チャットのみ対応しています。"
             "先ほどのグループからは退出しました。ご用の際は直接メッセージをお送りください。"

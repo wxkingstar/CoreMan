@@ -374,3 +374,22 @@ async def test_cron_never_dispatches_for_an_assistant(
     run = await db_session.scalar(select(CronRun))
     assert run is not None and run.status == "failed" and run.error_message == "ApiError"
     assert fake.requests == []
+
+
+async def test_rate_limit_notice_fails_the_run_instead_of_being_pushed_as_the_result(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    now = datetime.now(UTC)
+    await job(db_session, now, target_chats=["test-group"])
+    await run_tick(make_session_factory(db_engine), now)
+    task = await claim(db_session)
+    fake = FakeRelay("rate_limit")
+    ctx = build_ctx(db_engine, task, relay_client_factory=lambda _: fake.client())
+    await CronRunHandler().run(ctx)
+    run = await db_session.scalar(select(CronRun))
+    assert run is not None and run.status == "failed"
+    assert (run.error_message or "").startswith("rate_limited")
+    item = await db_session.scalar(select(OutboxItem))
+    assert item is not None
+    pushed = item.payload["markdown"]
+    assert "运行时额度用完" in pushed and "hit your limit" not in pushed

@@ -98,7 +98,12 @@ async def store_seats(
     node = await session.get(RuntimeNode, node_id, with_for_update=True)
     if node is not None:
         caps = dict(node.capabilities or {})
-        caps[provider] = {**(caps.get(provider) or {}), "seats": states}
+        entry = {**(caps.get(provider) or {}), "seats": states}
+        active = next((s for s in states if s.get("active")), None)
+        if active is not None:
+            # 节点列表显示的账号取顶层这两项：跟着当前席位立刻换，不等下一次心跳。
+            entry["account"], entry["login"] = active.get("account", ""), active.get("login")
+        caps[provider] = entry
         node.capabilities = caps
     return states
 
