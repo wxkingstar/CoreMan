@@ -125,7 +125,8 @@ async def resume_parent(session: AsyncSession, parent_id: int, *, base_url: str)
                 trigger="resume",
                 triggered_by={"children": [c.code for c in children]},
                 note=note,
-                silent=parent.requester_bot_id is not None,
+                # 从群里发起的事：接着做的这一轮不往群里发消息，群里看那张进展卡（见 progress）。
+                silent=parent.requester_bot_id is not None or progress.group_root(parent),
             )
     except WorkTaskError as exc:
         parent.status = "waiting"
