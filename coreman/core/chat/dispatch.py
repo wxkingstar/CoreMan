@@ -20,7 +20,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -30,7 +30,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coreman.core.bots.secrets import CREDENTIALS_AAD, decrypt_json
 from coreman.core.bus import tasks as bus
 from coreman.core.crypto import Cipher
-from coreman.core.db.models import Bot, BotAllowedUser, WorkTask, WorkTaskEvent
+from coreman.core.db.models import (
+    Bot,
+    BotAllowedUser,
+    GroupObserveDecision,
+    WorkTask,
+    WorkTaskEvent,
+)
 from coreman.core.platforms.feishu import FeishuClient, FeishuError
 
 ORIGIN = "dispatch"
@@ -59,6 +65,26 @@ SOLO_QUIET_SECONDS = 3
 # 群里真人数：按群短时缓存，人员进出群时最多这么久后才反映出来。
 HUMANS_TTL_SECONDS = 300
 _HUMANS: OrderedDict[tuple[str, str], tuple[float, int | None]] = OrderedDict()
+
+
+# 运行时额度用完时调度员在群里说明一次；这么久之内同一个群不再说（每条消息都失败，不刷屏）。
+QUOTA_NOTICE_EVERY = timedelta(hours=1)
+
+
+async def quota_notice_sent(session: AsyncSession, bot_id: uuid.UUID, chat_id: str) -> bool:
+    """这个群里，调度员最近是不是已经说过「运行时额度用完了」。"""
+    row = await session.scalar(
+        select(GroupObserveDecision.id)
+        .where(
+            GroupObserveDecision.bot_id == bot_id,
+            GroupObserveDecision.chat_id == chat_id,
+            GroupObserveDecision.created_at >= datetime.now(UTC) - QUOTA_NOTICE_EVERY,
+            GroupObserveDecision.dispatch["error"].astext == "rate_limited",
+            GroupObserveDecision.dispatch["said"].astext.is_not(None),
+        )
+        .limit(1)
+    )
+    return row is not None
 
 
 def session_key(chat_id: str) -> str:

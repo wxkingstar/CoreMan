@@ -54,6 +54,7 @@ async def _dispatch_turn(
     mode="shadow",
     humans: int | None = None,
     prepare=None,
+    as_error: bool = False,
 ):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
@@ -63,7 +64,10 @@ async def _dispatch_turn(
         fake_relay.SCENARIOS,
         "dispatch_plan",
         lambda: [
-            fake_relay._text(answer),
+            # 驱动报错时把错误原文当正文回传，并带上出错标记。
+            fake_relay._chunk({"role": "assistant", "content": answer}, error=True)
+            if as_error
+            else fake_relay._text(answer),
             fake_relay.FINISH,
             fake_relay._chunk(None, usage=fake_relay.USAGE),
             fake_relay.DONE,
@@ -745,3 +749,56 @@ async def test_a_note_for_a_task_waiting_on_subtasks_keeps_it_waiting(db_session
         select(Task).where(Task.session_key == dispatch.work_session_key(row.code))
     )
     assert queued.payload["work_note"] == "放在仓库"
+
+
+# ---------------------------------------------------------------- 运行时额度用完
+
+LIMIT_NOTICE = "You've hit your weekly limit · resets Nov 30 at 4am (America/Los_Angeles)"
+
+
+@pytest.mark.parametrize("as_error", [False, True], ids=["as_text", "as_error"])
+async def test_live_dispatcher_says_so_when_its_runtime_is_out_of_quota(
+    db_engine, db_session, monkeypatch, as_error
+):
+    from coreman.core.i18n.messages import msg
+
+    _, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, LIMIT_NOTICE, mode="on", as_error=as_error
+    )
+    said = msg("dispatch_rate_limited", "zh")
+    assert stream.final_text == said and "额度" in said
+    assert decision.outcome == "dispatch_failed"
+    assert decision.dispatch["error"] == "rate_limited" and decision.dispatch["said"] == said
+    assert list(await db_session.scalars(select(WorkTask))) == []
+
+
+async def test_shadow_dispatcher_stays_silent_when_out_of_quota(db_engine, db_session, monkeypatch):
+    _, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, LIMIT_NOTICE
+    )
+    assert stream.final_text == group_observe.NO_REPLY
+    assert decision.outcome == "dispatch_failed" and decision.dispatch["error"] == "rate_limited"
+
+
+async def test_the_quota_notice_is_not_repeated_within_the_hour(db_engine, db_session, monkeypatch):
+    async def said_already(bot):
+        db_session.add(
+            GroupObserveDecision(
+                bot_id=bot.id,
+                chat_id=CHAT,
+                mode="on",
+                outcome="dispatch_failed",
+                dispatch={"error": "rate_limited", "said": "说过了"},
+            )
+        )
+        await db_session.commit()
+
+    _, _, stream, _, _, _ = await _dispatch_turn(
+        db_engine, db_session, monkeypatch, LIMIT_NOTICE, mode="on", prepare=said_already
+    )
+    assert stream.final_text == group_observe.NO_REPLY
+    latest = await db_session.scalar(
+        select(GroupObserveDecision).order_by(GroupObserveDecision.id.desc()).limit(1)
+    )
+    await db_session.refresh(latest)
+    assert latest.dispatch["error"] == "rate_limited" and "said" not in latest.dispatch
