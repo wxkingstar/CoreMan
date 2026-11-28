@@ -15,32 +15,51 @@ const { t } = useI18n()
     :content="t('workTasks.aiHint')"
     placement="top"
   >
-    <span
+    <svg
       class="ai-mark"
+      viewBox="0 0 16 16"
       role="img"
       :aria-label="t('workTasks.aiHint')"
       tabindex="0"
       data-test="ai-mark"
     >
-      <!-- 大小两颗星：常见的「AI」记号，放在浅色圆底上。 -->
-      <svg
-        viewBox="0 0 16 16"
-        aria-hidden="true"
-      >
-        <path d="M6.5 1.5 7.9 5.6 12 7 7.9 8.4 6.5 12.5 5.1 8.4 1 7 5.1 5.6Z" />
-        <path d="M12.5 9.5 13.2 11.3 15 12 13.2 12.7 12.5 14.5 11.8 12.7 10 12 11.8 11.3Z" />
-      </svg>
-    </span>
+      <!-- 机器人头：天线、圆角方脸、两只眼睛、嘴、两侧耳朵。 -->
+      <circle
+        class="solid"
+        cx="8"
+        cy="1.7"
+        r="1"
+      />
+      <path d="M8 2.6v1.9M1.4 7.6v2.4M14.6 7.6v2.4M6.2 10.9h3.6" />
+      <rect
+        x="3"
+        y="4.5"
+        width="10"
+        height="8.7"
+        rx="2.4"
+      />
+      <circle
+        class="solid"
+        cx="6"
+        cy="8.2"
+        r="1.1"
+      />
+      <circle
+        class="solid"
+        cx="10"
+        cy="8.2"
+        r="1.1"
+      />
+    </svg>
   </el-tooltip></span>
   <span v-else>{{ empty ?? t('workTasks.unassigned') }}</span>
 </template>
 
 <style scoped>
-.task-actor { display: inline-flex; align-items: center; gap: 5px; }
+.task-actor { display: inline-flex; align-items: center; gap: 4px; }
 .ai-mark {
-  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
-  width: 1.3em; height: 1.3em; border-radius: 50%; background: var(--el-color-primary-light-8);
-  cursor: help; outline-offset: 1px;
+  width: 1.15em; height: 1.15em; flex-shrink: 0; cursor: help; outline-offset: 1px;
+  fill: none; stroke: var(--el-color-primary); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round;
 }
-.ai-mark svg { width: .85em; height: .85em; fill: var(--el-color-primary); }
+.ai-mark .solid { fill: var(--el-color-primary); stroke: none; }
 </style>
