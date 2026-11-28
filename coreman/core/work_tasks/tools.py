@@ -22,9 +22,11 @@ from coreman.core.db.models import Bot, User, WorkTask
 from coreman.core.work_tasks import execute, markdown, view
 from coreman.core.work_tasks.service import (
     WorkTaskError,
-    can_manage,
+    add_event,
+    drive,
     name_of,
     restartable,
+    start_refusal,
 )
 
 MOUNT_KEY = "coreman_tasks"
@@ -45,8 +47,10 @@ assigns wait until someone tells you to start or one of your scheduled jobs pick
 subtasks from other AI employees, dispatcher tasks and API tasks start on their own.
 - "What do I have" / "do T-12": call list_my_tasks, then start_task with the codes the person
   means, adding anything they said as note. Each task runs in its own turn, on behalf of the
-  task's principal, and reports in your private chat with that principal. Here, only say which
-  tasks started; do not do the work in this conversation.
+  person who told you to start it (they become its principal), and reports in that person's
+  private chat with the employee doing it. The task's creator may ask you to take over a task
+  assigned to another AI employee; anyone else can only start tasks assigned to you. Here,
+  only say which tasks started; do not do the work in this conversation.
 - Questions about a task: get_task. Looking for earlier work: search_tasks, then get_task for
   details.
 - A task link (a URL with /work-tasks/T-12) is the task page; do not open or fetch it. Call
@@ -240,18 +244,35 @@ async def start_task(
         if row is None:
             results.append({"code": code, "started": False, "reason": "任务不存在"})
             continue
-        if not can_manage(row, actor):
-            # 以代表人的身份做：只有代表人或能管这件事的人叫得动。
-            results.append(
-                {
-                    "code": code,
-                    "started": False,
-                    "reason": f"{name_of(actor)}不是这件事的代表人、发起人或验收人，不能叫你开工",
-                }
-            )
+        cron = capability.kind == "cron"
+        if cron and row.assignee_bot_id != bot.id:
+            refusal: str | None = f"{row.code} 没有指派给你"
+        else:
+            refusal = None if cron else start_refusal(row, actor, bot)
+        if refusal is not None:
+            results.append({"code": code, "started": False, "reason": refusal})
             continue
         try:
             async with session.begin_nested():
+                if not cron:
+                    # 人工开工、接着做：以叫的人的身份做（见 start_refusal）。
+                    drive(row, actor.id)
+                elif row.requester_user_id is not None:
+                    # 定时领取是自动开工：以创建人的身份做；AI 员工建的沿用任务链上的代表人。
+                    drive(row, row.requester_user_id)
+                if row.assignee_bot_id != bot.id:
+                    # 创建人叫了别的员工：被叫的那位接手。
+                    before = row.assignee_bot_id
+                    row.assignee_bot_id, row.assignee_user_id = bot.id, None
+                    add_event(
+                        session,
+                        row,
+                        kind="handoff",
+                        actor_type="human",
+                        actor_id=str(actor.id),
+                        human_text=f"{name_of(actor)}叫{bot.name}接手",
+                        detail={"to": bot.name, "to_kind": "bot", "from_bot": str(before or "")},
+                    )
                 await execute.start(
                     session,
                     row,

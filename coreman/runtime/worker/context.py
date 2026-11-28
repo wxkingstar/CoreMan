@@ -74,6 +74,8 @@ class TaskContext:
     # 调度回合开流时给调度员看的员工名录与任务编号；收尾校验决定用同一份，不重新查。
     dispatch_staff: list[Any] = field(default_factory=list)
     dispatch_codes: set[str] = field(default_factory=set)
+    # 消息提到、不在本群最近任务里的任务编号：adopt 只能接手这些。
+    dispatch_referenced: set[str] = field(default_factory=set)
     # init=False：由 __post_init__ 绑好任务字段再交出去，调用方不该也不能自己传。
     log: structlog.stdlib.BoundLogger = field(init=False, repr=False, compare=False)
 

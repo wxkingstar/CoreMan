@@ -55,32 +55,38 @@ async def _dispatch_turn(
     humans: int | None = None,
     prepare=None,
     as_error: bool = False,
+    answer_factory=None,
+    text_factory=None,
 ):
     from coreman.core.bus import instances, tasks
     from coreman.runtime.worker.chat_handler import ChatTaskHandler
     from tests.fakes import fake_relay
+
+    def content():
+        # 要等 prepare 建好的数据（例如任务编号）才写得出的决定，开流时再生成。
+        return answer_factory() if answer_factory else answer
 
     monkeypatch.setitem(
         fake_relay.SCENARIOS,
         "dispatch_plan",
         lambda: [
             # 驱动报错时把错误原文当正文回传，并带上出错标记。
-            fake_relay._chunk({"role": "assistant", "content": answer}, error=True)
+            fake_relay._chunk({"role": "assistant", "content": content()}, error=True)
             if as_error
-            else fake_relay._text(answer),
+            else fake_relay._text(content()),
             fake_relay.FINISH,
             fake_relay._chunk(None, usage=fake_relay.USAGE),
             fake_relay.DONE,
         ],
     )
     bot = await dispatcher_bot(db_session, mode)
-    if prepare is not None:
-        await prepare(bot)
     # 员工都换成真实存在的机器人，任务的执行员工外键才挂得上。
     staff = []
     for item in STAFF:
         other = await another_bot(db_session, bot, item.key, item.name)
         staff.append(dispatch.Employee(item.key, item.name, item.role, other.id))
+    if prepare is not None:
+        await prepare(bot)
 
     async def employees(session, dispatcher, chat_id, requester_id, cipher):
         return staff, []
@@ -91,7 +97,8 @@ async def _dispatch_turn(
     monkeypatch.setattr(dispatch, "employees", employees)
     monkeypatch.setattr(dispatch, "human_count", human_count)
     configured = record_schedule_configure(monkeypatch)
-    await say(db_session, bot, "om1", "上周退货率多少？谁帮我查一下")
+    text = text_factory() if text_factory else "上周退货率多少？谁帮我查一下"
+    await say(db_session, bot, "om1", text)
     (observe,) = await tasks_of(db_session, bot, "group_observe")
     await quiet_down(db_session, bot)
     decider = FakeDecider(0.9)
@@ -469,10 +476,10 @@ async def test_mentions_carrying_a_task_code_continue_that_task(db_session):
     assert quoted == expected
     assert await work.continued(db_session, first, CHAT, row.code, None, **ask) is None  # 不是它的
     assert await work.continued(db_session, assignee, "oc_other", row.code, None, **ask) is None
-    # 不是发起人：任务会话里有按发起人权限查到的内容，不让别人续进去。
+    # 别人带编号找它也续进去：人工触发，这一轮起以他的身份做（见 drive_follow_up）。
     assert (
         await work.continued(db_session, assignee, CHAT, row.code, None, speaker_id=uuid.uuid4())
-        is None
+        == expected
     )
 
 
@@ -526,7 +533,7 @@ async def test_replying_to_an_answer_without_a_code_continues_that_task(db_sessi
         await work.continued(
             db_session, assignee, CHAT, "那上上周呢", "4.2%", parent_id="om_answer", **other
         )
-        is None
+        == expected
     )
     # 回复的是别的消息：明确不是在接这件事，也不走两小时的就近续接。
     assert (
@@ -936,3 +943,283 @@ async def test_a_finished_goal_keeps_listening_only_while_it_left_things_for_peo
 
     note = dispatch.note(STAFF, [], [goal], {}, awaited=[goal.code])
     assert f"你牵头的 {goal.code} 正在等的人在说话" in note and "- none" in note
+
+
+async def _person(session, pid, name):
+    from coreman.core.db.models import User, UserIdentity
+
+    person = await session.scalar(
+        select(User).join(UserIdentity).where(UserIdentity.platform_user_id == pid)
+    )
+    if person is None:
+        person = User(login_name=f"p_{pid}", display_name=name)
+        session.add(person)
+        await session.flush()
+        session.add(UserIdentity(user_id=person.id, platform="feishu", platform_user_id=pid))
+        await session.flush()
+    return person
+
+
+async def _web_task(session, assignee_id, *, requester="u1", principal="u1", **fields):
+    """任务页上建、指派给某位员工、还没开工的任务（没有群归属）。"""
+    person = await _person(session, requester, "张三")
+    principal_user = await _person(session, principal, "王五") if principal != requester else person
+    values = {
+        "title": "已卖出的货又变回待收",
+        "summary": "先确认约定，再定在哪边修",
+        "brief": "现象和复现步骤见附件",
+        "status": "todo",
+        "source": "web",
+        "requester_user_id": person.id,
+        "requester_name": person.display_name,
+        "principal_user_id": principal_user.id,
+        "assignee_bot_id": assignee_id,
+    }
+    row = WorkTask(**{**values, **fields})
+    session.add(row)
+    await session.flush()
+    row.root_id = row.id
+    await session.commit()
+    return row
+
+
+async def test_dispatch_note_shows_mentioned_tasks_from_elsewhere(db_session):
+    bot = await dispatcher_bot(db_session)
+    mine = await _web_task(db_session, bot.id)
+    # 别人的、在别的群、也没指派给调度员的任务：看不到内容。
+    helper = await another_bot(db_session, bot, "data_bot", "数据助手")
+    other = await _web_task(db_session, helper.id, requester="u9", principal="u9", chat_id="oc_x")
+    speaker = mine.principal_user_id
+    seen, hidden = await dispatch.referenced_tasks(
+        db_session,
+        dispatcher=bot,
+        chat_id=CHAT,
+        speaker_id=speaker,
+        texts=[f"看一下{mine.code}", f"还有 {other.code} 和 T-999999"],
+        exclude=set(),
+    )
+    # 说话人能管的带内容，别人的只说看不到，不存在的不提。
+    assert [r.code for r in seen] == [mine.code] and hidden == [other.code]
+    note = dispatch.note(
+        STAFF, [], [], {}, mentioned=True, referenced=seen, hidden=hidden, me=bot.id, chat_id=CHAT
+    )
+    assert f"- {mine.code}（指派给你，todo，还没开工，不属于任何群）" in note
+    assert f"{other.code}：它不在这个群、没有指派给你" in note and "adopt" in note
+
+    # 只说「转给你了」：指派给它、还没开工、代表人是说话人的也带上；本群列表里有的不重复。
+    seen, _ = await dispatch.referenced_tasks(
+        db_session,
+        dispatcher=bot,
+        chat_id=CHAT,
+        speaker_id=speaker,
+        texts=["转给你了"],
+        exclude=set(),
+    )
+    assert [r.code for r in seen] == [mine.code]
+    seen, _ = await dispatch.referenced_tasks(
+        db_session,
+        dispatcher=bot,
+        chat_id=CHAT,
+        speaker_id=speaker,
+        texts=["转给你了"],
+        exclude={mine.code},
+    )
+    assert seen == []
+
+
+def test_parse_adopt_only_takes_mentioned_tasks():
+    answer = plan(action="adopt", task_code="T-7", note="先复现")
+    assert dispatch.parse(answer, STAFF, set(), referenced={"T-7"}).task_code == "T-7"
+    with pytest.raises(ValueError, match="bad_adopt"):
+        dispatch.parse(answer, STAFF, {"T-7"})
+
+
+async def test_live_dispatcher_adopts_a_web_task_assigned_to_it_and_leads(
+    db_engine, db_session, monkeypatch
+):
+    holder = {}
+
+    async def prepare(bot):
+        holder["task"] = await _web_task(db_session, bot.id)
+
+    bot, request, stream, decision, _, _ = await _dispatch_turn(
+        db_engine,
+        db_session,
+        monkeypatch,
+        "",
+        mode="on",
+        prepare=prepare,
+        # 不带编号：只说「转给你了」，靠指派给它、还没开工、代表人是说话人认出来。
+        text_factory=lambda: "转给你了",
+        answer_factory=lambda: plan(
+            action="adopt",
+            reason="指派给我的",
+            task_code=holder["task"].code,
+            note="先在测试环境复现",
+        ),
+    )
+    task = await db_session.get(WorkTask, holder["task"].id, populate_existing=True)
+    turn_text = json.dumps(request["messages"][-1]["content"], ensure_ascii=False)
+    assert f"{task.code}（指派给你" in turn_text
+    link = f"[{task.code}](http://localhost/work-tasks/{task.code})"
+    assert stream.final_text == f"这件事我来牵头：已卖出的货又变回待收（{link}）"
+    assert decision.outcome == "dispatch_adopt" and decision.dispatch["codes"] == [task.code]
+    assert task.chat_id == CHAT and task.tracked and task.source == "web"
+    assert task.status == "waiting" and task.claimed_at is not None and dispatch.is_lead(task)
+    assert task.principal_user_id == task.requester_user_id
+
+    # 牵头的那一轮排给调度员自己，带着人写的要求和牵头规则，回复挂在群里那条消息上。
+    done, body, reply = await _run_work_turn(
+        db_engine, db_session, monkeypatch, bot.id, f"{link} 卡住了：群里没有能接的员工"
+    )
+    assert done.session_key == dispatch.work_session_key(task.code)
+    turn = body["messages"][-1]["content"]
+    turn = turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False)
+    assert "在群里叫你开工，由你牵头" in turn and "现象和复现步骤见附件" in turn
+    assert "这件事由你牵头" in turn and "先在测试环境复现" in turn
+    assert reply.reply_context["message_id"] == "om1"
+
+
+async def _staff_id(session, key):
+    from coreman.core.db.models import Bot
+
+    return await session.scalar(select(Bot.id).where(Bot.bot_key == key))
+
+
+async def _adopt_turn(db_engine, db_session, monkeypatch, make_task):
+    holder = {}
+
+    async def prepare(bot):
+        holder["task"] = await make_task(bot)
+
+    bot, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine,
+        db_session,
+        monkeypatch,
+        "",
+        mode="on",
+        prepare=prepare,
+        text_factory=lambda: f"做一下 {holder['task'].code}",
+        answer_factory=lambda: plan(action="adopt", task_code=holder["task"].code),
+    )
+    task = await db_session.get(WorkTask, holder["task"].id, populate_existing=True)
+    return bot, task, stream, decision
+
+
+async def test_anyone_can_start_a_task_assigned_to_the_dispatcher_and_drives_it(
+    db_engine, db_session, monkeypatch
+):
+    async def make_task(bot):
+        await _person(db_session, "u1", "张三")  # 说话人是平台成员
+        return await _web_task(db_session, bot.id, requester="u9", principal="u9")
+
+    bot, task, stream, _ = await _adopt_turn(db_engine, db_session, monkeypatch, make_task)
+    assert stream.final_text.startswith("这件事我来牵头") and dispatch.is_lead(task)
+    # 以叫开工的人（u1）的身份做：他成为代表人，创建人不变。
+    speaker = await _person(db_session, "u1", "张三")
+    assert task.principal_user_id == speaker.id != task.requester_user_id
+
+
+async def test_the_creator_can_start_a_task_assigned_to_another_employee(
+    db_engine, db_session, monkeypatch
+):
+    async def make_task(bot):
+        return await _web_task(db_session, await _staff_id(db_session, "data_bot"))
+
+    _, task, stream, _ = await _adopt_turn(db_engine, db_session, monkeypatch, make_task)
+    link = f"[{task.code}](http://localhost/work-tasks/{task.code})"
+    assert stream.final_text == f"@数据助手 开工了：已卖出的货又变回待收（{link}）"
+    assert task.status == "waiting" and task.chat_id == CHAT and not dispatch.is_lead(task)
+    from coreman.core.db.models import Task
+
+    queued = await db_session.scalar(
+        select(Task).where(Task.session_key == dispatch.work_session_key(task.code))
+    )
+    assert queued.bot_id == task.assignee_bot_id
+
+
+@pytest.mark.parametrize(
+    ("fields", "said"),
+    [
+        ({"status": "waiting"}, "已经开工或已结束"),
+        ({"chat_id": "oc_other"}, "是别的群里的事"),
+        # 不是创建人，任务也没指派给调度员：只能直接找被指派的员工。
+        ({"requester": "u9", "to": "data_bot"}, "没有指派给"),
+    ],
+    ids=["started", "other_group", "not_creator"],
+)
+async def test_live_dispatcher_says_why_it_cannot_adopt(
+    db_engine, db_session, monkeypatch, fields, said
+):
+    holder = {}
+
+    async def prepare(bot):
+        extra = dict(fields)
+        to = extra.pop("to", None)
+        assignee = await _staff_id(db_session, to) if to else bot.id
+        holder["task"] = await _web_task(db_session, assignee, **extra)
+
+    _, _, stream, decision, _, _ = await _dispatch_turn(
+        db_engine,
+        db_session,
+        monkeypatch,
+        "",
+        mode="on",
+        prepare=prepare,
+        text_factory=lambda: f"做一下 {holder['task'].code}",
+        answer_factory=lambda: plan(action="adopt", task_code=holder["task"].code),
+    )
+    task = await db_session.get(WorkTask, holder["task"].id, populate_existing=True)
+    assert stream.final_text.startswith(task.code) and said in stream.final_text
+    assert decision.outcome == "dispatch_adopt"
+    assert task.claimed_at is None and task.dispatcher_bot_id is None
+
+
+async def test_someone_else_adding_to_a_task_in_the_group_drives_it_from_then_on(db_session):
+    bot = await dispatcher_bot(db_session, mode="on")
+    helper = await another_bot(db_session, bot, "data_bot", "数据助手")
+    owner = await _person(db_session, "u1", "张三")
+    other = await _person(db_session, "u2", "李四")
+    row = WorkTask(
+        title="查退货率",
+        status="in_progress",
+        platform="feishu",
+        chat_id=CHAT,
+        assignee_bot_id=helper.id,
+        requester_user_id=owner.id,
+        principal_user_id=owner.id,
+        dispatcher_bot_id=bot.id,
+    )
+    db_session.add(row)
+    await db_session.flush()
+    await say(db_session, bot, "om9", "顺便看下上上周", user="u2")
+    from coreman.core.db.models import InboundEvent
+
+    inbound = await db_session.scalar(
+        select(InboundEvent).where(InboundEvent.platform_msg_id == "om9")
+    )
+    staff = [dispatch.Employee("data_bot", "数据助手", "数据", helper.id)]
+    _, line = await dispatch.record(
+        db_session,
+        plan=dispatch.Plan(action="append", task_code=row.code, note="顺便看下上上周"),
+        dispatcher=bot,
+        chat_id=CHAT,
+        event_id=inbound.id,
+        requester_id=other.id,
+        requester_name="李四",
+        staff=staff,
+        decision_id=None,
+        chat_task_id=1,
+        live=True,
+        requester_pid="u2",
+    )
+    await db_session.commit()
+    await db_session.refresh(row)
+    # 补充也是人工触发：之后以补充的人的身份做，时间线上记一笔。
+    assert line.startswith("补充给 @数据助手") and row.principal_user_id == other.id
+    texts = list(
+        await db_session.scalars(
+            select(WorkTaskEvent.human_text).where(WorkTaskEvent.work_task_id == row.id)
+        )
+    )
+    assert "李四补充，之后以李四的身份做" in texts

@@ -75,7 +75,7 @@ def group_root(root: WorkTask | None) -> bool:
     """这件事是不是从群里发起、由调度员交接出来的：进展卡和提问卡都发在那个群里。"""
     return (
         root is not None
-        and root.source == "dispatch"
+        and root.dispatcher_bot_id is not None
         and root.platform == "feishu"
         and bool(root.chat_id)
         and root.tracked

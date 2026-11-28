@@ -72,7 +72,7 @@ async def start(
     chat_type = "single"
     if silent:
         chat_id = f"work:{row.code}"
-    elif row.source == "dispatch" and row.platform == "feishu" and row.chat_id:
+    elif row.dispatcher_bot_id and row.platform == "feishu" and row.chat_id:
         chat_id, chat_type = row.chat_id, "group"
     else:
         reached = await session.get(UserReached, (bot.id, principal.id))
@@ -133,7 +133,7 @@ async def start(
     row.waiting_on = {"kind": "queue", "human_text": f"排队等{bot.name}开始"}
     who = str(triggered_by.get("name") or "")
     line = {
-        "chat": f"{who}叫{bot.name}开工",
+        "chat": f"{who}叫{bot.name}开工，以{who}的身份做",
         "cron": f"{bot.name}按定时任务领取",
         "rerun": f"交回{bot.name}重做",
         "comment": f"{who}补充后交回{bot.name}接着做",
@@ -219,6 +219,10 @@ async def answer(
         bot = await session.get(Bot, row.assignee_bot_id)
         if bot is None:
             return
+        # 退回重做是人工触发：以退回的人的身份做。改在保存点外面、失败时自己改回：保存点回滚
+        # 会让改过的行过期，下面记失败时再读它就要重新加载。
+        before = row.principal_user_id
+        service.drive(row, user.id)
         try:
             async with session.begin_nested():
                 await start(
@@ -231,6 +235,7 @@ async def answer(
                 )
         except WorkTaskError as exc:
             # 交不回去（例如代表人没私聊过它）：退回照样生效，改成等人叫它开工。
+            row.principal_user_id = before
             row.status, row.claimed_at, row.start_mode = "todo", None, "manual"
             add_event(
                 session,

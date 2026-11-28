@@ -235,8 +235,8 @@ def ask_to(row: WorkTask) -> uuid.UUID | None:
 
 
 def to_review(row: WorkTask, result: str) -> None:
-    """交付后进入待验收：问验收人（没指定时问代表人）。"""
-    reviewer = row.reviewer_user_id or row.principal_user_id
+    """交付后进入待验收：问验收人（没指定时问创建人，AI 员工建的问代表人）。"""
+    reviewer = row.reviewer_user_id or row.requester_user_id or row.principal_user_id
     if reviewer is None:
         finish(row, result)
         return
@@ -310,7 +310,8 @@ async def assign(
     note: str = "",
     review_required: bool | None = None,
 ) -> WorkTask:
-    """指派或转交。交给 AI 员工时转交人成为代表人，默认由他验收，等人叫它开工。"""
+    """指派或转交。交给 AI 员工时等人叫它开工（叫开工的人成为代表人，见 `start_refusal`）；
+    先记转交人为代表人。要验收时默认由创建人验收：创建人是提需求的人。"""
     _manage(row, user)
     _open(row)
     note = _require(note, "交接说明", BRIEF_MAX, required=False)
@@ -325,7 +326,7 @@ async def assign(
         row.status, row.ask, row.waiting_on, row.closed_at = "todo", None, None, None
         row.review_required = True if review_required is None else review_required
         if row.review_required and row.reviewer_user_id is None:
-            row.reviewer_user_id = user.id
+            row.reviewer_user_id = row.requester_user_id or user.id
         after = bot.name
     else:
         person = await active_user(session, target.id)
@@ -590,6 +591,34 @@ def watched_by(user_id: uuid.UUID) -> Any:
     return WorkTask.id.in_(
         select(WorkTaskWatcher.work_task_id).where(WorkTaskWatcher.user_id == user_id)
     )
+
+
+def not_started(row: WorkTask) -> bool:
+    """还没开工过的任务（等人叫它开工）。"""
+    return row.status == "todo" and row.claimed_at is None
+
+
+def start_refusal(row: WorkTask, user: User, bot: Bot) -> str | None:
+    """`user` 叫 AI 员工 `bot` 开工或接着做 `row`，不行时返回原因。
+
+    准则（docs/superpowers/specs/2026-11-28-dispatcher-inserted-tasks.md）：谁叫开工就以谁的
+    身份做，他成为代表人。创建人叫哪位 AI 员工都行，被叫的那位接手；别人只能叫任务指派给的那位。
+    """
+    if row.assignee_user_id is not None:
+        return f"{row.code} 派给了人，不是 AI 员工"
+    if row.assignee_bot_id == bot.id or user.id == row.requester_user_id:
+        return None
+    return (
+        f"{row.code} 没有指派给「{bot.name}」：请直接找被指派的 AI 员工，"
+        f"或者请创建人{row.requester_name or ''}来叫开工"
+    )
+
+
+def drive(row: WorkTask, user_id: uuid.UUID) -> bool:
+    """人工触发：以触发人的身份做，他成为代表人。返回代表人有没有换。"""
+    changed = row.principal_user_id != user_id
+    row.principal_user_id = user_id
+    return changed
 
 
 def restartable(row: WorkTask) -> bool:

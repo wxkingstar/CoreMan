@@ -619,6 +619,7 @@ class FinalizeStage(ChatStageBase):
                         solo=bool(
                             ctx.task.payload.get("solo") or ctx.task.payload.get("mentioned")
                         ),
+                        referenced=ctx.dispatch_referenced,
                     )
                 except ValueError as exc:
                     outcome, result["error"] = "dispatch_invalid", str(exc)

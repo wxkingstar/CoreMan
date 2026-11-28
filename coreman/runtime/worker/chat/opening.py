@@ -451,11 +451,14 @@ class OpenStage(ChatStageBase):
             if interject:
                 ctx.turn_notes.append(group_observe.INTERJECT_NOTE)
             elif ctx.task.payload.get("origin") == "dispatch":
-                ctx.turn_notes.append(await self._dispatch_note(session, ctx, intake))
+                # 这一批消息提到的任务编号：从本轮这条、再从新到旧看这一批。
+                texts = [intake.text, *(line.text for line in reversed(lines) if line.new)]
+                ctx.turn_notes.append(await self._dispatch_note(session, ctx, intake, texts))
         from coreman.runtime.worker.chat import work
 
         if work.code_of(intake.session_key):
             # 调度员派的任务：每轮都带上任务和回复规则，再记一笔「开始处理」。
+            await work.drive_follow_up(session, ctx, intake)
             work_note = await work.note(session, ctx, intake)
             if work_note:
                 ctx.turn_notes.append(work_note)
@@ -987,19 +990,30 @@ class OpenStage(ChatStageBase):
             background_tasks=background_tasks,
         )
 
-    async def _dispatch_note(self, session: AsyncSession, ctx: TaskContext, intake: Intake) -> str:
-        """调度回合的本轮块：群里能接任务的员工和这个群最近的任务；员工名录也存进任务载荷，
-        收尾校验决定时用同一份。"""
+    async def _dispatch_note(
+        self, session: AsyncSession, ctx: TaskContext, intake: Intake, texts: list[str]
+    ) -> str:
+        """调度回合的本轮块：群里能接任务的员工、这个群最近的任务和 `texts` 里提到的任务；
+        员工名录与任务编号也存进上下文，收尾校验决定时用同一份。"""
         from coreman.core.chat import dispatch
 
         staff, unverified = await dispatch.employees(
             session, intake.bot, intake.chat_id, intake.speaker.user_id, ctx.cipher
         )
         recent = await dispatch.recent_tasks(session, intake.chat_id)
-        ids = {t.assignee_bot_id for t in recent if t.assignee_bot_id}
+        referenced, hidden = await dispatch.referenced_tasks(
+            session,
+            dispatcher=intake.bot,
+            chat_id=intake.chat_id,
+            speaker_id=intake.speaker.user_id,
+            texts=texts,
+            exclude={t.code for t in recent},
+        )
+        ids = {t.assignee_bot_id for t in [*recent, *referenced] if t.assignee_bot_id}
         names = {b.id: b.name for b in await session.scalars(select(Bot).where(Bot.id.in_(ids)))}
         ctx.dispatch_staff = staff
         ctx.dispatch_codes = {t.code for t in recent}
+        ctx.dispatch_referenced = {t.code for t in referenced}
         return dispatch.note(
             staff,
             unverified,
@@ -1008,6 +1022,10 @@ class OpenStage(ChatStageBase):
             solo=bool(ctx.task.payload.get("solo")),
             mentioned=bool(ctx.task.payload.get("mentioned")),
             awaited=[str(code) for code in ctx.task.payload.get("awaited") or []],
+            referenced=referenced,
+            hidden=hidden,
+            me=intake.bot.id,
+            chat_id=intake.chat_id,
         )
 
     def _structured_reply(self, ctx: TaskContext) -> bool:
