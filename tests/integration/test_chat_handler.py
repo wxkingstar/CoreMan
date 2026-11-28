@@ -204,6 +204,27 @@ async def test_first_turn_after_switch_carries_history(
     assert "上下文续接" not in turn_block(fake.requests[5])
 
 
+async def test_first_turn_after_switching_back_carries_the_earliest_history(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.chat import sessions
+
+    bot, _, _ = await seed_bot(db_session)
+    fake = FakeRelay("normal")
+    await run(db_engine, await chat_task(db_session, bot, "最早问"), fake)
+    # 第一次换：带不过去，换新会话；中间这条会话里聊了一轮，首轮成功后续接记号清掉。
+    await sessions.carry_over(db_session, bot.id, backend="claude", keep=set())
+    await db_session.commit()
+    await run(db_engine, await chat_task(db_session, bot, "中间问"), fake)
+    assert "最早问" in turn_block(fake.requests[1])
+    # 再换一次：原会话与更早的那条都在沿革里，本轮块要把两段都带上。
+    await sessions.carry_over(db_session, bot.id, backend="claude", keep=set())
+    await db_session.commit()
+    await run(db_engine, await chat_task(db_session, bot, "最后问"), fake)
+    block = turn_block(fake.requests[2])
+    assert "最早问" in block and "中间问" in block
+
+
 async def test_known_identity_and_group_speaker_change(
     db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:

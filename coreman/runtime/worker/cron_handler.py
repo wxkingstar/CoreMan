@@ -23,6 +23,7 @@ from coreman.core.chat.collaboration_tools import CRON_POLICY
 from coreman.core.chat.rate_limit import (
     RATE_LIMITED_CODE,
     RATE_LIMITED_MESSAGE,
+    ends_with_rate_limit,
     is_rate_limited,
 )
 from coreman.core.chat.redaction import collect_secrets
@@ -423,7 +424,7 @@ class CronRunHandler:
                         reply, status = "", "success"
                     else:
                         reply, usage, tools, truncated = consume.result()
-                        if is_rate_limited(reply):
+                        if ends_with_rate_limit(reply):
                             # 驱动按正文回传的额度告示：不是这次执行的结果。
                             raise CronStreamError(
                                 RATE_LIMITED_CODE, RATE_LIMITED_MESSAGE, reply, usage, tools

@@ -346,7 +346,8 @@ async def _enqueue_task(
         and await _queue_behind_own(session, bot, message, new)
     )
     if migration is not None and offer:
-        # 上一条没开始是因为在换运行时：不发「上一条还在处理」的卡，也不占发卡的名额。
+        # 换运行时期间不发「上一条还在处理」的卡（上一条要么还没开始，要么切换正等它跑完），
+        # 也不占发卡的名额；这期间另有一句「换好后自动处理」的提示。
         new.payload.pop("busy_offer", None)
         offer = False
     task = await enqueue(session, new)

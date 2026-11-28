@@ -18,7 +18,7 @@
 
 `runtime_daemon/drivers/cmd/relay-opencode` 与 relay-codex 同形，每一轮跑一次 `opencode run --format json`：
 
-- **续聊**：CoreMan 会话绑定一个 OpenCode 会话（`<会话>/opencode_session.txt`），后续轮次只发最新一条消息并带 `--session`。绑定的会话不在了（`Session not found`）就用平台的续接文本开新会话，并在回复前说明。
+- **续聊**：CoreMan 会话绑定一个 OpenCode 会话（`<会话>/opencode_session.txt`），后续轮次只发最新一条消息并带 `--session`。绑定的会话不在了（`Session not found`）就用平台的续接文本开新会话：带了续接文本时直接接着做，不再提示；没有续接文本时才在回复前说明会话记录已不存在。
 - **平台规则**：系统提示每轮写成 `<会话>/coreman_rules.md`，经配置层的 `instructions` 交给 OpenCode，续聊时也用当前规则。
 - **配置层**：MCP 服务与权限经 `OPENCODE_CONFIG_CONTENT` 给这一轮，不改节点上的 OpenCode 配置。协作、本人飞书 / 企微工具、业务系统目录、业务系统 MCP 的令牌写成 `{env:变量}`，只在子进程环境里；没有凭据的服务显式关闭。工作目录 `.mcp.json` 里的 MCP 技能挂成 `skill_<名字>`，与 Codex 同名。
 - **权限**：默认放开（`permission: "allow"`，与 Codex 的免审批一致）；`read-only` 禁止编辑与 shell，`workspace-write` 禁止工作目录之外。

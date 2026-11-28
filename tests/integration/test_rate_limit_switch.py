@@ -27,6 +27,7 @@ from coreman.core.db.models import (
 from coreman.core.i18n.messages import msg
 from coreman.runtime.worker.chat_handler import ChatTaskHandler
 from coreman.runtime.worker.relay_switch import RelaySwitchHandler
+from tests.fakes import fake_relay
 from tests.fakes.fake_relay import FakeRelay
 from tests.fakes.runtime_node import attach_node
 from tests.integration.test_chat_handler import chat_task, run, stream_of
@@ -462,3 +463,24 @@ async def test_rate_limited_turn_is_recorded_as_failed_not_as_an_answer(
     # 不配「✅ 回复已生成」；额度表照旧附在后面。
     assert msg("done_suffix") not in s.final_text
     assert "**📊 服务器额度总览**" in s.final_text
+
+
+async def test_answer_quoting_the_limit_phrase_stays_successful(
+    db_engine: AsyncEngine, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.db.models import Task
+
+    # 一份讲额度告示的正常回答：前面引用了那句话，后面还有大段别的内容。
+    text = (
+        "额度用完时会看到 You've hit your limit · resets 3pm 这句话。" + "后面是正常的说明。" * 80
+    )
+    monkeypatch.setitem(
+        fake_relay.SCENARIOS,
+        "quotes_limit",
+        lambda: [fake_relay._text(text), fake_relay.FINISH, fake_relay.DONE],
+    )
+    bot, relay, _ = await seed_bot(db_session)
+    t = await chat_task(db_session, bot, "讲讲额度告示", sender="nobody")
+    await run(db_engine, t, FakeRelay("quotes_limit"))
+    task = await db_session.get(Task, t.id, populate_existing=True)
+    assert task is not None and task.status == "succeeded" and task.error_code is None

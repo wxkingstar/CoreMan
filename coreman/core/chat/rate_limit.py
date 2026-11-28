@@ -43,6 +43,15 @@ def is_rate_limited(text: str) -> bool:
     return RATE_LIMIT_PATTERN.search(text) is not None
 
 
+# 真正的额度告示出现在输出的末尾（运行时到这里就停了）；正文中间引用到这句话的不算。
+NOTICE_TAIL_CHARS = 400
+
+
+def ends_with_rate_limit(text: str) -> bool:
+    """这段输出是不是以「撞额度」的告示收尾。"""
+    return is_rate_limited(text[-NOTICE_TAIL_CHARS:])
+
+
 # 额度告示不是一轮该有的结果：各处收尾统一用这组错误码与说明。
 RATE_LIMITED_CODE = "rate_limited"
 RATE_LIMITED_MESSAGE = "运行时额度用完"

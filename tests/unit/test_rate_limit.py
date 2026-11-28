@@ -7,6 +7,7 @@ from coreman.core.chat.rate_limit import (
     ago,
     allowed_providers,
     countdown,
+    ends_with_rate_limit,
     fmt_pct,
     is_rate_limited,
     pick_idle_server,
@@ -14,6 +15,7 @@ from coreman.core.chat.rate_limit import (
     quota_warning,
 )
 from coreman.core.db.models import Bot, RelayServer, User
+from coreman.core.i18n.messages import msg
 
 NOW = datetime(2026, 9, 12, 10, 0, tzinfo=UTC)
 
@@ -40,6 +42,20 @@ def _relay(
     r.rate_limit_7d_resets_at = NOW - timedelta(minutes=1)
     r.rate_limit_probed_at = probed or NOW - timedelta(minutes=3)
     return r
+
+
+def test_ends_with_rate_limit_only_looks_at_the_tail() -> None:
+    assert ends_with_rate_limit("You've hit your limit · resets 3pm")
+    assert ends_with_rate_limit(
+        "\n\n[codex error] You’ve hit your usage limit. Try again at 3:00 PM."
+    )
+    # 先吐了一大段回答，限额才到。
+    assert ends_with_rate_limit("部分回答" * 300 + "You've hit your limit · resets 3pm")
+    assert ends_with_rate_limit("You've hit your limit · resets 3pm" + msg("done_suffix"))
+    # 正文前面引用了这句话，后面还有大段别的内容：不是告示。
+    assert not ends_with_rate_limit(
+        "文档里会出现 You've hit your limit · resets 3pm 这句话。" + "正常内容" * 150
+    )
 
 
 def test_pattern_and_helpers() -> None:
