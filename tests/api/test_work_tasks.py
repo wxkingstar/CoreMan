@@ -287,3 +287,34 @@ async def test_stats_show_backlog_and_first_pass_rate(
     assert stats["backlog"][0]["assignee"]["name"] == "bob" and stats["backlog"][0]["open"] == 2
     assert {s["source"]: s["created"] for s in stats["by_source"]} == {"web": 2}
     assert stats["agent_first_pass_rate"] is None
+
+
+async def test_detail_lists_status_of_every_task_code_on_the_page(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    task = await _seed(db_session)
+    related = WorkTask(title="对接约定", status="done", requester_name="李雷")
+    child = WorkTask(title="拉退货明细", status="in_progress", requester_name="李雷")
+    mentioned = WorkTask(title="重推单据", status="waiting", requester_name="李雷")
+    db_session.add_all([related, mentioned])
+    await db_session.flush()
+    child.parent_id = task.id
+    db_session.add(child)
+    await db_session.flush()
+    task.related_codes = [related.code]
+    db_session.add(
+        WorkTaskEvent(
+            work_task_id=task.id,
+            kind="subtask",
+            actor_type="system",
+            human_text=f"等{mentioned.code}、T-99999 和 {task.code} 的结果",
+        )
+    )
+    await db_session.commit()
+    await login_as(client, db_session, role="member")
+    detail = (await client.get(f"/api/admin/work-tasks/{task.code}")).json()["data"]
+    assert detail["linked"] == {
+        related.code: {"title": "对接约定", "status": "done"},
+        child.code: {"title": "拉退货明细", "status": "in_progress"},
+        mentioned.code: {"title": "重推单据", "status": "waiting"},
+    }

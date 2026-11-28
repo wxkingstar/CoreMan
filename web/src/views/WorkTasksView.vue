@@ -11,6 +11,9 @@ import LoadState from '@/components/LoadState.vue'
 import AssigneePicker from '@/components/workTasks/AssigneePicker.vue'
 import WorkTaskAsk from '@/components/workTasks/WorkTaskAsk.vue'
 import WorkTaskCreateDialog from '@/components/workTasks/WorkTaskCreateDialog.vue'
+import WorkTaskCode from '@/components/workTasks/WorkTaskCode.vue'
+import WorkTaskStatusIcon from '@/components/workTasks/WorkTaskStatusIcon.vue'
+import WorkTaskText from '@/components/workTasks/WorkTaskText.vue'
 import {
   workTasks, type AssigneeIn, type WorkTask, type WorkTaskDetail, type WorkTaskStats, type WorkTaskView,
 } from '@/api/workTasks'
@@ -346,9 +349,14 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
     >
       <el-table-column
         :label="t('workTasks.code')"
-        width="90"
-        prop="code"
-      />
+        width="100"
+      >
+        <template #default="{ row }">
+          <span class="code-cell">
+            <WorkTaskStatusIcon :status="row.status" />{{ row.code }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column
         :label="t('workTasks.taskTitle')"
         min-width="300"
@@ -462,10 +470,17 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
       append-to-body
       destroy-on-close
       close-on-press-escape
-      :title="detail ? `${detail.code} · ${detail.title}` : code"
       data-test="work-task-detail"
       @close="close"
     >
+      <template #header>
+        <span class="el-dialog__title code-cell">
+          <WorkTaskStatusIcon
+            v-if="detail"
+            :status="detail.status"
+          />{{ detail ? `${detail.code} · ${detail.title}` : code }}
+        </span>
+      </template>
       <LoadState
         :error="detailError"
         @retry="open(code)"
@@ -482,7 +497,10 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           data-test="work-task-now"
         >
           <template #title>
-            <strong>{{ t('workTasks.now') }}</strong>{{ detail.now }}
+            <strong>{{ t('workTasks.now') }}</strong><WorkTaskText
+              :text="detail.now"
+              :linked="detail.linked"
+            />
           </template>
           <el-button
             v-if="detail.needs_drive"
@@ -639,27 +657,35 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
             v-if="detail.parent || detail.related_codes.length"
             :label="t('workTasks.related')"
           >
-            <router-link
+            <WorkTaskCode
               v-if="detail.parent"
-              :to="{ name: 'work-tasks', params: { code: detail.parent.code } }"
+              :code="detail.parent.code"
+              :prefix="t('workTasks.parent')"
+              :status="detail.linked[detail.parent.code]?.status"
+              :title="detail.parent.title"
               class="related"
-            >
-              {{ t('workTasks.parent') }} {{ detail.parent.code }}
-            </router-link>
-            <router-link
+            />
+            <WorkTaskCode
               v-for="item in detail.related_codes"
               :key="item"
-              :to="{ name: 'work-tasks', params: { code: item } }"
+              :code="item"
+              :status="detail.linked[item]?.status"
+              :title="detail.linked[item]?.title"
               class="related"
-            >
-              {{ item }}
-            </router-link>
+            />
           </el-descriptions-item>
           <el-descriptions-item
             :label="t('workTasks.summary')"
             :span="2"
           >
-            {{ detail.summary || '—' }}
+            <WorkTaskText
+              v-if="detail.summary"
+              :text="detail.summary"
+              :linked="detail.linked"
+            />
+            <template v-else>
+              —
+            </template>
           </el-descriptions-item>
           <el-descriptions-item
             v-if="detail.artifacts.length"
@@ -684,10 +710,15 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
               v-for="child in detail.children"
               :key="child.code"
             >
-              <router-link :to="{ name: 'work-tasks', params: { code: child.code } }">
-                {{ child.code }} {{ child.title }}
-              </router-link>
-              <span class="muted"> · {{ child.now }}</span>
+              <WorkTaskCode
+                :code="child.code"
+                :status="child.status"
+                :title="child.title"
+              /> {{ child.title }}
+              <span class="muted"> · <WorkTaskText
+                :text="child.now"
+                :linked="detail.linked"
+              /></span>
             </li>
           </ul>
         </template>
@@ -700,7 +731,10 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
             :timestamp="formatDateTime(event.created_at)"
           >
             <div>
-              <strong v-if="event.actor_type === 'bot' && event.actor_name">{{ event.actor_name }}：</strong>{{ event.human_text }}
+              <strong v-if="event.actor_type === 'bot' && event.actor_name">{{ event.actor_name }}：</strong><WorkTaskText
+                :text="event.human_text"
+                :linked="detail.linked"
+              />
             </div>
             <el-collapse
               v-if="Object.keys(event.agent_detail).length"
@@ -861,6 +895,7 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
 .raw-event { padding: 6px 0; border-bottom: 1px dashed var(--el-border-color-lighter); }
 .agent-detail { margin-top: 4px; }
 .related { margin-right: 8px; }
+.code-cell { display: inline-flex; align-items: center; gap: 4px; }
 .inline-tag { margin-left: 6px; }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
 </style>
