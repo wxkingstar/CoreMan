@@ -216,7 +216,7 @@ def build_system_prompt(
     `background_tasks` 表示这位员工的后台任务由平台看着做完、逐项通知（Claude 运行时、节点
     声明了 claude_background_sessions_v1）；追加后台任务的两条规则。
     """
-    codex = backend in {"codex", "opencode"}
+    codex = backend in {"codex", "opencode", "antigravity"}
     parts = [
         segments.security_policy,
         # 固定段，管理台改不了：身份规则本身不能由可编辑文案来定义。

@@ -61,22 +61,27 @@ EXTRA_EFFORTS: dict[str, frozenset[str]] = {
     "gpt-5.3-codex": _XHIGH,
     "gpt-5.2": _XHIGH,
 }
+# Antigravity 自己定每个模型能选的思考档位（实测 agy 1.5.19 的 thought_level 选项）：同一个
+# Claude 模型在它这里只到 high，所以不查上面那张表。它没有 max，驱动把 max 当 xhigh 传。
+ANTIGRAVITY_EXTRA_EFFORTS: dict[str, frozenset[str]] = {
+    "gemini-4-neon": _XHIGH,
+    "gemini-4-hydrogen": _XHIGH,
+}
 # 快照日期后缀：claude-haiku-4-5-20251001、gpt-5.2-2025-12-11。
 _SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
 
 
 def backend_of(model: str, provider: str | None = None) -> Backend:
-    """按 provider 或模型名前缀判断后端：codex/、opencode/ 开头各走自己的后端，其余走 claude。"""
-    if provider == "codex":
-        return "codex"
-    if provider == "opencode":
-        return "opencode"
-    if provider == "claude":
-        return "claude"
+    """按 provider 或模型名前缀判断后端：codex/、opencode/、antigravity/ 开头各走自己的后端，
+    其余走 claude。"""
+    if provider in ("codex", "opencode", "antigravity", "claude"):
+        return provider  # type: ignore[return-value]
     if model.startswith("codex/"):
         return "codex"
     if model.startswith("opencode/"):
         return "opencode"
+    if model.startswith("antigravity/"):
+        return "antigravity"
     return "claude"
 
 
@@ -129,6 +134,8 @@ def known_extra_efforts(model: str) -> frozenset[str]:
     驱动调 CLI 前会去掉最后一个 `/` 之前的部分（`codex/`、`vllm/`），快照日期后缀也一并去掉。
     """
     name = _SNAPSHOT_SUFFIX.sub("", model.rsplit("/", 1)[-1])
+    if model.startswith("antigravity/"):
+        return ANTIGRAVITY_EXTRA_EFFORTS.get(name, _NONE)
     return EXTRA_EFFORTS.get(name, _NONE)
 
 

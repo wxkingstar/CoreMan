@@ -136,9 +136,23 @@ To show an image file from your working directory, put `![short caption](relativ
 on its own line; it is replaced by the image itself. Never paste bare image file paths."""
 
 
+# antigravity 驱动同样只带回正文里链接的本地图片；生图工具把图片存在会话自己的目录里，
+# 按工具给出的绝对路径链接即可，见 relay-antigravity/images.go。
+GENERATED_LINKED_IMAGES_PROMPT = """# Images in Your Reply
+
+To show an image file, put `![short caption](path.png)` on its own line; it is replaced by \
+the image itself. Use a path relative to your working directory, or for an image you created \
+with the image generation tool the absolute path the tool reported. Never paste bare image \
+file paths and never say you cannot deliver an image."""
+
+
 def with_reply_images(extra: str, platform: str, backend: str) -> str:
-    """飞书机器人走 codex / opencode 时，把回复图片的说明段接在附加能力后面。"""
-    prompt = {"codex": REPLY_IMAGES_PROMPT, "opencode": LINKED_IMAGES_PROMPT}.get(backend)
+    """飞书机器人走 codex / opencode / antigravity 时，把回复图片的说明段接在附加能力后面。"""
+    prompt = {
+        "codex": REPLY_IMAGES_PROMPT,
+        "opencode": LINKED_IMAGES_PROMPT,
+        "antigravity": GENERATED_LINKED_IMAGES_PROMPT,
+    }.get(backend)
     if platform != "feishu" or prompt is None:
         return extra
     return f"{extra}\n\n{prompt}" if extra.strip() else prompt

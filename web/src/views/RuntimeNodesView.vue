@@ -403,26 +403,31 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 </div>
               </template>
             </el-table-column>
-            <template
+            <!-- 每个运行时一列：状态、版本、登录账号、额度自上而下排；没采到额度的（如 OpenCode）不占位置。 -->
+            <el-table-column
               v-for="provider in BACKENDS"
               :key="provider"
+              min-width="168"
             >
-              <el-table-column min-width="130">
-                <template #header>
-                  <ProviderBadge :provider="provider" />
-                </template>
-                <template #default="{ row }: { row: RuntimeNode }">
+              <template #header>
+                <ProviderBadge :provider="provider" />
+              </template>
+              <template #default="{ row }: { row: RuntimeNode }">
+                <div class="provider-cell">
                   <span :class="{ 'auth-failed': row.online && authFailed(row, provider) }">{{ capabilityState(row, provider) }}</span><div
                     v-if="row.online && authFailed(row, provider)"
                     class="muted auth-detail"
                     data-test="auth-detail"
                   >
                     {{ row.backends.find(b => b.model_provider === provider)?.health_detail }}
-                  </div><div class="muted">
+                  </div><div
+                    v-if="row.capabilities[provider]?.version"
+                    class="muted"
+                  >
                     {{ shortVersion(row.capabilities[provider]?.version) }}
                   </div><div
                     v-if="row.capabilities[provider]?.account"
-                    class="muted"
+                    class="muted provider-account"
                   >
                     {{ row.capabilities[provider]?.account }}
                   </div><el-tag
@@ -432,28 +437,23 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                     data-test="background-upgrade"
                   >
                     {{ t('runtimeNodes.backgroundUpgrade') }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <!-- OpenCode Go 的额度只在 OpenCode 控制台看得到，CLI 不报，不占一列。 -->
-              <el-table-column
-                v-if="provider !== 'opencode'"
-                :label="t('runtimeNodes.quotaOf', { name: t(`bots.backend.${provider}`) })"
-                min-width="160"
-              >
-                <template #default="{ row }: { row: RuntimeNode }">
-                  <QuotaBar
-                    v-for="w in quotaWindows(row, provider)"
-                    :key="w.label"
-                    :label="w.label"
-                    :pct="w.pct"
-                    :resets-at="w.resetsAt"
-                    :state="w.state"
-                    :observed-at="w.observedAt"
-                  />
-                </template>
-              </el-table-column>
-            </template>
+                  </el-tag><div
+                    v-if="quotaWindows(row, provider).length"
+                    class="provider-quota"
+                  >
+                    <QuotaBar
+                      v-for="w in quotaWindows(row, provider)"
+                      :key="w.label"
+                      :label="w.label"
+                      :pct="w.pct"
+                      :resets-at="w.resetsAt"
+                      :state="w.state"
+                      :observed-at="w.observedAt"
+                    />
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column
               :label="t('runtimeNodes.team')"
               min-width="110"
@@ -878,6 +878,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .muted, small { color: var(--el-text-color-secondary); font-size: 12px; }
 .auth-failed { color: var(--el-color-danger); }
 .auth-detail { max-width: 220px; overflow-wrap: anywhere; }
+.provider-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.provider-account { max-width: 100%; overflow-wrap: anywhere; }
+.provider-quota { width: 100%; margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--el-border-color-lighter); }
 .field-hint { width: 100%; margin: 6px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; }
 .row-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; white-space: nowrap; }

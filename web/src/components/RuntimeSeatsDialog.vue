@@ -14,7 +14,8 @@ const props = defineProps<{ node: RuntimeNode; visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [boolean]; changed: [] }>()
 const { t } = useI18n()
 
-const PROVIDERS = BACKENDS
+/** Antigravity 只有默认席位，在运行时所在机器上用 agy 登录，这里不列。 */
+const PROVIDERS = BACKENDS.filter(p => p !== 'antigravity')
 const seats = reactive<Record<string, SeatState[]>>({})
 const labels = reactive<Record<string, string>>(Object.fromEntries(BACKENDS.map(p => [p, ''])))
 const busy = ref('')

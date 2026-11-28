@@ -37,10 +37,11 @@ it('shows one runtime with separate Claude/Codex login states', async () => {
   expect(wrapper.text()).toContain('AI Server')
   expect(wrapper.text()).toContain('Claude Code')
   expect(wrapper.text()).toContain('Codex / GPT')
-  // OpenCode 单独一列；它的额度 CLI 不报，没有额度列。
-  expect(wrapper.text()).toContain('OpenCode')
+  // 四个运行时各占一列，顺序固定；额度并在各自的列里，不再单独成列。
+  const heads = wrapper.findAll('th').map(th => th.text())
+  expect(heads.filter(h => ['Claude Code', 'Antigravity', 'Codex / GPT', 'OpenCode'].includes(h))).toEqual(['Claude Code', 'Antigravity', 'Codex / GPT', 'OpenCode'])
+  expect(heads.some(h => h.includes('额度'))).toBe(false)
   expect(wrapper.text()).toContain('opencode-go')
-  expect(wrapper.text()).not.toContain('OpenCode 额度')
   expect(wrapper.text()).toContain('已登录')
   expect(wrapper.text()).toContain('待登录')
   expect(wrapper.text()).toContain('ops@example.com')

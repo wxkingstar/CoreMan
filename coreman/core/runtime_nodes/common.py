@@ -9,10 +9,11 @@ from typing import Literal
 
 from cryptography import x509
 
-Backend = Literal["claude", "codex", "opencode"]
-# 节点上的 AI 后端（CLI）。provider 与 CLI 命令同名，驱动在 drivers/cmd/relay-<provider>。
+Backend = Literal["claude", "codex", "opencode", "antigravity"]
+# 节点上的 AI 后端（CLI）。provider 与 CLI 命令同名（Antigravity 的命令是 agy），驱动在
+# drivers/cmd/relay-<provider>。
 # 放在这个不依赖其它模块的文件里：transport 也要用，从 relay 导入会循环导入。
-BACKENDS: tuple[Backend, ...] = ("claude", "codex", "opencode")
+BACKENDS: tuple[Backend, ...] = ("claude", "codex", "opencode", "antigravity")
 
 MAX_CA_PEM_BYTES = 64 * 1024
 _PEM_BLOCK = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----", re.S)

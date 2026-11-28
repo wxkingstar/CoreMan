@@ -373,6 +373,8 @@ onMounted(async () => { await load(); if (manager.value) await loadPrices() })
               Codex
             </el-radio><el-radio value="opencode">
               OpenCode
+            </el-radio><el-radio value="antigravity">
+              Antigravity
             </el-radio>
           </el-radio-group>
         </el-form-item><el-form-item :label="t('statistics.model')">

@@ -221,6 +221,8 @@ class HeartbeatIn(BaseModel):
     codex: Capability
     # 协议 2 的节点从支持 OpenCode 的版本起上报；旧节点缺省为未安装。
     opencode: Capability = Field(default_factory=Capability)
+    # 同上，从支持 Antigravity 的版本起上报。
+    antigravity: Capability = Field(default_factory=Capability)
     version: str = Field(max_length=100)
     service_status: Literal[
         "systemd-user", "systemd-user-session", "systemd", "launchd", "supervised", "foreground"

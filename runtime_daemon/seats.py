@@ -35,7 +35,18 @@ from .agent import OperationError
 DEFAULT = "default"
 SEAT_ID = re.compile(r"(?:default|[a-f0-9]{12})")
 SEAT_HOME_ENV = "OPENCODE_SEAT_HOME"
-ENV_KEY = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "opencode": SEAT_HOME_ENV}
+# Antigravity 的凭据不跟配置目录走（实测 macOS 上换 --gemini-dir 仍是原账号），只有默认席位；
+# 这个变量只为让各处按后端取键时有值，CLI 不读它。
+ANTIGRAVITY_SEAT_ENV = "COREMAN_ANTIGRAVITY_SEAT"
+ANTIGRAVITY_SEATS = (
+    "Antigravity 暂不支持多席位和在管理台登录，请在运行时所在机器上执行 agy 完成登录"
+)
+ENV_KEY = {
+    "claude": "CLAUDE_CONFIG_DIR",
+    "codex": "CODEX_HOME",
+    "opencode": SEAT_HOME_ENV,
+    "antigravity": ANTIGRAVITY_SEAT_ENV,
+}
 # 指回默认席位的条目：（名字，是否目录）。目录先在默认席位建好，免得 CLI 在新席位里另建一份。
 SHARED = {
     "claude": (
@@ -58,6 +69,7 @@ SHARED = {
     ),
     # 会话库经 OPENCODE_DB 共用，席位目录里只有各自的凭据（auth.json、mcp-auth.json）。
     "opencode": (),
+    "antigravity": (),
 }
 # OpenCode Go 的 API Key 在控制台生成；管理员贴回来写进席位的 auth.json。
 OPENCODE_KEYS_URL = "https://opencode.ai/auth"
@@ -135,6 +147,8 @@ class Seats:
             return Path(base)
         if provider == "opencode":
             return opencode_data_home({**os.environ, "HOME": str(self.home)})
+        if provider == "antigravity":
+            return self.home / ".gemini"
         return self.home / (".claude" if provider == "claude" else ".codex")
 
     def directory(self, provider: str, seat_id: str) -> Path | None:
@@ -194,6 +208,8 @@ class Seats:
             link.symlink_to(target)
 
     def create(self, provider: str, label: object) -> str:
+        if provider == "antigravity":
+            raise OperationError(ANTIGRAVITY_SEATS)
         name = clean_label(label)
         with self.lock:
             items = self.state(provider)["items"]
@@ -376,6 +392,8 @@ class SeatLogins:
         return {"success": True, "message": "登录完成"}
 
     def start(self, provider: str, seat_id: str, env: dict[str, str], cwd: Path) -> dict:
+        if provider == "antigravity":
+            raise OperationError(ANTIGRAVITY_SEATS)
         if provider == "opencode":
             return self.start_key_login(seat_id, env)
         with self.lock:

@@ -16,7 +16,7 @@ from coreman.admin_cli.client import AdminClient, CliError, one
 NODES = "/api/admin/runtime-nodes"
 RELAYS = "/api/admin/relay-servers"
 BUS = "/api/admin/runtime"
-PROVIDERS = ("claude", "codex", "opencode")
+PROVIDERS = ("claude", "codex", "opencode", "antigravity")
 VISIBILITY = ("all", "admins", "private")
 VISIBILITY_TEXT = {"all": "所有人", "admins": "仅管理员", "private": "仅所有者"}
 NODE_OPTIONS = {
@@ -39,7 +39,9 @@ def node_arg(p: argparse.ArgumentParser) -> None:
 
 def backend_args(p: argparse.ArgumentParser) -> None:
     node_arg(p)
-    p.add_argument("provider", metavar="AI", choices=PROVIDERS, help="claude、codex 或 opencode")
+    p.add_argument(
+        "provider", metavar="AI", choices=PROVIDERS, help="claude、codex、opencode 或 antigravity"
+    )
 
 
 def seat_args(p: argparse.ArgumentParser) -> None:

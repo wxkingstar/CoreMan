@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from .antigravity import antigravity_limits, antigravity_usage
 from .workspace import CHUNK as WORKSPACE_CHUNK
 from .workspace import cached_digest, digest, repair_skills_link
 
@@ -374,9 +375,9 @@ class Agent:
     def session_areas(self, working_dir: str) -> dict[str, Path]:
         if self.provider == "codex":
             areas = {"codex": self.codex_sessions_dir()}
-        elif self.provider == "opencode":
+        elif self.provider in ("opencode", "antigravity"):
             # OpenCode 的会话在它的数据库里：导出成驱动会话目录里的文件随之搬走
-            # （见 opencode_export）。
+            # （见 opencode_export）。Antigravity 的会话不随换机迁移，目标机用文本续接。
             areas = {}
         else:
             areas = {"project": self.claude_project_dir(working_dir)}
@@ -499,6 +500,8 @@ class Agent:
                 if rollout is None:
                     continue
                 candidates = [("codex", rollout)]
+            elif self.provider == "antigravity":
+                continue
             elif self.provider == "opencode":
                 if not self.opencode_export(sid):
                     continue
@@ -998,7 +1001,9 @@ class Agent:
         raise OperationError("当前环境不支持 Claude 额度采集")
 
     def probe_rate_limits(self) -> None:
-        read_limits = self.codex_limits if self.provider == "codex" else self.claude_limits
+        read_limits = {"codex": self.codex_limits, "antigravity": self.antigravity_limits}.get(
+            self.provider, self.claude_limits
+        )
         self._probe_rate_limits({}, read_limits)
 
     def _probe_rate_limits(
@@ -1034,7 +1039,7 @@ class Agent:
             return
         if not isinstance(limits, dict):
             raise OperationError("额度数据格式不正确")
-        if self.provider == "codex":
+        if self.provider in ("codex", "antigravity"):
             publish({**limits, "source": "probe"})
             return
         cursor = (generation, limits.get("observed_at"))
@@ -1056,6 +1061,15 @@ class Agent:
         """空闲兜底检查顺带读取额度；调度器用真实会话观测时间决定是否跳过。"""
         self.health_check()
         self.probe_rate_limits()
+
+    def antigravity_limits(self) -> dict:
+        login, data = antigravity_usage(max_age=60)
+        if login != "ready":
+            raise OperationError("Antigravity 未返回额度数据")
+        limits = antigravity_limits(data)
+        if not limits:
+            return {"read_status": "no_data"}
+        return limits
 
     def codex_limits(self, env: dict[str, str] | None = None) -> dict:
         proc = subprocess.Popen(
@@ -1284,7 +1298,7 @@ class Agent:
             while not self.stop.is_set():
                 now = time.monotonic()
                 # Claude 的额度由 check_claude 随健康检查上报。
-                if self.provider == "codex" and now - last_quota >= 3600:
+                if self.provider in ("codex", "antigravity") and now - last_quota >= 3600:
                     self.start_background("probe-rate-limits", self.probe_rate_limits)
                     last_quota = now
                 if (
@@ -1353,7 +1367,8 @@ class Agent:
                 "session_transfer_opencode": 1 if self.provider == "opencode" else 0,
                 # 换机前可探测两台节点是否共用同一个工作目录（共享盘），是就不复制文件。
                 "workspace_probe": 1,
-                "mcp_oauth": 1,
+                # Antigravity 的 MCP 授权只能在 CLI 的交互面板里做，管理台发起不了。
+                "mcp_oauth": 0 if self.provider == "antigravity" else 1,
                 # 记忆放在工作目录的 .coreman-memory/，Claude 与 Codex 共用。
                 "memory_layout": 2,
                 # 同一网络区的节点之间，换机压缩包可由目标节点直接拉取，不经平台中转。

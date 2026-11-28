@@ -141,7 +141,8 @@ async def require_shared_layout(
 ) -> None:
     """旧版运行时只把记忆放在 Claude 的目录里，换到它上面的 Codex / OpenCode 读不到，员工会像失忆
     了一样：有记忆时不让换过去。Claude 目标照旧部署到原位置，不受影响。"""
-    if target.model_provider not in {"codex", "opencode"} or capability.get("memory_layout") == 2:
+    shared_only = {"codex", "opencode", "antigravity"}
+    if target.model_provider not in shared_only or capability.get("memory_layout") == 2:
         return
     kept = await session.scalar(
         select(Memory.id).where(Memory.bot_id == bot.id, Memory.deleted_at.is_(None)).limit(1)

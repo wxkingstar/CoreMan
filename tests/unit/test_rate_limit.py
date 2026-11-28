@@ -75,14 +75,21 @@ def test_pattern_and_helpers() -> None:
     )
     assert is_rate_limited("[opencode error] Go usage limit reached, resets in 2h")
     assert not is_rate_limited("Usage limit reached in the report I wrote")
+    # Antigravity：原话没有实测到，先按 Google 接口的状态名和 quota 字样认。
+    assert is_rate_limited("\n\n[antigravity error] RESOURCE_EXHAUSTED: check quota")
+    assert is_rate_limited("[antigravity error] You have exhausted your weekly quota")
+    assert not is_rate_limited('[antigravity error] model "x" is not available')
+    assert not is_rate_limited("the quota report says RESOURCE_EXHAUSTED")
     assert RATE_LIMIT_PATTERN.pattern == (
         r"You've hit your(?: \w+)? limit · resets|You['’]ve hit your usage limit\b"
         r"|\[opencode error\] .*\b[Uu]sage limit reached\b"
+        r"|\[antigravity error\] .*(?:RESOURCE_EXHAUSTED|\b[Qq]uota\b)"
     )
     assert allowed_providers("claude") == {"claude", "minimax"} and allowed_providers("codex") == {
         "codex"
     }
     assert allowed_providers("opencode") == {"opencode"}
+    assert allowed_providers("antigravity") == {"antigravity"}
     assert allowed_providers("minimax") == {"minimax"}
     assert (
         fmt_pct(None) == "-"

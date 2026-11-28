@@ -25,14 +25,22 @@ from coreman.core.i18n.messages import msg
 # 中段是 Codex 的报错（驱动以 `[codex error] …` 回传）：撇号是弯引号 `’`，后面接 `.` 或
 # `for <模型>`，没有 `· resets`。最后是 OpenCode 的模型服务（驱动以 `[opencode error] …` 回传），
 # 实测免费额度用尽为 `Free usage limit reached.`，OpenCode Go 的套餐额度按同一措辞匹配。
+# Antigravity（驱动以 `[antigravity error] …` 回传）额度用尽的原话没有实测到，先按 Google 接口的
+# 状态名 RESOURCE_EXHAUSTED 和 quota 字样匹配，拿到真实告示后再收紧。
 RATE_LIMIT_PATTERN = re.compile(
     r"You've hit your(?: \w+)? limit · resets|You['’]ve hit your usage limit\b"
     r"|\[opencode error\] .*\b[Uu]sage limit reached\b"
+    r"|\[antigravity error\] .*(?:RESOURCE_EXHAUSTED|\b[Qq]uota\b)"
 )
 WARN_5H_PCT = 90
 WARN_7D_PCT = 95
 # claude 与 minimax 的模型可以互换着跑（同一套 Anthropic 协议），codex、opencode 只能落回自己。
-_PROVIDER_SETS = {"claude": {"claude", "minimax"}, "codex": {"codex"}, "opencode": {"opencode"}}
+_PROVIDER_SETS = {
+    "claude": {"claude", "minimax"},
+    "codex": {"codex"},
+    "opencode": {"opencode"},
+    "antigravity": {"antigravity"},
+}
 # 最近一次实际调用或探测失败的实例不推荐：账号被封停时节点仍报「已登录」，而用不了的实例
 # 7 天使用率恰好最低（停在 0%），不排除就会被当成最空闲的推荐出去。
 _UNHEALTHY = ("down", "auth_fail", "timeout")
