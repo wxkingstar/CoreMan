@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coreman.core.bots import rules_backup
-from coreman.core.db.models import Bot, KnowledgeItem, KnowledgeRun
+from coreman.core.db.models import Bot, BusinessSystem, KnowledgeItem, KnowledgeRun
 from coreman.core.kb import extract, filters, rounds, sources, wiki
 from coreman.core.logging import get_logger
 from coreman.core.relay.agent_client import AgentError
@@ -327,6 +327,18 @@ async def _compile(
                 )
             ).scalars()
         )
+        names = {
+            f"rules:{key}": name
+            for key, name in (await session.execute(select(Bot.bot_key, Bot.name))).all()
+        }
+        names.update(
+            {
+                f"catalog:{key}": name
+                for key, name in (
+                    await session.execute(select(BusinessSystem.key, BusinessSystem.name))
+                ).all()
+            }
+        )
         session.expunge_all()
     if not pending:
         return
@@ -339,7 +351,7 @@ async def _compile(
         output = await _round(
             backend,
             system_prompt=wiki.SYSTEM_PROMPT,
-            content=wiki.content(chunk, today),
+            content=wiki.content(chunk, today, names),
             working_dir=bot.working_dir,
             max_turns=wiki.MAX_TURNS,
             limit_seconds=wiki.TIMEOUT_SECONDS,

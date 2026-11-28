@@ -80,19 +80,23 @@ class Hit:
     rule: str
 
 
-def source_label(item: KnowledgeItem) -> str:
-    """写进来源标记的那部分：任务写编号，其余写来源的种类。"""
+def source_label(item: KnowledgeItem, names: Mapping[str, str]) -> str:
+    """写进来源标记的那部分：任务写编号，其余写来源的种类和名字。
+
+    `names` 把 `rules:<员工标识>`、`catalog:<系统标识>` 换成员工名、系统名；查不到就用标识。
+    """
     if item.source_kind == "task":
         return item.source_ref
     kind, _, rest = item.source_ref.partition(":")
     if kind == "rules":
-        return f"规则文档 {rest.partition('/')[0]}"
+        key = rest.partition("/")[0]
+        return f"规则文档 {names.get(f'rules:{key}', key)}"
     if kind == "catalog":
-        return f"系统目录 {rest}"
+        return f"系统目录 {names.get(item.source_ref, rest)}"
     return "名录"
 
 
-def content(items: Sequence[KnowledgeItem], today: str) -> str:
+def content(items: Sequence[KnowledgeItem], today: str, names: Mapping[str, str]) -> str:
     rows = [
         {
             "id": f"K-{item.id}",
@@ -101,7 +105,7 @@ def content(items: Sequence[KnowledgeItem], today: str) -> str:
             "text": item.text,
             "confidence": item.confidence,
             "date": item.occurred_on.isoformat() if item.occurred_on else today,
-            "source": source_label(item),
+            "source": source_label(item, names),
         }
         for item in items
     ]
