@@ -4,8 +4,9 @@ Two origins may use a personal grant: the owner's verified private chat, and a s
 that the owner created, that runs as the owner and that delivers only to the owner.
 
 A Feishu group whose only human is the owner counts as the private chat for the turn the worker
-checked it in (`core.chat.solo_group`): the worker asks Feishu at the start of every turn and
-marks the task; everything else about the origin is still verified here on every call.
+checked it in (`core.chat.solo_group`): the worker decides at the start of every turn (from
+a per-group cache of up to an hour) and marks the task; everything else about the origin is
+still verified here on every call.
 """
 
 from __future__ import annotations
@@ -228,7 +229,7 @@ async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -
         # 平台来源的任务没有入站事件：卡片回调等直接调到这里的路径一律不放行。
         raise ValueError("feishu_private_chat_required")
     event = await session.get(InboundEvent, task.inbound_event_id)
-    # 单人群：这一轮开头 worker 实时确认过群里只有发话人自己（话题群里按话题分会话）。
+    # 单人群：这一轮开头 worker 确认过群里只有发话人自己（话题群里按话题分会话）。
     solo = event is not None and event.chat_type == "group" and solo_group.marked(task)
     if (
         event is None
@@ -259,7 +260,7 @@ async def verified_origin_scope(session: AsyncSession, task: Task, actor: str) -
     if not speaker.known or str(speaker.user_id) != actor or speaker.user_id is None:
         raise ValueError("personal_actor_mismatch")
     # 回调不带会话类型：按钮点击只有落在本人与本机器人的私聊里（真实私聊消息留下的记录）才算；
-    # 单人群里的点击由这一轮开头的实时判断代替私聊记录。
+    # 单人群里的点击由这一轮开头的判断代替私聊记录。
     if (
         click
         and not solo

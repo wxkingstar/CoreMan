@@ -37,7 +37,7 @@ class Intake:
     session_key: str
     text: str
     message_type: str
-    # 飞书群里真人只有发话人自己（`chat.solo`，每轮实时判断）：安全策略按私聊走，投递仍回这个群。
+    # 飞书群里真人只有发话人自己（`chat.solo`，每轮判断）：安全策略按私聊走，投递仍回这个群。
     solo: bool = False
 
     @property
