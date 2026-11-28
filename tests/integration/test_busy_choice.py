@@ -361,8 +361,20 @@ async def test_messages_queued_during_a_switch_are_not_asked_about_again(
     bot.workspace_state, bot.workspace_operation_id = "migrating", uuid.uuid4()
     await db_session.commit()
     await _say(db_session, bot, "第一条")
-    head = await _say(db_session, bot, "第二条")
-    assert head.payload.get("serialize_session") is True
+    queued_second = await _say(db_session, bot, "第二条")
+    assert queued_second.payload.get("serialize_session") is True
+    # 换好了：任务开始被认领。
+    bot.workspace_state, bot.workspace_operation_id = "ready", None
+    await db_session.commit()
+    await instances.register(
+        db_session, instance_id="worker-test", service="worker", version="dev", capacity=8
+    )
+    head = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    if head is not None and head.id != queued_second.id:
+        await tasks.finish(db_session, head.id, status="succeeded")
+        head = await tasks.claim(db_session, lane="normal", instance_id="worker-test")
+    await db_session.commit()
+    assert head is not None and head.id == queued_second.id
     ctx = build_ctx(db_engine, head)
     long_ago = datetime.now(UTC) - timedelta(hours=1)
     held = await queued_batch.hold_if_stale(
@@ -373,3 +385,7 @@ async def test_messages_queued_during_a_switch_are_not_asked_about_again(
         [queued_batch.Entry(text="第二条", at=long_ago)],
     )
     assert held is False
+    stale = await db_session.scalars(
+        select(OutboxItem).where(OutboxItem.dedupe_key.startswith(f"task:{head.id}:stale_hold"))
+    )
+    assert stale.all() == []
