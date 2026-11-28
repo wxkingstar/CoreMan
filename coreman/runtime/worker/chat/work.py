@@ -18,7 +18,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.bus import tasks
-from coreman.core.chat.dispatch import task_link, work_session_key
+from coreman.core.chat.dispatch import LEAD_NOTE, is_lead, task_link, work_session_key
 from coreman.core.chat.identity import resolve_speaker
 from coreman.core.db.models import (
     Bot,
@@ -321,7 +321,15 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     principal = await session.get(User, principal_of(row)) if principal_of(row) else None
     owner = name_of(principal) if principal else (row.requester_name or "")
     label = f"任务 {row.code}" if row.tracked else "一件事"
-    if row.dispatcher_bot_id and row.source == "dispatch":
+    if is_lead(row):
+        lines = [
+            f"这一轮在做{label}（{row.title}）：发起人{row.requester_name or ''}在群里提的这件事，"
+            "你调度时决定自己牵头。你是在替发起人办事，拆出去的子任务也按发起人的权限做。",
+        ]
+        if row.brief:
+            lines.append(f"你当时写的目标与要求：{row.brief}")
+        lines.append(LEAD_NOTE)
+    elif row.dispatcher_bot_id and row.source == "dispatch":
         dispatcher = await session.get(Bot, row.dispatcher_bot_id)
         who = dispatcher.name if dispatcher else ""
         lines = [

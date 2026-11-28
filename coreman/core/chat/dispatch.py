@@ -42,10 +42,11 @@ BRIEF_LIMIT = 4000
 QUESTION_LIMIT = 100
 REPLY_LIMIT = 300
 RECENT_TASKS = 10
-ACTIONS = ("create", "append", "clarify", "reply", "none")
+ACTIONS = ("create", "lead", "append", "clarify", "reply", "none")
 # 调度员记录在 group_observe_decisions.outcome 里的结果。
 OUTCOMES = {
     "create": "dispatched",
+    "lead": "dispatch_lead",
     "append": "dispatch_append",
     "clarify": "dispatch_clarify",
     "reply": "dispatch_reply",
@@ -68,6 +69,34 @@ def session_key(chat_id: str) -> str:
 def work_session_key(code: str) -> str:
     """执行员工做任务的会话键：每个任务一条，补充和追问续上同一个会话，不和群里的 @ 互相打断。"""
     return f"work:{code}"
+
+
+def is_lead(row: WorkTask) -> bool:
+    """调度员自己牵头的任务：调度员建的，执行人也是它自己。"""
+    return (
+        row.source == "dispatch"
+        and row.dispatcher_bot_id is not None
+        and row.assignee_bot_id == row.dispatcher_bot_id
+    )
+
+
+# 牵头任务的本轮块：调度员在任务会话里按目标拆子任务、等结果、排下一步。
+LEAD_NOTE = (
+    "这件事由你牵头。你仍然不自己查询、不动手改东西：做任务的规则里「能自己做就自己做」"
+    "对你不适用，你的工作是把目标拆开、交给合适的 AI 员工、对照要求看结果、排下一步。\n"
+    "- 先用 find_assignees 找人，再用 create_task 拆子任务。子任务的 brief 是员工之间传递要求的"
+    "唯一载体，要写全：目标、背景、已有的约定和文档位置、需要对方配合的接口或数据、验收标准、"
+    "截止。一位员工交回的结论，下一件子任务要用到的，原文带进 brief，不要只写「见上一个任务」。\n"
+    "- 能并行的一起派，有先后的分批派：派完调用 wait_for 结束这一轮，结果回来再派下一批。\n"
+    "- 结果回来时对照验收标准看证据（产出链接、检查结果、员工的原话）；不达标的写清差在哪，"
+    "再派一件子任务，不要自己补。\n"
+    "- 要人定的事用 ask_human 问具体的人，一次一个决定，给出选项和你的推荐；"
+    "不要把几个问题攒成一段话发到群里。\n"
+    "- 群里的回复只写人需要知道的：到哪一步了、谁在做什么、等谁定什么，三五行以内；"
+    "细节留在任务里。\n"
+    "- 还有子任务或问题没结果时，这一轮结束前调用 wait_for；目标全部达成后用 submit_result 交付，"
+    "report 写完整汇报。"
+)
 
 
 def task_link(code: str, base_url: str) -> str:
@@ -220,6 +249,8 @@ def note(
         lines.append("这个群最近的任务（从新到旧）：")
         for t in tasks:
             who = names.get(t.assignee_bot_id, "未分派") if t.assignee_bot_id else "未分派"
+            if is_lead(t):
+                who = "你牵头"
             lines.append(
                 f"- {t.code}（{t.created_at:%m-%d}，{who}，{t.status}）{t.title}：{t.summary}"
             )
@@ -233,8 +264,13 @@ def note(
         "  track：要不要在群里跟进。一问一答、查个数、说明办法这类当场能答完的，填 false："
         "你不发言，员工直接回复，群里不出任务编号。要多步处理、要等确认或别人配合、"
         "可能做很久、之后还要追问进展的，才填 true。\n"
+        "- lead：这件事是一个目标，要几位员工先后配合、分几步才能做完（例如两个系统对接："
+        "先对齐接口，再各自开发，最后联调），一次分派说不清楚。这时由你牵头：只建一件任务，"
+        "执行人是你自己；之后你在这件任务的会话里拆子任务给员工、等结果、排下一步，做完再汇总。"
+        "能一次分派清楚的用 create，不要牵头。\n"
         "- append：新消息是在补充或追问上面某个任务（例如提到了任务编号，或明显在接着说那件事），"
-        "追加给原来的员工，不新建。\n"
+        "追加给原来的员工，不新建。你牵头的任务也一样：补充、追问，或者在回答它等人定的事，"
+        "都追加给它，会交回你在那件任务的会话里处理。\n"
         "- clarify：需求不清、选错代价高时，问一句。\n"
         + (
             "- reply：不需要安排人时（闲聊、致谢、确认），像同事一样简短回一句，"
@@ -252,6 +288,9 @@ def note(
         '            "summary": "给人看的一句话：要做什么",\n'
         '            "brief": "给执行员工的要求：背景、要做什么、怎么算完成、注意事项",\n'
         '            "related": ["相关的任务编号"]}],\n'
+        ' "lead": {"title": "lead 时填：≤30 字的标题", "summary": "给人看的一句话：目标是什么",\n'
+        '          "brief": "目标、背景、怎么算完成、已知的约束和要先定的事",\n'
+        '          "related": ["相关的任务编号"]},\n'
         ' "task_code": "append 时填已有任务编号", "note": "append 时补充的内容",\n'
         ' "question": "clarify 时问的一句话"'
         + (', "text": "reply 时回的话"' if solo else "")
@@ -310,6 +349,22 @@ def parse(text: str, staff: list[Employee], known_codes: set[str], *, solo: bool
                     "related": [c for c in related if c in known_codes][:5],
                 }
             )
+    elif plan.action == "lead":
+        item = data.get("lead")
+        if not isinstance(item, dict):
+            raise ValueError("bad_lead")
+        title = str(item.get("title") or "").strip()
+        if not title:
+            raise ValueError("missing_title")
+        related = [c for c in item.get("related") or [] if isinstance(c, str)]
+        plan.tasks.append(
+            {
+                "title": title[:TITLE_LIMIT],
+                "summary": str(item.get("summary") or "").strip()[:SUMMARY_LIMIT],
+                "brief": str(item.get("brief") or "").strip()[:BRIEF_LIMIT],
+                "related": [c for c in related if c in known_codes][:5],
+            }
+        )
     elif plan.action == "append":
         plan.task_code = str(data.get("task_code") or "").strip()
         plan.note = str(data.get("note") or "").strip()[:BRIEF_LIMIT]
@@ -405,6 +460,43 @@ async def record(
                 else f"交给 @{by_key[item['assignee']].name} 了：{item['title']}"
                 for row, item in zip(created, plan.tasks, strict=True)
             )
+    elif plan.action == "lead":
+        item = plan.tasks[0]
+        row = WorkTask(
+            title=item["title"],
+            summary=item["summary"],
+            status="waiting" if live else "shadow",
+            waiting_on={"kind": "queue", "human_text": "排队中"} if live else None,
+            platform="feishu",
+            chat_id=chat_id,
+            origin_event_id=event_id,
+            requester_user_id=requester_id,
+            requester_name=requester_name,
+            principal_user_id=requester_id,
+            # 执行人就是调度员自己：它在任务会话里拆子任务、等结果、排下一步。
+            assignee_bot_id=dispatcher.id,
+            dispatcher_bot_id=dispatcher.id,
+            decision_id=decision_id,
+            related_codes=item["related"],
+            brief=item["brief"],
+            tracked=True,
+        )
+        session.add(row)
+        await session.flush()
+        row.root_id = row.id
+        session.add(
+            WorkTaskEvent(
+                work_task_id=row.id,
+                kind="created",
+                human_text=f"{trial}调度员{'自己牵头' if live else '会自己牵头'}",
+                agent_detail=detail,
+                **actor,
+            )
+        )
+        codes.append(row.code)
+        if live:
+            await hand_off(session, row, event_id=event_id, requester_pid=requester_pid)
+            line = f"这件事我来牵头：{item['title']}（{task_link(row.code, base_url)}）"
     elif plan.action == "append":
         target = await session.scalar(
             select(WorkTask).where(WorkTask.code == plan.task_code, WorkTask.chat_id == chat_id)
@@ -431,11 +523,14 @@ async def record(
                 await hand_off(
                     session, target, event_id=event_id, requester_pid=requester_pid, note=plan.note
                 )
-                line = (
-                    f"补充给 @{assignee.name} 了（{task_link(target.code, base_url)}）"
-                    if target.tracked
-                    else f"补充给 @{assignee.name} 了"
-                )
+                if is_lead(target):
+                    line = f"收到，记进 {task_link(target.code, base_url)} 了"
+                else:
+                    line = (
+                        f"补充给 @{assignee.name} 了（{task_link(target.code, base_url)}）"
+                        if target.tracked
+                        else f"补充给 @{assignee.name} 了"
+                    )
     elif plan.action == "clarify" and live:
         line = plan.question
     elif plan.action == "reply" and live:
@@ -462,9 +557,11 @@ async def hand_off(
     bot = await session.get(Bot, row.assignee_bot_id)
     if bot is None:
         return
-    row.status, row.closed_at, row.updated_at = "waiting", None, datetime.now(UTC)
-    row.ask = None
-    row.waiting_on = {"kind": "queue", "human_text": f"排队等{bot.name}开始"}
+    row.closed_at, row.updated_at = None, datetime.now(UTC)
+    # 在等子任务时来了补充：照常排一轮，但任务仍在等子任务，结果回来时平台才交得回去。
+    if not (row.status == "waiting" and (row.waiting_on or {}).get("kind") == "task"):
+        row.status, row.ask = "waiting", None
+        row.waiting_on = {"kind": "queue", "human_text": f"排队等{bot.name}开始"}
     if row.claimed_at is None:
         row.claimed_at = row.updated_at
     await bus.enqueue(
