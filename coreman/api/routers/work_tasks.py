@@ -317,12 +317,16 @@ class CreateIn(BaseModel):
     review_required: bool | None = None
     priority: str = "normal"
     due_at: datetime | None = None
+    # 交给 AI 员工时建好就开工（以建的人的身份）；默认不开，等人叫或定时领取。
+    start: bool = False
 
 
 class AssignIn(BaseModel):
     assignee: AssigneeIn
     note: str = Field(default="", max_length=service.BRIEF_MAX)
     review_required: bool | None = None
+    # 交给 AI 员工时马上开工（以转交的人的身份）。
+    start: bool = False
 
 
 class AnswerIn(BaseModel):
@@ -349,11 +353,17 @@ class WatchIn(BaseModel):
     on: bool = True
 
 
-async def _done(session: AsyncSession, row: WorkTask, user: User) -> dict[str, Any]:
+async def _done(
+    session: AsyncSession, row: WorkTask, user: User, *, start_error: str = ""
+) -> dict[str, Any]:
     await session.flush()
     await session.commit()
     row = await _load(session, row.code)
-    return {"code": 0, "data": await task_view.detail(session, row, user)}
+    data = await task_view.detail(session, row, user)
+    if start_error:
+        # 选了现在开工但没开成：任务照样建好、派好了，页面上提示原因。
+        data["start_error"] = start_error
+    return {"code": 0, "data": data}
 
 
 async def _act(
@@ -363,12 +373,15 @@ async def _act(
     code: str,
     op: Callable[[WorkTask], Awaitable[Any]],
 ) -> dict[str, Any]:
-    """改一个任务：锁行、执行、同步飞书卡片（问题变了收旧发新，完成取消通知相关的人）。"""
+    """改一个任务：锁行、执行、同步飞书卡片（问题变了收旧发新，完成取消通知相关的人）。
+
+    `op` 返回字符串时是「选了现在开工但没开成」的原因，随结果带回页面。
+    """
     _active(user)
     row = await _load(session, code, lock=True)
     before_ask, before_status = row.ask, row.status
     try:
-        await op(row)
+        result = await op(row)
     except WorkTaskError as exc:
         raise _fail(exc) from exc
     await flow.settle(
@@ -379,7 +392,7 @@ async def _act(
         actor_id=user.id,
         base_url=request.app.state.settings.public_base_url,
     )
-    return await _done(session, row, user)
+    return await _done(session, row, user, start_error=result if isinstance(result, str) else "")
 
 
 @router.post("")
@@ -405,6 +418,7 @@ async def create_work_task(
         )
     except WorkTaskError as exc:
         raise _fail(exc) from exc
+    start_error = await execute.start_now(session, row, user) if body.start else ""
     await flow.settle(
         session,
         row,
@@ -413,7 +427,7 @@ async def create_work_task(
         actor_id=user.id,
         base_url=request.app.state.settings.public_base_url,
     )
-    return await _done(session, row, user)
+    return await _done(session, row, user, start_error=start_error)
 
 
 @router.post("/{code}/assign")
@@ -424,20 +438,33 @@ async def assign_work_task(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    return await _act(
-        request,
-        session,
-        user,
-        code,
-        lambda row: service.assign(
+    async def op(row: WorkTask) -> str:
+        await service.assign(
             session,
             row,
             user,
             body.assignee.value(),
             note=body.note,
             review_required=body.review_required,
-        ),
-    )
+        )
+        return await execute.start_now(session, row, user) if body.start else ""
+
+    return await _act(request, session, user, code, op)
+
+
+@router.post("/{code}/start")
+async def start_work_task(
+    code: str,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """在任务页上叫 AI 员工开工或接着做：和在飞书里对它说「做 编号」一样，以点的人的身份做。"""
+
+    async def op(row: WorkTask) -> None:
+        await execute.drive_start(session, row, user)
+
+    return await _act(request, session, user, code, op)
 
 
 @router.post("/{code}/answer")

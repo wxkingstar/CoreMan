@@ -609,6 +609,14 @@ async def test_tasks_hand_to_an_agent_and_resolve_assignee(cli, db_session):
     code, out, _ = await cli("tasks", "list", "--include-shadow", "--as", "alice")
     assert "试运行" in out
 
+    # 叫开工：她没有飞书身份，开不了，原因照实说；带 --start 新建时任务照样建好。
+    code, _, err = await cli("tasks", "start", data["code"], "--as", "alice")
+    assert code == 1 and "没有飞书身份" in err
+    code, out, err = await cli(
+        "tasks", "create", "查库存", "--assignee", "sales_bot", "--start", "--json", "--as", "alice"
+    )
+    assert code == 0 and "没能直接开工" in err and json.loads(out)["needs_drive"] is True
+
     code, out, err = await cli(
         "tasks", "assign", data["code"], "user:sales", "--note", "改人做", "--as", "alice"
     )

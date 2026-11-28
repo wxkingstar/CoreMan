@@ -59,7 +59,8 @@ coreman cron run 日报                              # 立即执行一次
 coreman reminders list                             # 我的提醒与定时任务
 coreman tasks list --view needs_me                  # 待我处理的任务
 coreman tasks show T-12                            # 任务详情、待回答的问题
-coreman tasks create "整理周报" --assignee demo-bot --due 2026-12-01
+coreman tasks create "整理周报" --assignee demo-bot --due 2026-12-01 --start   # --start：建好就开工
+coreman tasks start T-12                           # 叫任务上的 AI 员工开工或接着做
 coreman tasks answer T-12 accept                   # 接受；拒绝、退回要写理由
 coreman tasks complete T-12 "已放进共享表"
 ```

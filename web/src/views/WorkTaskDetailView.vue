@@ -37,6 +37,8 @@ const busy = ref(false)
 const assigning = ref<'any' | 'bot' | null>(null)
 const assignee = ref<AssigneeIn | null>(null)
 const assignNote = ref('')
+// 交给 AI 员工时默认马上开工。
+const assignStart = ref(true)
 const commentText = ref('')
 const allEvents = ref(false)
 const agentOpen = ref<string[]>([])
@@ -134,6 +136,7 @@ async function prompt(title: string, required = true): Promise<string | null> {
 function startAssign(kind: 'any' | 'bot'): void {
   assignee.value = null
   assignNote.value = ''
+  assignStart.value = true
   assigning.value = kind
 }
 
@@ -141,8 +144,17 @@ async function submitAssign(): Promise<void> {
   const d = detail.value
   if (!d || !assignee.value) return
   const target = assignee.value
-  await act(() => workTasks.assign(d.code, { assignee: target, note: assignNote.value.trim() }))
+  const start = target.type === 'bot' && assignStart.value
+  await act(() => workTasks.assign(d.code, { assignee: target, note: assignNote.value.trim(), start }))
+  if (detail.value?.start_error) {
+    ElMessage.warning({ message: t('workTasks.startFailed', { reason: detail.value.start_error }), duration: 8000 })
+  }
   assigning.value = null
+}
+/** 叫 AI 员工开工或接着做：和在飞书里对它说「做 编号」一样，以点的人的身份做。 */
+async function startTask(): Promise<void> {
+  const d = detail.value
+  if (d) await act(() => workTasks.start(d.code), t('workTasks.started'))
 }
 
 async function complete(): Promise<void> {
@@ -336,12 +348,16 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
                 :autosize="{ minRows: 2, maxRows: 8 }"
                 :placeholder="t('workTasks.handoffNote')"
               />
-              <p
-                v-if="assignee?.type === 'bot'"
-                class="muted"
-              >
-                {{ t('workTasks.manualStartHint') }}
-              </p>
+              <template v-if="assignee?.type === 'bot'">
+                <el-switch
+                  v-model="assignStart"
+                  :active-text="t('workTasks.startNow')"
+                  data-test="assign-start"
+                />
+                <p class="muted">
+                  {{ assignStart ? t('workTasks.startNowHint') : t('workTasks.manualStartHint') }}
+                </p>
+              </template>
               <div class="assign-actions">
                 <el-button
                   size="small"
@@ -383,6 +399,7 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
         <WorkTaskOverview
           :detail="detail"
           @answered="answered"
+          @start="startTask"
         />
       </section>
       <div

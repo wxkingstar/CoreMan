@@ -12,14 +12,14 @@ const emit = defineEmits<{ 'update:modelValue': [value: boolean]; created: [deta
 const { t } = useI18n()
 const form = reactive({
   title: '', summary: '', brief: '', priority: 'normal', due_at: null as string | null,
-  review_required: true,
+  review_required: true, start: true,
 })
 const assignee = ref<AssigneeIn | null>(null)
 const busy = ref(false)
 const toBot = computed(() => assignee.value?.type === 'bot')
 
 function reset(): void {
-  Object.assign(form, { title: '', summary: '', brief: '', priority: 'normal', due_at: null, review_required: true })
+  Object.assign(form, { title: '', summary: '', brief: '', priority: 'normal', due_at: null, review_required: true, start: true })
   assignee.value = null
 }
 
@@ -35,7 +35,10 @@ async function submit(): Promise<void> {
       due_at: form.due_at,
       // 交给 AI 员工的默认要验收；交给同事的默认不验收。
       review_required: toBot.value ? form.review_required : null,
+      // 交给 AI 员工默认建好就开工；没开成时任务照样建好，告诉人原因。
+      start: toBot.value && form.start,
     })
+    if (detail.start_error) ElMessage.warning({ message: t('workTasks.startFailed', { reason: detail.start_error }), duration: 8000 })
     emit('created', detail)
     emit('update:modelValue', false)
     reset()
@@ -79,13 +82,19 @@ async function submit(): Promise<void> {
       <el-form-item :label="t('workTasks.assignee')">
         <AssigneePicker v-model="assignee" />
       </el-form-item>
-      <el-alert
+      <div
         v-if="toBot"
-        type="info"
-        :closable="false"
-        :title="t('workTasks.manualStartHint')"
-        class="create-hint"
-      />
+        class="create-start"
+      >
+        <el-switch
+          v-model="form.start"
+          :active-text="t('workTasks.startNow')"
+          data-test="create-start"
+        />
+        <p class="create-hint">
+          {{ form.start ? t('workTasks.startNowHint') : t('workTasks.manualStartHint') }}
+        </p>
+      </div>
       <el-form-item :label="t('workTasks.briefInput')">
         <el-input
           v-model="form.brief"
@@ -143,5 +152,6 @@ async function submit(): Promise<void> {
 
 <style scoped>
 .create-row { display: flex; flex-wrap: wrap; gap: 16px; }
-.create-hint { margin-bottom: 12px; }
+.create-start { margin: -6px 0 14px; }
+.create-hint { margin: 2px 0 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
 </style>

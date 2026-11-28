@@ -17,7 +17,7 @@ import type { WorkTaskDetail, WorkTaskStep } from '@/api/workTasks'
 import { formatClock } from '@/utils/format'
 
 const props = defineProps<{ detail: WorkTaskDetail }>()
-const emit = defineEmits<{ answered: [code: string, detail: WorkTaskDetail] }>()
+const emit = defineEmits<{ answered: [code: string, detail: WorkTaskDetail]; start: [] }>()
 const { t } = useI18n()
 const router = useRouter()
 
@@ -154,14 +154,27 @@ async function copyDrive(): Promise<void> {
         v-if="running"
         class="sub"
       >{{ started(running) }}，{{ elapsed(running) }}</span>
-      <el-button
+      <span
         v-if="detail.needs_drive"
-        size="small"
-        data-test="copy-drive"
-        @click="copyDrive"
+        class="drive-actions"
       >
-        {{ t('workTasks.copyDrive') }}
-      </el-button>
+        <el-button
+          type="primary"
+          size="small"
+          data-test="start-task"
+          @click="emit('start')"
+        >
+          {{ detail.status === 'waiting' ? t('workTasks.resume') : t('workTasks.start') }}
+        </el-button>
+        <el-button
+          link
+          size="small"
+          data-test="copy-drive"
+          @click="copyDrive"
+        >
+          {{ t('workTasks.copyDrive') }}
+        </el-button>
+      </span>
     </div>
 
     <div
@@ -434,6 +447,7 @@ async function copyDrive(): Promise<void> {
 .now:not(.lead) { padding: 8px 12px; border-radius: 8px; background: var(--el-fill-color-light); }
 .now.lead .sub { display: inline; margin: 0; }
 .now.drive { border-left-color: var(--el-color-warning); }
+.drive-actions { display: inline-flex; align-items: center; gap: 4px; font-weight: 400; }
 .now.drive:not(.lead) { background: var(--el-color-warning-light-9); }
 
 .label {
