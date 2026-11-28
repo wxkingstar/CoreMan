@@ -47,6 +47,9 @@ POLL_SECONDS = 1.0
 RUN_LOST = timedelta(minutes=2)
 RESULT_MAX = 4000
 BUDGET_WINDOW = timedelta(hours=1)
+# As a task of the MCP Tasks extension: kept as long as the staged write, polled this often.
+TASK_TTL_MS = int(confirm.KEEP.total_seconds() * 1000)
+TASK_POLL_MS = 3000
 
 DESCRIPTION = (
     "Call an operation of a system marked as platform-proxied (call_mode proxy), as you, the "
@@ -350,6 +353,27 @@ def _outcome(state: InteractionState, now: datetime) -> dict[str, Any] | None:
     return None
 
 
+def _owned(ctx_user: str, ctx_grant: str, state: InteractionState | None) -> bool:
+    """The staged write belongs to this member and was staged under this OAuth grant."""
+    return (
+        state is not None
+        and state.kind == KIND
+        and state.state.get("user_id") == ctx_user
+        and state.state.get("grant_id") == ctx_grant
+    )
+
+
+def _waiting(running: bool, route: str) -> str:
+    if running:
+        return "已批准，正在执行，稍后再查。"
+    if route == "tower":
+        return (
+            "用户还没在 Tower 审批。提醒用户去 Tower 处理（一段时间没处理会改发飞书确认"
+            "卡），然后再调用一次。"
+        )
+    return "用户还没在飞书卡片上确认。提醒用户去确认，然后再调用一次。"
+
+
 async def result(ctx: Context, args: Result) -> dict[str, Any]:
     """`systems_call_result`: waits briefly for the click, then reports."""
     try:
@@ -367,12 +391,7 @@ async def result(ctx: Context, args: Result) -> dict[str, Any]:
             if state_id
             else None
         )
-        if (
-            state is None
-            or state.kind != KIND
-            or state.state.get("user_id") != user_id
-            or state.state.get("grant_id") != grant_id
-        ):
+        if state is None or not _owned(user_id, grant_id, state):
             return {
                 "error": "confirmation_not_found",
                 "message": "没有这个待确认的写操作（编号不对，或已经清理）。",
@@ -389,14 +408,38 @@ async def result(ctx: Context, args: Result) -> dict[str, Any]:
                 "confirmation_id": str(state_id),
                 "via": route,
                 "status": "pending",
-                "message": "已批准，正在执行，稍后再查。"
-                if running
-                else "用户还没在 Tower 审批。提醒用户去 Tower 处理（一段时间没处理会改发飞书确认"
-                "卡），然后再调用一次。"
-                if route == "tower"
-                else "用户还没在飞书卡片上确认。提醒用户去确认，然后再调用一次。",
+                "message": _waiting(running, route),
             }
         await asyncio.sleep(POLL_SECONDS)
+
+
+async def task(ctx: Context, task_id: str) -> dict[str, Any] | None:
+    """A staged write as a task of the MCP Tasks extension, for clients that poll `tasks/get`
+    instead of calling `systems_call_result`: the task ID is the confirmation ID. One look, no
+    waiting. `outcome` is set once the write is settled; None when there is no such write."""
+    try:
+        state_id = uuid.UUID(task_id)
+    except ValueError:
+        return None
+    state = await ctx.session.get(InteractionState, state_id, populate_existing=True)
+    if state is None or not _owned(str(ctx.member.user.id), str(ctx.member.oauth_grant_id), state):
+        return None
+    now = utcnow()
+    outcome = _outcome(state, now)
+    route = via(state)
+    view: dict[str, Any] = {
+        "taskId": str(state_id),
+        "status": "working" if outcome is None else "completed",
+        "createdAt": aware_utc(state.created_at).isoformat(),
+        "lastUpdatedAt": aware_utc(state.updated_at).isoformat(),
+        "ttlMs": TASK_TTL_MS,
+        "pollIntervalMs": TASK_POLL_MS,
+    }
+    if outcome is None:
+        view["statusMessage"] = _waiting(state.status == "submitted", route)
+    else:
+        view["outcome"] = {"confirmation_id": str(state_id), "via": route, **outcome}
+    return view
 
 
 def brief(value: dict[str, Any]) -> str:

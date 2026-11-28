@@ -68,12 +68,13 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     except (ValueError, KeyError, TypeError):
         raise ApiError(403, 403, "Private authorization changed") from None
     current = service.usable(row) and row is not None and row.context_epoch == capability.epoch
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY), request.headers)
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
-    if method == "initialize":
-        return mcp_rpc.initialize(rid, params, "coreman-wecom-personal")
+    hello = mcp_rpc.hello(rid, method, params, "coreman-wecom-personal")
+    if hello is not None:
+        return hello
     result: dict[str, Any]
     if method in ("ping", "tools/list"):
         if params:

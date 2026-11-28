@@ -77,12 +77,13 @@ async def mcp(request: Request, session: AsyncSession = Depends(get_session)) ->
     assistant = is_assistant(scope.bot)
     # 个人助理这一轮能用哪几组自有工具，由任务类型决定（子任务只有 knowledge 与 subtask）。
     groups = assistant_tools.groups_for(scope.task.kind) if assistant else ()
-    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY))
+    parsed = mcp_rpc.parse(await mcp_rpc.read_body(request, MAX_BODY), request.headers)
     if isinstance(parsed, Response):
         return parsed
     rid, method, params = parsed
-    if method == "initialize":
-        return mcp_rpc.initialize(rid, params, "coreman-feishu-personal")
+    hello = mcp_rpc.hello(rid, method, params, "coreman-feishu-personal")
+    if hello is not None:
+        return hello
     result: dict[str, Any]
     if method in ("ping", "tools/list"):
         if params:

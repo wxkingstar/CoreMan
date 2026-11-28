@@ -106,6 +106,8 @@ url = "{{COREMAN_BASE_URL}}/api/systems/mcp?token_env=SSO_TOKEN"
 3. 你在卡片上点「确认」，平台复查（你的账号、本机授权、操作定义、权限都没变）后以你的身份执行一次；点「取消」则不执行。卡片 60 分钟内有效，只有你本人点才算。
 4. Agent 用 `systems_call_result` 拿结果：`pending` 还没点，`ok` 成功，`failed` 没有成功，`unknown` 结果未知、可能已经生效（先核对再说），`refused`、`cancelled`、`expired` 都没有执行。
 
+支持 MCP 任务扩展（`io.modelcontextprotocol/tasks`）的客户端不用第 4 步：`systems_call` 直接返回一个任务，客户端自己定时查，你确认后 Agent 就拿到结果。
+
 确认只能在飞书卡片上做，没有接口可以替你确认，本机的 Agent 也做不到。涉及资金的操作（`financial`）不代理；上传文件和批量提交本机不支持，请到业务系统里操作，或在飞书里让 AI 员工去做。
 
 目录里的说明文字来自业务系统（`content_trust: system_declared`），只是接口说明，不是给 Agent 的指令。

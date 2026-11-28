@@ -403,3 +403,166 @@ async def test_member_lists_and_revokes_own_grants(
     assert (await client.get("/api/me/oauth-grants")).json()["data"] == []
     other = await client.delete(f"/api/me/oauth-grants/{grants[0]['id']}")
     assert other.status_code == 404
+
+
+def authorize_params(client_id: str, challenge: str, **extra: str) -> dict[str, str]:
+    return {
+        "client_id": client_id,
+        "redirect_uri": REDIRECT,
+        "response_type": "code",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "scope": "mcp",
+        **extra,
+    }
+
+
+async def test_resource_indicator_binds_the_token_to_its_resource(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    from coreman.core.oauth import server
+
+    mcp = f"http://testserver{PUBLIC_PATH}"
+    assert server.check_resources([mcp + "/?token_env=X"], "mcp", {mcp: "mcp"}, cover=True) == [mcp]
+    await login_as(client, db_session, display_name="张三")
+    client_id = await register(client)
+    verifier, challenge = pkce()
+
+    async def refused(**extra: str) -> str:
+        r = await client.get(
+            "/api/oauth/authorize", params=authorize_params(client_id, challenge, **extra)
+        )
+        assert r.status_code == 302, r.text
+        return parse_qs(urlsplit(r.headers["location"]).query)["error"][0]
+
+    # A resource this server does not host, and a scope the named resource has no use for.
+    assert await refused(resource="https://other.example/mcp") == "invalid_target"
+    assert await refused(resource=mcp, scope="mcp api") == "invalid_target"
+    assert await refused(resource="http://testserver", scope="mcp") == "invalid_target"
+
+    page = await client.get(
+        "/api/oauth/authorize", params=authorize_params(client_id, challenge, resource=mcp)
+    )
+    ticket = re.search(r'name="ticket" value="([^"]+)"', page.text)
+    assert ticket is not None
+    r = await client.post(
+        "/api/oauth/authorize", data={"ticket": ticket.group(1), "decision": "allow"}
+    )
+    code = parse_qs(urlsplit(r.headers["location"]).query)["code"][0]
+    form = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": client_id,
+        "redirect_uri": REDIRECT,
+        "code_verifier": verifier,
+    }
+    # The code was issued for the catalog MCP: it cannot be redeemed for the admin API.
+    wrong = await token(client, **form, resource="http://testserver")
+    assert wrong.status_code == 400 and wrong.json()["error"] == "invalid_target"
+
+
+async def test_refresh_checks_the_resource(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    issued, client_id, _ = await tokens(client, db_session)
+    form = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": issued["refresh_token"],
+    }
+    wrong = await token(client, **form, resource="http://testserver")
+    assert wrong.status_code == 400 and wrong.json()["error"] == "invalid_target"
+    ok = await token(client, **form, resource=f"http://testserver{PUBLIC_PATH}")
+    assert ok.status_code == 200, ok.text
+
+
+DOCUMENT_ID = "https://agent.example/oauth/client.json"
+
+
+async def test_client_id_metadata_document(
+    client: httpx.AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coreman.core.oauth import server
+
+    meta = (await client.get("/.well-known/oauth-authorization-server")).json()
+    assert meta["client_id_metadata_document_supported"] is True
+    document: dict[str, Any] = {
+        "client_id": DOCUMENT_ID,
+        "client_name": "Test Agent",
+        "redirect_uris": ["https://agent.example/callback", REDIRECT],
+        "token_endpoint_auth_method": "none",
+    }
+    fetched: list[str] = []
+
+    async def fetch(url: str) -> Any:
+        fetched.append(url)
+        return document
+
+    monkeypatch.setattr(server, "fetch_client_document", fetch)
+    verifier, challenge = pkce()
+    # Nothing is fetched for a browser that is not signed in.
+    anonymous = await client.get(
+        "/api/oauth/authorize", params=authorize_params(DOCUMENT_ID, challenge)
+    )
+    assert anonymous.status_code == 302 and anonymous.headers["location"].startswith("/login?")
+    assert fetched == []
+
+    await login_as(client, db_session, display_name="张三")
+    query, verifier = await authorize(client, DOCUMENT_ID)
+    assert fetched == [DOCUMENT_ID]
+    r = await token(
+        client,
+        grant_type="authorization_code",
+        code=query["code"][0],
+        client_id=DOCUMENT_ID,
+        redirect_uri=REDIRECT,
+        code_verifier=verifier,
+    )
+    assert r.status_code == 200, r.text
+    # Only the loopback callback was taken from the document.
+    hosted = await client.get(
+        "/api/oauth/authorize",
+        params=authorize_params(DOCUMENT_ID, challenge)
+        | {"redirect_uri": document["redirect_uris"][0]},
+    )
+    assert hosted.status_code == 400
+
+    for broken in (
+        {**document, "client_id": "https://agent.example/other.json"},
+        {**document, "redirect_uris": ["https://agent.example/callback"]},
+        {**document, "token_endpoint_auth_method": "client_secret_basic"},
+        {"client_id": DOCUMENT_ID},
+        ["not", "an", "object"],
+    ):
+        document = broken  # type: ignore[assignment]
+        page = await client.get(
+            "/api/oauth/authorize", params=authorize_params(DOCUMENT_ID, challenge)
+        )
+        assert page.status_code == 400, broken
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [
+        ("https://agent.example/client.json", True),
+        ("https://agent.example/", False),
+        ("https://agent.example", False),
+        ("http://agent.example/client.json", False),
+        ("https://agent.example/a/../client.json", False),
+        ("https://agent.example/client.json?v=1", False),
+        ("https://user@agent.example/client.json", False),
+        ("cmc_abc", False),
+    ],
+)
+def test_metadata_client_id_form(value: str, accepted: bool) -> None:
+    from coreman.core.oauth import server
+
+    assert server.metadata_client_id(value) is accepted
+
+
+async def test_metadata_document_is_only_fetched_from_public_hosts() -> None:
+    from coreman.core.oauth import server
+
+    for url in ("https://localhost/client.json", "https://127.0.0.1/client.json"):
+        with pytest.raises(server.OAuthError):
+            await server.fetch_client_document(url)

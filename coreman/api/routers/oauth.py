@@ -41,6 +41,12 @@ def resource_metadata_url(request: Request, path: str = MCP_PATH) -> str:
     return f"{base_url(request)}/.well-known/oauth-protected-resource{path}"
 
 
+def resources(request: Request) -> dict[str, str]:
+    """这台服务器上的受保护资源 → 用得上它的 scope（RFC 8707 的 `resource` 只认这些）。"""
+    base = base_url(request)
+    return {base + MCP_PATH: "mcp", base: "api"}
+
+
 def _resource(request: Request, path: str) -> dict[str, Any]:
     """受保护资源元数据（RFC 9728）：MCP 端点只给 mcp scope，其余（管理接口）给 api。"""
     base = base_url(request)
@@ -81,6 +87,7 @@ async def authorization_server(request: Request) -> JSONResponse:
             "revocation_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": sorted(server.SCOPES),
             "authorization_response_iss_parameter_supported": True,
+            "client_id_metadata_document_supported": True,
         }
     )
 
@@ -177,22 +184,40 @@ def _back(redirect_uri: str, params: dict[str, str]) -> RedirectResponse:
 @router.get(AUTHORIZE_PATH)
 async def authorize(request: Request, session: AsyncSession = Depends(get_session)) -> Response:
     params = {k: v for k, v in request.query_params.items()}
+    found = await _login(request, session)
+    login_page = RedirectResponse(
+        "/login?" + urlencode({"redirect": request.url.path + "?" + request.url.query}),
+        status_code=302,
+    )
+    client_id = params.get("client_id") or ""
+    document_client = server.metadata_client_id(client_id)
     try:
-        req = await server.check_authorize(session, params)
+        if document_client:
+            # 元数据文档要平台出站去取：先登录，只有成员本人发起的授权才会触发。
+            if found is None:
+                return login_page
+            await server.sync_metadata_client(
+                session,
+                client_id,
+                await server.fetch_client_document(client_id),
+                _db_ip(client_ip(request)),
+            )
+        req = await server.check_authorize(
+            session, params, request.query_params.getlist("resource")
+        )
     except OAuthError as exc:
+        await session.rollback()
         return _error_page(exc.description)
     try:
-        server.check_redirectable(req, params)
+        server.check_redirectable(req, params, resources(request))
     except OAuthError as exc:
         return _back(
             req.redirect_uri,
             {"error": exc.error, "error_description": exc.description, "iss": base_url(request)}
             | ({"state": req.state} if req.state else {}),
         )
-    found = await _login(request, session)
     if found is None:
-        target = request.url.path + "?" + request.url.query
-        return RedirectResponse("/login?" + urlencode({"redirect": target}), status_code=302)
+        return login_page
     user, login = found
     ticket = await server.start_consent(session, req, user, login.id)
     await session.commit()
@@ -204,7 +229,12 @@ async def authorize(request: Request, session: AsyncSession = Depends(get_sessio
     body = (
         "<h1>授权本机应用</h1>"
         f"<p>客户端自报名称：<b>{html.escape(req.client.client_name)}</b></p>"
-        f"<p>授权后令牌交给本机的 <b>{html.escape(port)}</b>。"
+        + (
+            f"<p>客户端标识：<b>{html.escape(req.client.client_id)}</b></p>"
+            if document_client
+            else ""
+        )
+        + f"<p>授权后令牌交给本机的 <b>{html.escape(port)}</b>。"
         "只在你刚刚亲自从本机应用发起登录时才允许。</p>"
         f"<p>以 <b>{html.escape(user.display_name)}</b> 的身份：</p><ul>{scopes}</ul>"
         f'<form method="post" action="{AUTHORIZE_PATH}">'
@@ -286,6 +316,8 @@ async def token(request: Request, session: AsyncSession = Depends(get_session)) 
                 client_id=client_id,
                 redirect_uri=form.get("redirect_uri", ""),
                 verifier=form.get("code_verifier", ""),
+                resource=form.get("resource"),
+                known=resources(request),
             )
         elif grant_type == "refresh_token":
             issued, grant = await server.refresh_grant(
@@ -293,6 +325,8 @@ async def token(request: Request, session: AsyncSession = Depends(get_session)) 
                 refresh_token=form.get("refresh_token", ""),
                 client_id=client_id,
                 scope=form.get("scope"),
+                resource=form.get("resource"),
+                known=resources(request),
             )
         else:
             raise OAuthError("unsupported_grant_type", "只支持 authorization_code 与 refresh_token")

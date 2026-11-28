@@ -111,6 +111,12 @@ DESCRIPTIONS = {
 }
 
 
+# MCP tool annotations: hints a client may use to decide which calls need the user's approval.
+READ_ONLY = {"readOnlyHint": True, "openWorldHint": False}
+# `systems_call` runs whatever operation it is given, so it is declared at its most dangerous.
+CALL_HINTS = {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True}
+
+
 def tool_definitions(*, proxied: bool, own_agent: bool = False) -> list[dict[str, Any]]:
     """`proxied`: this turn has a platform-proxied system, so `systems_call` is listed too.
     `own_agent`: a member's own agent, whose writes are confirmed on a card and then fetched
@@ -125,6 +131,7 @@ def tool_definitions(*, proxied: bool, own_agent: bool = False) -> list[dict[str
             "name": name,
             "description": descriptions[name],
             "inputSchema": _slim(model.model_json_schema()),
+            "annotations": CALL_HINTS if name == "systems_call" else READ_ONLY,
         }
         for name, model in MODELS.items()
         if proxied or name != "systems_call"
@@ -135,6 +142,7 @@ def tool_definitions(*, proxied: bool, own_agent: bool = False) -> list[dict[str
                 "name": "systems_call_result",
                 "description": member_writes.RESULT_DESCRIPTION,
                 "inputSchema": _slim(member_writes.Result.model_json_schema()),
+                "annotations": READ_ONLY,
             }
         )
     return tools

@@ -1,6 +1,8 @@
-"""授权服务器的规则：动态注册、授权码 + PKCE、续期令牌轮换、访问令牌认证与吊销。
+"""授权服务器的规则：客户端登记（元数据文档或动态注册）、授权码 + PKCE、续期令牌轮换、访问令牌
+认证与吊销。
 
-只依赖标准协议（RFC 6749、7009、7591、7636、8252、8414、9728）。令牌都是不透明的随机串，库里
+只依赖标准协议（RFC 6749、7009、7591、7636、8252、8414、8707、9728，以及 OAuth Client ID
+Metadata Document 草案）。令牌都是不透明的随机串，库里
 只存 SHA-256；每次认证都查库并复核成员状态，吊销和停用立即生效。
 见 docs/superpowers/specs/2026-11-25-coreman-oauth-mcp-cli.md。
 """
@@ -9,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 import uuid
@@ -17,6 +20,7 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +31,7 @@ from coreman.core.db.models import (
     OAuthGrant,
     User,
 )
+from coreman.core.relay.safe_transport import PublicTransport
 from coreman.core.timeutils import utcnow
 
 ACCESS_PREFIX = "cmo_"
@@ -50,6 +55,9 @@ MAX_REDIRECTS = 5
 MAX_NAME = 100
 # 同一个 IP 一小时内最多注册这么多客户端：注册不要求登录，防止灌表。
 REGISTER_PER_HOUR = 30
+# 客户端元数据文档：只取这么大、等这么久，不跟随重定向。
+DOCUMENT_MAX = 16_384
+DOCUMENT_TIMEOUT = 5.0
 _VERIFIER = re.compile(r"[A-Za-z0-9\-._~]{43,128}")
 _CHALLENGE = re.compile(r"[A-Za-z0-9\-_]{43}")
 
@@ -102,6 +110,105 @@ def parse_scope(raw: str | None) -> str:
     if unknown:
         raise OAuthError("invalid_scope", f"不支持的 scope：{' '.join(unknown)}")
     return " ".join(names)
+
+
+def canonical_resource(value: str) -> str:
+    """资源标识比较用的写法：去掉查询串、片段和末尾的斜杠。"""
+    return value.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+def check_resources(
+    resources: list[str], scope: str, known: dict[str, str], *, cover: bool
+) -> list[str]:
+    """RFC 8707 的 `resource`：只认 `known`（资源 → 它的 scope）里的资源，而且令牌的 scope 要用得
+    上它。`cover`（授权请求）还要求每个 scope 都落在点名的资源里：令牌不会带着别处才用的权限。
+    返回规范化后的资源。"""
+    names = [canonical_resource(item) for item in resources]
+    scopes = set(scope.split())
+    for name in names:
+        if name not in known:
+            raise OAuthError("invalid_target", "resource 不是这台服务器上的资源")
+        if known[name] not in scopes:
+            raise OAuthError("invalid_target", "授权范围用不到所请求的资源")
+    if cover and names and not scopes <= {known[name] for name in names}:
+        raise OAuthError("invalid_target", "请求的 scope 不属于所请求的资源")
+    return names
+
+
+def metadata_client_id(value: str) -> bool:
+    """是不是「客户端元数据文档」式的 client_id：一个带路径的 https 地址。"""
+    if not value.startswith("https://") or len(value) > 2000 or any(c.isspace() for c in value):
+        return False
+    try:
+        parts = urlsplit(value)
+        parts.port  # noqa: B018 — 端口不是数字时抛 ValueError
+    except ValueError:
+        return False
+    segments = parts.path.split("/")
+    return bool(
+        parts.hostname
+        and parts.path not in ("", "/")
+        and not (parts.query or parts.fragment or parts.username or parts.password)
+        and "." not in segments
+        and ".." not in segments
+    )
+
+
+async def fetch_client_document(client_id: str) -> Any:
+    """取回客户端元数据文档：只访问公网地址，不跟随重定向，限时限长。"""
+    failed = OAuthError(
+        "invalid_client", "取不到客户端的元数据文档，请稍后重试或联系客户端的提供方"
+    )
+    try:
+        async with (
+            httpx.AsyncClient(
+                transport=PublicTransport(), timeout=DOCUMENT_TIMEOUT, follow_redirects=False
+            ) as http,
+            http.stream("GET", client_id, headers={"Accept": "application/json"}) as reply,
+        ):
+            if reply.status_code != 200:
+                raise failed
+            raw = bytearray()
+            async for chunk in reply.aiter_bytes():
+                raw.extend(chunk)
+                if len(raw) > DOCUMENT_MAX:
+                    raise failed
+    except httpx.HTTPError:
+        raise failed from None
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise failed from None
+
+
+async def sync_metadata_client(
+    session: AsyncSession, client_id: str, document: Any, ip: str | None
+) -> OAuthClient:
+    """按刚取回的元数据文档登记或更新客户端。和动态注册一样只收公开客户端、本机回环回调。"""
+    if not isinstance(document, dict) or document.get("client_id") != client_id:
+        raise OAuthError("invalid_client", "客户端元数据文档里的 client_id 与它的地址不一致")
+    name = document.get("client_name")
+    uris = document.get("redirect_uris")
+    if not isinstance(name, str) or not isinstance(uris, list):
+        raise OAuthError("invalid_client", "客户端元数据文档缺少 client_name 或 redirect_uris")
+    if document.get("token_endpoint_auth_method", "none") != "none":
+        raise OAuthError("invalid_client", "只支持公开客户端（token_endpoint_auth_method=none）")
+    loopback = [u for u in dict.fromkeys(uris) if isinstance(u, str) and _redirect_parts(u)]
+    if not loopback:
+        raise OAuthError(
+            "invalid_client",
+            "这个客户端没有本机回环回调地址（http://127.0.0.1、localhost 或 [::1]），"
+            "不能在这里授权",
+        )
+    name = "".join(ch for ch in name if ch.isprintable()).strip()[:MAX_NAME] or "未命名客户端"
+    client = await session.get(OAuthClient, client_id)
+    if client is None:
+        client = OAuthClient(client_id=client_id, client_name=name, created_ip=ip)
+        session.add(client)
+    client.client_name = name
+    client.redirect_uris = loopback[:MAX_REDIRECTS]
+    await session.flush()
+    return client
 
 
 async def register(session: AsyncSession, metadata: dict[str, Any], ip: str | None) -> OAuthClient:
@@ -162,9 +269,12 @@ class AuthorizeRequest:
     state: str | None
     challenge: str
     scope: str
+    resources: tuple[str, ...] = ()
 
 
-async def check_authorize(session: AsyncSession, params: dict[str, str]) -> AuthorizeRequest:
+async def check_authorize(
+    session: AsyncSession, params: dict[str, str], resources: list[str] | None = None
+) -> AuthorizeRequest:
     """校验授权请求。客户端或回调不对时不能跳回去（OAuthError 由调用方渲染成页面）。"""
     client = await session.get(OAuthClient, params.get("client_id") or "")
     if client is None:
@@ -178,16 +288,21 @@ async def check_authorize(session: AsyncSession, params: dict[str, str]) -> Auth
         state=params.get("state"),
         challenge=params.get("code_challenge") or "",
         scope=params.get("scope") or "",
+        resources=tuple(resources or ()),
     )
 
 
-def check_redirectable(req: AuthorizeRequest, params: dict[str, str]) -> None:
+def check_redirectable(
+    req: AuthorizeRequest, params: dict[str, str], known: dict[str, str] | None = None
+) -> None:
     """回调已确认可信之后的校验：这里出错可以按 OAuth 惯例带 error 跳回客户端。"""
     if params.get("response_type") != "code":
         raise OAuthError("unsupported_response_type", "只支持 response_type=code")
     if params.get("code_challenge_method") != "S256" or not _CHALLENGE.fullmatch(req.challenge):
         raise OAuthError("invalid_request", "必须使用 PKCE（code_challenge_method=S256）")
-    parse_scope(req.scope)
+    scope = parse_scope(req.scope)
+    if req.resources:
+        check_resources(list(req.resources), scope, known or {}, cover=True)
 
 
 async def start_consent(
@@ -205,6 +320,7 @@ async def start_consent(
                 "state": req.state,
                 "challenge": req.challenge,
                 "scope": parse_scope(req.scope),
+                "resource": [canonical_resource(item) for item in req.resources],
                 "user_id": str(user.id),
                 "login_id": str(login_id),
             },
@@ -248,8 +364,11 @@ async def issue_code(session: AsyncSession, consent: dict[str, Any]) -> str:
             kind=CODE_KIND,
             value=digest(code),
             payload={
-                k: consent[k]
-                for k in ("client_id", "redirect_uri", "challenge", "scope", "user_id")
+                **{
+                    k: consent[k]
+                    for k in ("client_id", "redirect_uri", "challenge", "scope", "user_id")
+                },
+                "resource": consent.get("resource") or [],
             },
         )
     )
@@ -295,7 +414,14 @@ async def _mint_access(session: AsyncSession, grant: OAuthGrant) -> str:
 
 
 async def exchange_code(
-    session: AsyncSession, *, code: str, client_id: str, redirect_uri: str, verifier: str
+    session: AsyncSession,
+    *,
+    code: str,
+    client_id: str,
+    redirect_uri: str,
+    verifier: str,
+    resource: str | None = None,
+    known: dict[str, str] | None = None,
 ) -> tuple[Issued, OAuthGrant]:
     invalid = OAuthError("invalid_grant", "授权码无效、已使用或已过期")
     row = (
@@ -317,6 +443,12 @@ async def exchange_code(
     expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=")
     if not secrets.compare_digest(expected.decode(), str(payload.get("challenge"))):
         raise OAuthError("invalid_grant", "PKCE 校验失败")
+    if resource:
+        # 换令牌时点名的资源，必须是授权时点过的（授权时没点名就只按 scope 核对）。
+        (name,) = check_resources([resource], str(payload["scope"]), known or {}, cover=False)
+        authorized = payload.get("resource") or []
+        if authorized and name not in authorized:
+            raise OAuthError("invalid_target", "resource 与授权时请求的不一致")
     user = await _active_user(session, uuid.UUID(str(payload["user_id"])))
     if user is None:
         raise OAuthError("invalid_grant", "账号已停用")
@@ -340,7 +472,13 @@ async def exchange_code(
 
 
 async def refresh_grant(
-    session: AsyncSession, *, refresh_token: str, client_id: str, scope: str | None
+    session: AsyncSession,
+    *,
+    refresh_token: str,
+    client_id: str,
+    scope: str | None,
+    resource: str | None = None,
+    known: dict[str, str] | None = None,
 ) -> tuple[Issued, OAuthGrant]:
     """续期令牌轮换：换出新的一对；上一代再出现说明泄露了，整次授权吊销。"""
     invalid = OAuthError("invalid_grant", "续期令牌无效、已吊销或已过期，请重新登录")
@@ -363,6 +501,8 @@ async def refresh_grant(
         raise invalid
     if scope and not set(parse_scope(scope).split()) <= set(grant.scope.split()):
         raise OAuthError("invalid_scope", "续期不能扩大授权范围")
+    if resource:
+        check_resources([resource], grant.scope, known or {}, cover=False)
     if await _active_user(session, grant.user_id) is None:
         raise OAuthError("invalid_grant", "账号已停用")
     refresh = REFRESH_PREFIX + secrets.token_urlsafe(32)
