@@ -20,6 +20,11 @@ from coreman.core.chat import human_collaboration as human
 from coreman.core.chat.bot_collaboration import issue_capability
 from coreman.core.chat.chat_logs import ChatLogEntry
 from coreman.core.chat.collaboration_tools import CRON_POLICY
+from coreman.core.chat.rate_limit import (
+    RATE_LIMITED_CODE,
+    RATE_LIMITED_MESSAGE,
+    is_rate_limited,
+)
 from coreman.core.chat.redaction import collect_secrets
 from coreman.core.cloud_proxy import resume as approval_resume
 from coreman.core.cron.access import require_operator
@@ -418,6 +423,11 @@ class CronRunHandler:
                         reply, status = "", "success"
                     else:
                         reply, usage, tools, truncated = consume.result()
+                        if is_rate_limited(reply):
+                            # 驱动按正文回传的额度告示：不是这次执行的结果。
+                            raise CronStreamError(
+                                RATE_LIMITED_CODE, RATE_LIMITED_MESSAGE, reply, usage, tools
+                            )
                         if truncated:
                             ctx.log.warning("cron_result_truncated", limit=RESULT_MAX_CHARS)
                             reply += msg(
@@ -437,6 +447,9 @@ class CronRunHandler:
         except CronStreamError as exc:
             status, error, detail = "failed", exc.code, exc.detail
             reply, usage, tools = exc.partial, exc.usage, exc.tools
+            if is_rate_limited(f"{detail or ''}\n{reply or ''}"):
+                # 驱动按出错回传的额度告示：推送里只说额度用完，不贴英文原文。
+                error, detail = RATE_LIMITED_CODE, RATE_LIMITED_MESSAGE
         except asyncio.CancelledError:
             status, error = "failed", "cancelled"
             # 进程强制取消仍尝试原子结单；事务失败则由看护补齐。

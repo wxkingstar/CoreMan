@@ -18,7 +18,6 @@ from coreman.core.assistants.records import is_assistant
 from coreman.core.bus import streams, tasks
 from coreman.core.chat.announcements import find_announcement
 from coreman.core.chat.identity import resolve_speaker
-from coreman.core.chat.rate_limit import is_rate_limited
 from coreman.core.db.models import (
     AssistantSettings,
     Bot,
@@ -219,9 +218,6 @@ class SilentTurnHandler(PlatformTurnHandler):
         if verdict.log_status == "ask_user":
             # 没有人能答题：不开选择卡（它会挂在所有者的私聊上），题面留在终稿里。
             return replace(verdict, log_status="success")
-        if verdict.log_status in ("success", "error") and is_rate_limited(verdict.final_text):
-            # 终稿是「额度用完」的告示，不是这一轮该有的结果：按失败收尾。
-            return Verdict("error", "failed", "rate_limited", "运行时额度用完", verdict.final_text)
         return verdict
 
     async def _postprocess_rate_limit(

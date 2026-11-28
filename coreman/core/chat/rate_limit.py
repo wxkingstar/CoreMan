@@ -43,6 +43,11 @@ def is_rate_limited(text: str) -> bool:
     return RATE_LIMIT_PATTERN.search(text) is not None
 
 
+# 额度告示不是一轮该有的结果：各处收尾统一用这组错误码与说明。
+RATE_LIMITED_CODE = "rate_limited"
+RATE_LIMITED_MESSAGE = "运行时额度用完"
+
+
 def allowed_providers(provider: str) -> set[str]:
     """从该 provider 出发，可以切到哪些 provider 的实例上。"""
     return set(_PROVIDER_SETS.get(provider, {provider}))

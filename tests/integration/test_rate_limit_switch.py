@@ -390,3 +390,22 @@ async def test_relay_switch_handler_reports_policy_failure(
         detail="目标运行时不属于本团队或公共池",
     )
     assert quota_table([relay], current_id=relay.id, now=datetime.now(UTC))
+
+
+async def test_rate_limited_turn_is_recorded_as_failed_not_as_an_answer(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import ChatLog, Task
+
+    bot, relay, _ = await seed_bot(db_session)
+    fake = FakeRelay("rate_limit")
+    t = await chat_task(db_session, bot, "跑一下", sender="nobody")
+    await run(db_engine, t, fake)
+    task = await db_session.get(Task, t.id, populate_existing=True)
+    assert task is not None and task.status == "failed" and task.error_code == "rate_limited"
+    log = await db_session.scalar(select(ChatLog).where(ChatLog.bot_id == bot.id))
+    assert log is not None and log.status == "error" and log.error_code == "rate_limited"
+    s = await stream_of(db_session, t.id)
+    # 不配「✅ 回复已生成」；额度表照旧附在后面。
+    assert msg("done_suffix") not in s.final_text
+    assert "**📊 服务器额度总览**" in s.final_text
