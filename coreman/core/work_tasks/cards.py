@@ -117,18 +117,21 @@ def ask_elements(
     ask: dict[str, Any],
     *,
     mention: str = "",
+    number: int = 0,
     allowed: list[str] | None = None,
     on: WorkTask | None = None,
 ) -> list[dict[str, Any]]:
     """一个问题的那几块：点名、问题、为什么问他、选项按钮，以及带输入框的表单。
 
     要写理由的选项和「其他」放进表单，和输入框一起提交。`mention` 是开头点名的那一行，
-    `allowed` 是能回答的人的飞书 user_id（发在群里时才有），`on` 见 `_button`。
+    `number` 是一张卡上有几个问题时这是第几个，`allowed` 是能回答的人的飞书 user_id
+    （发在群里时才有），`on` 见 `_button`。
     """
     elements: list[dict[str, Any]] = []
     if mention:
         elements.append({"tag": "markdown", "content": mention})
-    elements.append({"tag": "div", "text": {"tag": "plain_text", "content": ask["question"]}})
+    question = f"{number}. {ask['question']}" if number else ask["question"]
+    elements.append({"tag": "div", "text": {"tag": "plain_text", "content": question}})
     if ask.get("why"):
         elements.append({"tag": "markdown", "content": f"<font color='grey'>{ask['why']}</font>"})
     plain = [o for o in ask["options"] if o["key"] not in NEEDS_TEXT]
@@ -137,8 +140,7 @@ def ask_elements(
         _button(row, ask["id"], option["key"], option["label"], i == 0, allowed, on)
         for i, option in enumerate(plain)
     ]
-    # 选项并排成一行（手机上两个一行）：一个按钮占一整行的话，几个选项就把卡片撑出一屏。
-    elements += [_side_by_side(buttons)] if len(buttons) > 1 else buttons
+    elements += _option_rows(buttons)
     # 只有它一个时就是输入框旁边的「提交」；和「退回」「拒绝」并排时还叫「其他」，免得分不清。
     other = [{"key": OTHER, "label": "其他" if texted else "提交"}] if ask.get("other") else []
     # 输入框和提交按钮的名字在整张卡里不能重复（飞书会拒收整张卡）：一张进展卡上可能同时
@@ -156,9 +158,12 @@ def ask_elements(
             "tag": "input",
             "name": text_field(row),
             "max_length": TEXT_MAX,
+            # 撑满所在的那一格：默认宽度在电脑上只占半行，和右边的按钮之间空一大截。
+            "width": "fill",
             "placeholder": {
                 "tag": "plain_text",
-                "content": "写一句理由，或你自己的答案" if texted else "都不合适？写下你的答案",
+                # 和「提交」同一行时格子窄，提示写长了手机上会被截断。
+                "content": "写一句理由，或你自己的答案" if texted else "其他答案",
             },
         }
         # 只有「其他」时输入框和提交按钮放同一行；还有要写理由的选项（退回、拒绝）时，
@@ -166,20 +171,56 @@ def ask_elements(
         body = (
             [_side_by_side([entry, submits[0]], weights=[3, 1])]
             if len(submits) == 1
-            else [entry, _side_by_side(submits)]
+            else [entry, _side_by_side(submits, narrow="bisect")]
         )
         elements.append({"tag": "form", "name": f"work_task_{row.id}", "elements": body})
     return elements
 
 
-def _side_by_side(cells: list[dict[str, Any]], weights: list[int] | None = None) -> dict[str, Any]:
-    """几块并排成一行。不给 `weights` 时等宽，窄屏上两个一行。"""
+# 一行并排几个按钮时，每个按钮最多放几个字，放不下飞书会截成省略号。NARROW 按窄屏手机实测：
+# 两个一行放得下 4 个字，三个一行只放得下 2 个字。WIDE 是电脑上的宽度。
+NARROW_LABEL_MAX = {2: 4, 3: 2}
+WIDE_LABEL_MAX = {2: 12, 3: 8, 4: 6}
+
+
+def _label_width(button: dict[str, Any]) -> float:
+    """按钮上的字有多宽：汉字算一个，字母数字算半个。"""
+    return sum(1.0 if ord(c) > 0x2E7F else 0.5 for c in str(button["text"]["content"]))
+
+
+def _option_rows(buttons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """选项按钮怎么排：每一行都撑满卡片宽度，字不能被截断。
+
+    手机上也放得下的并排一行（四个短的排成两行两个）；只有电脑上放得下的，电脑上并排、
+    手机上自动变成一个一行；电脑上也放不下的一个一行。
+    """
+    count = len(buttons)
+    widest = max((_label_width(b) for b in buttons), default=0.0)
+    if count in NARROW_LABEL_MAX and widest <= NARROW_LABEL_MAX[count]:
+        return [_side_by_side(buttons, narrow="none")]
+    if count == 4 and widest <= NARROW_LABEL_MAX[2]:
+        return [_side_by_side(buttons, narrow="bisect")]
+    if count in WIDE_LABEL_MAX and widest <= WIDE_LABEL_MAX[count]:
+        return [_side_by_side(buttons, narrow="stretch")]
+    for button in buttons:
+        button["width"] = "fill"
+    return buttons
+
+
+def _side_by_side(
+    cells: list[dict[str, Any]], weights: list[int] | None = None, *, narrow: str = "none"
+) -> dict[str, Any]:
+    """几块并排成一行，不给 `weights` 时等宽。
+
+    `narrow` 是窄屏上怎么办（飞书的 flex_mode）：`none` 仍然一行，`bisect` 两个一行，
+    `stretch` 一个一行。
+    """
     for cell in cells:
         if cell.get("tag") == "button":
             cell["width"] = "fill"
     return {
         "tag": "column_set",
-        "flex_mode": "none" if weights else "bisect",
+        "flex_mode": narrow,
         "horizontal_spacing": "8px",
         "columns": [
             {
