@@ -156,8 +156,9 @@ DESCRIPTIONS = {
         "不写运行编号、单号、分支、字段名、状态码这些细节（放进 output）；output 完整输出；"
         "digest 记要（背景、结论、关键数据或产出位置、决定、遗留问题）；"
         "artifacts=[{title,url}]；有子任务时 report（完整汇报）必填。"
-        f"followups 可选：交付后还要人处理的事，每条一句人话、写明要谁做什么（≤{LINE_MAX} 字，"
-        f"最多 {FOLLOWUPS_MAX} 条），会显示在群里这件事的卡上。"
+        f"followups 可选：交付后交给人自己去办的事，每条一句人话、写明要谁做什么（≤{LINE_MAX} 字，"
+        f"最多 {FOLLOWUPS_MAX} 条），会显示在群里这件事的卡上。要人点头后你还得接着做的事"
+        "（例如同意合并）不写在这里：先用 ask_human 问，等答复、办完再交付。"
         "只在做完时用；卡住或等确认时不要交付。"
     ),
     "handoff_task": (
@@ -609,6 +610,15 @@ async def submit_result(
         url = str(item.get("url") or "").strip()
         if title and url.startswith(("https://", "http://")):
             artifacts.append({"title": title, "url": url[:2000]})
+    if progress.group_root(row) and is_lead(row):
+        # 牵头的事还有问题挂在群里的卡上没人答：这时交付，卡片变成「已完成」，问题和按钮就没了。
+        open_asks = [q for q in await progress.pending_asks(session, row) if q.id != row.id]
+        if open_asks:
+            codes = "、".join(q.code for q in open_asks[:5])
+            raise Invalid(
+                f"还有 {len(open_asks)} 个问题在等人回答（{codes}）："
+                "这件事还不能交付。调用 wait_for 结束这一轮，答复回来、把后面的事办完再交付"
+            )
     raw = args.get("followups") or []
     if not isinstance(raw, list) or len(raw) > FOLLOWUPS_MAX:
         raise Invalid(f"followups 是交付后还要人处理的事，最多 {FOLLOWUPS_MAX} 条")

@@ -847,3 +847,92 @@ async def test_trial_dispatchers_and_commands_keep_the_normal_turn(db_session, m
     turn = await say(db_session, bot, "om1", text, mentions_bot=True)
     assert turn is not None and turn.payload.get("origin") is None
     assert await tasks_of(db_session, bot, "group_observe") == []
+
+
+async def _led_goal(session, bot, **fields):
+    """调度员牵头的一件事，代表人是在群里以 `u1` 说话的那位。"""
+    from coreman.core.db.models import User, UserIdentity
+
+    user = User(login_name="alice", display_name="alice", email="alice@example.test")
+    session.add(user)
+    await session.flush()
+    session.add(UserIdentity(user_id=user.id, platform="feishu", platform_user_id="u1"))
+    row = WorkTask(
+        title="订单与仓储系统对接",
+        source="dispatch",
+        platform="feishu",
+        chat_id=CHAT,
+        assignee_bot_id=bot.id,
+        dispatcher_bot_id=bot.id,
+        requester_user_id=user.id,
+        principal_user_id=user.id,
+        tracked=True,
+        **fields,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+@pytest.mark.parametrize(
+    ("speaker", "outcome"),
+    [
+        # 这件事等的人回话：不问判断模型，直接排调度回合。
+        ("u1", "awaited"),
+        # 别人说话：照常由判断模型筛。
+        ("u2", "below_threshold"),
+    ],
+)
+async def test_a_reply_from_the_person_a_led_goal_waits_for_reaches_the_dispatcher(
+    db_engine, db_session, monkeypatch, speaker, outcome
+):
+    """牵头的事在等某个人表态时，他在群里回一句「同意」：判断模型看它不像在请人办事，会漏掉。"""
+
+    async def human_count(bot, chat_id, cipher):
+        return 5
+
+    monkeypatch.setattr(dispatch, "human_count", human_count)
+    bot = await dispatcher_bot(db_session, "on")
+    goal = await _led_goal(
+        db_session,
+        bot,
+        status="waiting",
+        waiting_on={"kind": "human", "human_text": "两个改动等你同意合并"},
+    )
+    await say(db_session, bot, "om1", "同意合并", user=speaker)
+    (observe,) = await tasks_of(db_session, bot, "group_observe")
+    await quiet_down(db_session, bot)
+    decider = FakeDecider(0.0)
+    await run_observe(db_engine, db_session, observe, decider)
+    decision = await db_session.scalar(select(GroupObserveDecision))
+    assert decision.outcome == outcome
+    chats = await tasks_of(db_session, bot, "chat")
+    if outcome == "awaited":
+        assert decider.instructions == []
+        assert chats[0].payload["awaited"] == [goal.code] and "mentioned" not in chats[0].payload
+    else:
+        assert len(decider.instructions) == 1 and chats == []
+
+
+async def test_a_finished_goal_keeps_listening_only_while_it_left_things_for_people(
+    db_engine, db_session, monkeypatch
+):
+    """办完的事：留了要人处理的事，代表人一天内的回话还算在交代它；什么都没留就不再等谁。"""
+    from coreman.core.work_tasks import progress
+
+    bot = await dispatcher_bot(db_session, "on")
+    goal = await _led_goal(db_session, bot, status="done", closed_at=datetime.now(UTC))
+    assert await progress.awaited_users(db_session, goal) == set()
+    db_session.add(
+        WorkTaskEvent(
+            work_task_id=goal.id,
+            kind="submitted",
+            actor_type="bot",
+            agent_detail={"followups": ["alice：同意后合并两个改动"]},
+        )
+    )
+    await db_session.commit()
+    assert await progress.awaited_users(db_session, goal) == {goal.principal_user_id}
+
+    note = dispatch.note(STAFF, [], [goal], {}, awaited=[goal.code])
+    assert f"你牵头的 {goal.code} 正在等的人在说话" in note and "- none" in note
