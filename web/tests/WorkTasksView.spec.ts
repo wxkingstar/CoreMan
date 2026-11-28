@@ -41,6 +41,23 @@ vi.mock('@/api/workTasks', () => ({
       linked: { 'T-5': { title: '算上上周退货率', status: 'done' }, 'T-9': { title: '拉退货明细', status: 'in_progress' } },
       watching: false, watchers: [], parent: null,
       children: [{ ...task, code: 'T-9', title: '拉退货明细', status: 'in_progress', now: '数据助手在拉明细' }],
+      overview: {
+        state: 'need_human', steps_done: 1, steps_total: 3,
+        asks: [{ ...asked.ask, code: 'T-7-Q1', title: '问：退货率按单数还是按金额算？', question: '退货率按单数还是按金额算？', options: [{ key: 'o1', label: '按单数' }], mine: true, can_answer: true }],
+        doing: [{
+          code: 'T-9', title: '拉退货明细', status: 'in_progress', kind: 'running', question: false,
+          assignee: { type: 'bot', id: 'b1', name: '数据助手' }, since: '2026-11-02T00:00:00Z', closed_at: null,
+          note: '明细拉了一半', note_at: '2026-11-02T00:05:00Z',
+        }],
+        plan: ['和前一周比较'],
+        done: [{
+          code: 'T-6', title: '确认口径', status: 'done', kind: 'done', question: false,
+          assignee: { type: 'bot', id: 'b1', name: '数据助手' }, since: '2026-11-02T00:00:00Z', closed_at: '2026-11-02T00:04:00Z',
+          note: '口径按退货单数除以签收单数', note_at: null,
+        }],
+        followups: [],
+        latest: { text: '口径已定，正在拉明细', at: '2026-11-02T00:06:00Z', actor_name: '数据助手' },
+      },
       events: [
         { id: 1, kind: 'created', actor_type: 'human', actor_name: '李雷', human_text: '李雷建了任务', agent_detail: { brief: '口径按退货单数除以签收单数' }, created_at: '2026-11-02T00:00:00Z', milestone: true },
         { id: 3, kind: 'subtask', actor_type: 'bot', actor_name: '数据助手', human_text: '拆出 T-9：拉退货明细', agent_detail: {}, created_at: '2026-11-02T00:00:00Z', milestone: false },
@@ -117,7 +134,7 @@ describe('WorkTasksView', () => {
     expect(workTasks.answer).toHaveBeenCalledWith('T-8', { ask_id: 'a1', option: 'decline', text: '这周没空' })
   })
 
-  it('opens a task as its own page with the now line, the human history and the folded agent layer', async () => {
+  it('opens a task on the whole picture, with the human history and the folded agent layer below', async () => {
     const router = makeRouter()
     await router.push('/work-tasks/T-7')
     const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
@@ -125,8 +142,40 @@ describe('WorkTasksView', () => {
     expect(workTasks.get).toHaveBeenCalledWith('T-7')
     const drawer = wrapper.element
     expect(drawer.querySelector('[data-test="back-to-list"]')).not.toBeNull()
-    expect(drawer.querySelector('[data-test="work-task-now"]')?.textContent).toContain('还没开工')
-    expect(drawer.querySelector('[data-test="copy-drive"]')).not.toBeNull()
+    // 首屏是全貌：状态与进度、最新一句、目标、要你定的、正在做、接下来、已完成。
+    const overview = wrapper.find('[data-test="work-task-overview"]')
+    expect(overview.find('[data-test="overview-state"]').text()).toBe(i18n.global.t('workTasks.overview.states.need_human'))
+    expect(overview.find('[data-test="overview-progress"]').text()).toBe(i18n.global.t('workTasks.overview.progress', { done: 1, total: 3 }))
+    expect(overview.find('[data-test="overview-latest"]').text()).toContain('口径已定，正在拉明细')
+    expect(overview.find('[data-test="overview-goal"]').text()).toContain('算出上周退货率并和前一周比较')
+    expect(overview.find('[data-test="overview-asks"]').text()).toContain(i18n.global.t('workTasks.overview.needYou'))
+    expect(overview.find('[data-test="overview-plan"]').text()).toContain('和前一周比较')
+    expect(overview.find('[data-test="overview-done"]').text()).toContain('口径按退货单数除以签收单数')
+    expect(overview.find('[data-test="overview-done"]').text()).toContain(i18n.global.t('workTasks.overview.took', { d: i18n.global.t('workTasks.overview.durMin', { m: 4 }) }))
+    // 有问题要定时，「现在」那句只是重复，不再写；标题下面一行写谁在做、谁要的。
+    expect(drawer.querySelector('[data-test="work-task-now"]')).toBeNull()
+    expect(wrapper.find('[data-test="work-task-meta"]').text()).toContain('数据助手')
+    expect(wrapper.find('[data-test="work-task-meta"]').text()).toContain(i18n.global.t('workTasks.needsDrive'))
+    // 下面某一步的问题在这一页就能答，答完重新取这一页。
+    vi.mocked(workTasks.get).mockClear()
+    await overview.find('[data-test="ask-option-o1"]').trigger('click')
+    await flushPromises()
+    expect(workTasks.answer).toHaveBeenCalledWith('T-7-Q1', { ask_id: 'a1', option: 'o1', text: '' })
+    expect(workTasks.get).toHaveBeenCalledWith('T-7')
+    // 属性表收在「任务信息」里，默认折叠。
+    expect(drawer.querySelector('[data-test="task-info"] .el-collapse-item.is-active')).toBeNull()
+    // 执行人、发起人、代表人、验收人这些名词都能指上去看解释，三种语言都写了。
+    const terms = [...drawer.querySelectorAll('[data-test="task-info"] [data-test="task-term"]')].map(el => el.getAttribute('data-term'))
+    expect(terms).toEqual(expect.arrayContaining(['assignee', 'requester', 'principal', 'reviewer']))
+    for (const locale of ['zh', 'en', 'ja'] as const) {
+      const defined = i18n.global.getLocaleMessage(locale).workTasks.terms as Record<string, { name: string; body: string }>
+      for (const term of ['assignee', 'requester', 'principal', 'reviewer', 'dispatcher', 'needsDrive', 'autoStart', 'claimed']) {
+        expect(defined[term].name).toBeTruthy()
+        expect(defined[term].body.length).toBeGreaterThan(10)
+      }
+    }
+    // 进度条一步一格：做完 1、在做 1、还没开始 1。
+    expect(overview.findAll('.segment').map(el => el.classes().filter(c => c !== 'segment')[0])).toEqual(['done', 'doing', 'todo'])
     expect(drawer.textContent).toContain('李雷建了任务')
     expect(drawer.textContent).toContain(i18n.global.t('workTasks.agentLayer'))
     // 给 Agent 看的细节默认折叠。
@@ -134,19 +183,36 @@ describe('WorkTasksView', () => {
     expect(layer?.querySelector('.el-collapse-item.is-active')).toBeNull()
     expect(layer?.querySelector('[data-test="agent-report"]')?.textContent).toContain(i18n.global.t('workTasks.report'))
     // 事件里给 AI 的细节不出现在给人看的经过里；经过默认只有里程碑，流水点「显示全部」才出来。
-    expect(drawer.querySelector('.el-timeline')?.textContent).not.toContain('口径按退货单数')
-    expect(drawer.querySelector('.el-timeline')?.textContent).not.toContain('拆出')
+    expect(drawer.querySelector('[data-test="work-task-timeline"]')?.textContent).not.toContain('口径按退货单数')
+    expect(drawer.querySelector('[data-test="work-task-timeline"]')?.textContent).not.toContain('拆出')
     await wrapper.find('[data-test="all-events"]').trigger('click')
-    expect(drawer.querySelector('.el-timeline')?.textContent).toContain('拆出 T-9')
-    // 子任务是表格：编号、标题、状态、执行人、进展。
-    const children = wrapper.find('[data-test="work-task-children"]')
-    expect(children.text()).toContain('拉退货明细')
-    expect(children.text()).toContain('数据助手在拉明细')
-    expect(children.text()).toContain(i18n.global.t('workTasks.statuses.in_progress'))
-    await children.find('.el-table__row').trigger('click')
+    expect(drawer.querySelector('[data-test="work-task-timeline"]')?.textContent).toContain('拆出 T-9')
+    // 正在做的一步：谁在做、几点开始、最近一次进展；点了进那一步。
+    const doing = wrapper.find('[data-test="overview-doing"]')
+    expect(doing.text()).toContain('拉退货明细')
+    expect(doing.text()).toContain('数据助手')
+    expect(doing.text()).toContain('明细拉了一半')
+    await doing.find('[data-test="overview-step"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.params.code).toBe('T-9')
     wrapper.unmount()
+  })
+
+  it('keeps the now line and the start command for a task with nothing under it', async () => {
+    const full = await vi.mocked(workTasks.get)('T-7')
+    vi.mocked(workTasks.get).mockResolvedValueOnce({
+      ...full,
+      children: [],
+      overview: { state: 'need_human', steps_done: 0, steps_total: 0, asks: [], doing: [], plan: [], done: [], followups: [], latest: null },
+    })
+    const router = makeRouter()
+    await router.push('/work-tasks/T-7')
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="work-task-now"]').text()).toContain('还没开工')
+    expect(wrapper.find('[data-test="copy-drive"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="overview-progress"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="overview-doing"]').exists()).toBe(false)
   })
 
   it('gives AI a plain-text page with ?format=md', async () => {
@@ -239,8 +305,8 @@ describe('WorkTasksView', () => {
     )
     await flushPromises()
     await wrapper.find('[data-test="all-events"]').trigger('click')
-    // 点子任务表里的一行进 T-9。
-    await wrapper.find('[data-test="work-task-children"] .el-table__row').trigger('click')
+    // 点「正在做」里的一步进 T-9。
+    await wrapper.find('[data-test="overview-doing"] [data-test="overview-step"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.params.code).toBe('T-9')
     // 按返回：先有 popstate，再导航。
@@ -249,8 +315,8 @@ describe('WorkTasksView', () => {
     await flushPromises()
     await new Promise(r => setTimeout(r, 200))
     expect(router.currentRoute.value.params.code).toBe('T-7')
-    expect(wrapper.find('.el-timeline').text()).toContain('拆出 T-9')
-    expect(wrapper.find('[data-test="work-task-children"] tr.cm-flash').exists()).toBe(true)
+    expect(wrapper.find('[data-test="work-task-timeline"]').text()).toContain('拆出 T-9')
+    expect(wrapper.find('[data-test="overview-doing"] .cm-flash[data-test="overview-step"]').exists()).toBe(true)
     wrapper.unmount()
   })
 })

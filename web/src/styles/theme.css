@@ -88,6 +88,12 @@ h1,h2,h3,p { margin-top: 0; } h2 { font-size: 23px; letter-spacing: -.4px; line-
 .cm-section-nav a { padding: 7px 12px; background: var(--cm-brand-soft); border-radius: 6px; }
 .cm-form-section { scroll-margin-top: 24px; }
 .cm-state { margin-bottom: 16px; }
+/* 名词解释的小卡片（WorkTaskTerm）：名词一行，下面一两句话讲清它是什么。 */
+.el-popper.cm-term-tip { max-width: min(320px, calc(100vw - 32px)); padding: 12px 14px 13px; border: 1px solid var(--cm-border); border-radius: 10px; background: var(--cm-surface); box-shadow: var(--cm-shadow); color: var(--cm-text); font-size: 13px; line-height: 1.7; }
+.el-popper.cm-term-tip .el-popper__arrow::before { border-color: var(--cm-border); background: var(--cm-surface); }
+.cm-term-name { display: flex; align-items: center; gap: 7px; font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.cm-term-name::before { content: ''; width: 3px; height: 13px; border-radius: 2px; background: var(--el-color-primary); }
+.cm-term-body { margin: 0; color: var(--cm-muted); }
 /* 返回时闪一下刚才点出去的地方（usePageMemory）。 */
 @keyframes cm-flash { 0%, 30% { background-color: var(--el-color-primary-light-8); } 100% { background-color: transparent; } }
 .cm-flash, tr.cm-flash > td.el-table__cell { animation: cm-flash 1.8s ease-out; }

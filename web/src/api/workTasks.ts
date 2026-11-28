@@ -42,9 +42,31 @@ export interface WorkTaskRun {
   status: string; outcome: string; session_key: string; chat_task_id: number
   started_at: string; ended_at: string | null
 }
+/** 全貌里的一步：一件子任务，或一个问过人的问题。 */
+export interface WorkTaskStep {
+  code: string; title: string; status: WorkTaskStatus
+  kind: 'running' | 'waiting_human' | 'done' | 'cancelled'
+  question: boolean; assignee: WorkTaskActor | null
+  /** 开始时间（没领取过的是创建时间）。 */
+  since: string; closed_at: string | null
+  /** 后面跟的一句：做完的是结果，在等人的是等谁，在做的是最近一次进展（`note_at` 是它的时间）。 */
+  note: string; note_at: string | null
+}
+/** 任务页首屏的全貌，和群里的进展卡同一套分块。 */
+export interface WorkTaskOverview {
+  state: 'need_human' | 'running' | 'todo' | 'done' | 'cancelled' | 'shadow'
+  steps_done: number; steps_total: number
+  /** 这件事自己和它下面各层还没人答的问题。 */
+  asks: (WorkTaskAsk & { code: string; title: string })[]
+  doing: WorkTaskStep[]; plan: string[]; done: WorkTaskStep[]
+  /** 办完后还要人处理的事。 */
+  followups: string[]
+  latest: { text: string; at: string; actor_name: string } | null
+}
 export interface WorkTaskDetail extends WorkTask {
   watching: boolean; watchers: { id: string; name: string }[]
   parent: { code: string; title: string } | null; children: WorkTask[]
+  overview: WorkTaskOverview
   /** 页面上出现的别的任务编号 → 标题和状态（编号可点、旁边标状态）。 */
   linked: Record<string, { title: string; status: WorkTaskStatus }>
   events: WorkTaskEvent[]

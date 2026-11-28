@@ -31,6 +31,18 @@ export function formatDateTime(value: string | null | undefined): string {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`
 }
 
+/** 短时间：和现在同一天只写 `HH:mm`，否则 `MM-DD HH:mm`（按顶栏所选显示时区）；空值或非法时间返回 '—'。 */
+export function formatClock(value: string | null | undefined, now: number = Date.now()): string {
+  if (!value) return '—'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return '—'
+  const parts = (x: Date) => Object.fromEntries(formatter(displayZone.value).formatToParts(x).map((i) => [i.type, i.value]))
+  const p = parts(d)
+  const n = parts(new Date(now))
+  const time = `${p.hour}:${p.minute}`
+  return p.year === n.year && p.month === n.month && p.day === n.day ? time : `${p.month}-${p.day} ${time}`
+}
+
 /**
  * 秒数拆成整数和小数两段，最多两位小数、去掉末尾的 0（1.5 → `1` `.5`，2.004 → `2` ``）。
  * 空值、非法或负数返回 null。

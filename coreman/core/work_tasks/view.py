@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.db.models import (
+    WORK_TASK_OPEN,
     Bot,
     GroupObserveDecision,
     User,
@@ -18,7 +19,7 @@ from coreman.core.db.models import (
     WorkTaskRun,
     WorkTaskWatcher,
 )
-from coreman.core.work_tasks import service
+from coreman.core.work_tasks import progress, service
 
 
 async def names_of(
@@ -80,9 +81,27 @@ def actor_out(
     return None
 
 
+def ask_out(row: WorkTask, names: dict[str, str], viewer: User | None) -> dict[str, Any] | None:
+    """任务上待回答的问题（给人看）；没有时是 None。"""
+    ask = row.ask
+    if not ask:
+        return None
+    return {
+        "id": ask["id"],
+        "kind": ask["kind"],
+        "to": actor_out(None, service.ask_to(row), names),
+        "question": ask["question"],
+        "why": ask.get("why") or "",
+        "options": ask["options"],
+        "other": bool(ask.get("other")),
+        "needs_text": sorted(service.NEEDS_TEXT),
+        "mine": viewer is not None and str(viewer.id) == ask.get("to_user_id"),
+        "can_answer": viewer is not None and service.can_answer(row, viewer),
+    }
+
+
 def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -> dict[str, Any]:
     """给人看的那一层。"""
-    ask = row.ask
     return {
         "code": row.code,
         "title": row.title,
@@ -106,22 +125,7 @@ def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -
         # 人派给 AI 员工、还没被领取：页面上提示人去叫它开工。
         "needs_drive": service.needs_drive(row),
         "now": service.current_line(row, names),
-        "ask": (
-            {
-                "id": ask["id"],
-                "kind": ask["kind"],
-                "to": actor_out(None, service.ask_to(row), names),
-                "question": ask["question"],
-                "why": ask.get("why") or "",
-                "options": ask["options"],
-                "other": bool(ask.get("other")),
-                "needs_text": sorted(service.NEEDS_TEXT),
-                "mine": viewer is not None and str(viewer.id) == ask.get("to_user_id"),
-                "can_answer": viewer is not None and service.can_answer(row, viewer),
-            }
-            if ask
-            else None
-        ),
+        "ask": ask_out(row, names, viewer),
         "can_manage": viewer is not None and service.can_manage(row, viewer),
         "related_codes": list(row.related_codes or []),
         "artifacts": list(row.artifacts or []),
@@ -169,6 +173,153 @@ def milestone(event: WorkTaskEvent) -> bool:
     )
 
 
+async def open_asks(session: AsyncSession, row: WorkTask) -> list[WorkTask]:
+    """这件事自己和它下面各层还没人答的问题（问人、要不要接、待验收），按提出的先后。"""
+    chain = list(
+        await session.scalars(
+            select(WorkTask)
+            .where(WorkTask.root_id == (row.root_id or row.id), WorkTask.id != row.id)
+            .order_by(WorkTask.id)
+        )
+    )
+    inside = {row.id}
+    for item in chain:  # 子任务的 id 总比上级大：按 id 顺着走一遍就能认出整棵子树
+        if item.parent_id in inside:
+            inside.add(item.id)
+    # `ask` 是 JSON 列，没有问题时存的是 JSON 的 null：取出来再看。
+    return [
+        item
+        for item in [row, *chain]
+        if item.id in inside
+        and item.status in WORK_TASK_OPEN
+        and item.ask
+        and item.ask.get("to_user_id")
+    ]
+
+
+def _step_note(child: WorkTask, kind: str, asked: list[str], names: dict[str, str]) -> str:
+    """一步后面跟的那句话：做完的写结果，在等人的写等谁，还没轮到的写现状。"""
+    who = names.get(str(child.assignee_user_id or child.assignee_bot_id or ""), "")
+    if kind in ("done", "cancelled"):
+        return child.summary if kind == "done" else ""
+    if kind == "running":
+        return service.current_line(child, names) if child.status == "todo" else ""
+    if progress.is_question(child):
+        return f"等{who}回答"
+    if asked:
+        return f"在等{'、'.join(asked)}回答"
+    if child.status == "waiting":
+        return str((child.waiting_on or {}).get("human_text") or "等人处理")
+    if child.status == "review":
+        return "等验收"
+    return f"等{who}接手"
+
+
+async def overview(
+    session: AsyncSession,
+    row: WorkTask,
+    children: list[WorkTask],
+    asks: list[WorkTask],
+    events: list[WorkTaskEvent],
+    names: dict[str, str],
+    viewer: User | None,
+) -> dict[str, Any]:
+    """任务页首屏的全貌，和群里的进展卡同一套分块：要人定的、正在做的、接下来的、已完成的、最新一句。
+
+    分类用 `progress.step_kind`，和进展卡一致；这里给结构化的数据，时间由页面按看的人的时区画。
+    """
+    steps = [c for c in children if c.status != "shadow"]
+    asked = await progress.asked_names(session, steps)
+    running = [c.id for c in steps if progress.step_kind(c, asked.get(c.id, [])) == "running"]
+    latest: dict[int, WorkTaskEvent] = {}
+    if running:
+        said = await session.scalars(
+            select(WorkTaskEvent)
+            .where(
+                WorkTaskEvent.work_task_id.in_(running),
+                WorkTaskEvent.kind == "progress",
+                WorkTaskEvent.human_text != "",
+            )
+            .order_by(WorkTaskEvent.id)
+        )
+        latest = {e.work_task_id: e for e in said}
+    doing: list[dict[str, Any]] = []
+    finished: list[dict[str, Any]] = []
+    steps_done = steps_total = 0
+    waiting_human = False
+    for child in steps:
+        kind = progress.step_kind(child, asked.get(child.id, []))
+        question = progress.is_question(child)
+        said_last = latest.get(child.id)
+        item = {
+            "code": child.code,
+            "title": child.title.removeprefix("问：") if question else child.title,
+            "status": child.status,
+            "kind": kind,
+            "question": question,
+            "assignee": actor_out(child.assignee_bot_id, child.assignee_user_id, names),
+            "since": child.claimed_at or child.created_at,
+            "closed_at": child.closed_at,
+            "note": said_last.human_text
+            if said_last
+            else _step_note(child, kind, asked.get(child.id, []), names),
+            "note_at": said_last.created_at if said_last else None,
+        }
+        if question:
+            # 待答的问题画在「要人定的」里；答过的进「已完成」。
+            if kind in ("done", "cancelled"):
+                finished.append(item)
+            continue
+        if kind == "cancelled":
+            finished.append(item)
+            continue
+        steps_total += 1
+        if kind == "done":
+            steps_done += 1
+            finished.append(item)
+        else:
+            waiting_human = waiting_human or kind == "waiting_human"
+            doing.append(item)
+    closed = row.status in ("done", "cancelled", "shadow")
+    plan = [] if closed else await progress.plan_steps(session, row, {c.title for c in steps})
+    steps_total += len(plan)
+    waiting = row.waiting_on or {}
+    if closed:
+        state = row.status
+    elif (
+        asks
+        or waiting_human
+        or row.status == "review"
+        or (row.status == "waiting" and waiting.get("kind") == "human")
+        or (row.status == "todo" and (row.assignee_user_id or service.needs_drive(row)))
+    ):
+        state = "need_human"
+    else:
+        state = "todo" if row.status == "todo" else "running"
+    spoken = [e for e in events if e.kind == "progress" and e.human_text]
+    return {
+        "state": state,
+        "steps_done": steps_done,
+        "steps_total": steps_total,
+        "asks": [
+            {"code": a.code, "title": a.title, **(ask_out(a, names, viewer) or {})} for a in asks
+        ],
+        "doing": doing,
+        "plan": plan,
+        "done": finished,
+        "followups": await progress.followups(session, row) if row.status == "done" else [],
+        "latest": (
+            {
+                "text": spoken[-1].human_text,
+                "at": spoken[-1].created_at,
+                "actor_name": names.get(spoken[-1].actor_id or "", ""),
+            }
+            if spoken and not closed
+            else None
+        ),
+    }
+
+
 async def detail(session: AsyncSession, row: WorkTask, user: User | None) -> dict[str, Any]:
     """任务详情页的那份数据；user 是看的人（AI 员工读时为 None：没有「我的」视角）。"""
     events = list(
@@ -195,7 +346,8 @@ async def detail(session: AsyncSession, row: WorkTask, user: User | None) -> dic
         )
     )
     decision = await session.get(GroupObserveDecision, row.decision_id) if row.decision_id else None
-    bots, users = ids_of([row, *children])
+    asks = await open_asks(session, row)
+    bots, users = ids_of([row, *children, *asks])
     bots |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "bot" and e.actor_id}
     bots |= {r.bot_id for r in runs if r.bot_id}
     users |= {uuid.UUID(e.actor_id) for e in events if e.actor_type == "human" and e.actor_id}
@@ -217,6 +369,7 @@ async def detail(session: AsyncSession, row: WorkTask, user: User | None) -> dic
         "watchers": [{"id": str(i), "name": names.get(str(i), "")} for i in watcher_ids],
         "parent": {"code": parent.code, "title": parent.title} if parent else None,
         "children": children_out,
+        "overview": await overview(session, row, children, asks, events, names, user),
         "events": [
             {
                 "id": e.id,
