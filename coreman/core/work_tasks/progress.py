@@ -122,13 +122,35 @@ async def _latest(session: AsyncSession, child: WorkTask, now: datetime) -> str:
     return f"，{clip(event.human_text, 40)}（{clock(event.created_at, now)}）"
 
 
+def step_kind(child: WorkTask, asked: list[str]) -> str:
+    """一件子任务此刻算哪一类：done / cancelled / waiting_human（在等人）/ running。
+
+    `asked` 是它自己还在问的人。群里的进展卡和任务页的全貌都按这个分块。
+    """
+    if child.status in ("done", "cancelled"):
+        return child.status
+    if is_question(child) or asked or child.status == "review":
+        return "waiting_human"
+    if child.status == "waiting" and (child.waiting_on or {}).get("kind") == "human":
+        return "waiting_human"
+    if child.status == "todo" and child.assignee_user_id:
+        return "waiting_human"
+    return "running"
+
+
 async def _line(
     session: AsyncSession, child: WorkTask, asked: list[str], now: datetime
 ) -> tuple[str, str]:
-    """一件子任务的那一行，以及它算哪一类（done / waiting_human / running / cancelled）。
+    """一件子任务的那一行，以及它算哪一类（见 `step_kind`）。
 
     标题、结果这些人写的字先按长度截断，时间标签接在后面：标签不能被截断。
     """
+    return await _line_text(session, child, asked, now), step_kind(child, asked)
+
+
+async def _line_text(
+    session: AsyncSession, child: WorkTask, asked: list[str], now: datetime
+) -> str:
     who = await _who(session, child)
     since = clock(child.claimed_at or child.created_at, now)
     if is_question(child):
@@ -136,34 +158,31 @@ async def _line(
         if child.status == "done":
             # 回答写在后面：群里的人要知道定了什么，不只是「答过了」。
             answer = f" → {child.summary}" if child.summary else ""
-            return clip(f"✅ {who} 定了：{question}{answer}", LINE_MAX), "done"
+            return clip(f"✅ {who} 定了：{question}{answer}", LINE_MAX)
         if child.status == "cancelled":
-            return clip(f"⏹ 不用{who}回答了：{question}", LINE_MAX), "cancelled"
+            return clip(f"⏹ 不用{who}回答了：{question}", LINE_MAX)
         text = clip(f"🟡 等 **{who}** 回答：{question}", LINE_MAX)
-        return f"{text} · {clock(child.created_at, now)} 问的", "waiting_human"
+        return f"{text} · {clock(child.created_at, now)} 问的"
     head = f"{child.title} — {who}" if who else child.title
     if child.status == "done":
         # 做完的一步只写是哪一步、谁做的、用了多久：每条后面再跟一句结果，一张卡就挤满了字，
         # 结果在任务页上看。
         took = _took(child)
-        return clip(f"✅ {head}", LINE_MAX) + (f"（用时 {took}）" if took else ""), "done"
+        return clip(f"✅ {head}", LINE_MAX) + (f"（用时 {took}）" if took else "")
     if child.status == "cancelled":
-        return clip(f"⏹ {head}（已取消）", LINE_MAX), "cancelled"
+        return clip(f"⏹ {head}（已取消）", LINE_MAX)
     waiting = child.waiting_on or {}
     if asked:
         text = clip(f"🟡 {head}，在等 **{'、'.join(asked)}** 回答", LINE_MAX)
-        return f"{text} · {since} 开始", "waiting_human"
+        return f"{text} · {since} 开始"
     if child.status == "waiting" and waiting.get("kind") == "human":
         text = clip(f"🟡 {head}：{waiting.get('human_text') or '等人处理'}", LINE_MAX)
-        return f"{text} · {since} 开始", "waiting_human"
+        return f"{text} · {since} 开始"
     if child.status == "review":
-        return clip(f"🟡 {head}，等验收", LINE_MAX), "waiting_human"
+        return clip(f"🟡 {head}，等验收", LINE_MAX)
     if child.status == "todo" and child.assignee_user_id:
-        return clip(f"🟡 等 **{who}** 接手：{child.title}", LINE_MAX), "waiting_human"
-    return (
-        f"{clip(f'⏳ {head}', LINE_MAX)} · {since} 开始{await _latest(session, child, now)}",
-        "running",
-    )
+        return clip(f"🟡 等 **{who}** 接手：{child.title}", LINE_MAX)
+    return f"{clip(f'⏳ {head}', LINE_MAX)} · {since} 开始{await _latest(session, child, now)}"
 
 
 async def plan_steps(session: AsyncSession, root: WorkTask, taken: set[str]) -> list[str]:
@@ -180,7 +199,7 @@ async def plan_steps(session: AsyncSession, root: WorkTask, taken: set[str]) -> 
     return [str(step) for step in steps if isinstance(step, str) and step not in taken][:MAX_PLAN]
 
 
-async def _asked(session: AsyncSession, children: list[WorkTask]) -> dict[int, list[str]]:
+async def asked_names(session: AsyncSession, children: list[WorkTask]) -> dict[int, list[str]]:
     """每件子任务自己还在问的人：它问了人、在等回答时，卡上要写出在等谁。"""
     ids = [c.id for c in children if not is_question(c)]
     if not ids:
@@ -298,7 +317,7 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
         return None
     bot_id = sender_id(root)
     now = datetime.now(UTC)
-    asked = await _asked(session, children)
+    asked = await asked_names(session, children)
     doing: list[str] = []
     finished: list[str] = []
     step_states: list[list[Any]] = []

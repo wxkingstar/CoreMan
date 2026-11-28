@@ -20,7 +20,7 @@ from coreman.core.db.models import (
     WorkTaskWatcher,
 )
 from coreman.core.wecom.messages import InboundMessage, Sender
-from coreman.core.work_tasks import agent_tools, cards, due, flow, progress
+from coreman.core.work_tasks import agent_tools, cards, due, flow, progress, view
 from coreman.runtime.gateway_feishu import reply_buttons
 from coreman.runtime.worker import work_task_cards
 from coreman.runtime.worker.chat import work
@@ -261,6 +261,93 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
     await progress.refresh(db_session, child, base_url=BASE)
     await db_session.commit()
     assert len(await _progress_items(db_session, root)) == 2
+
+
+async def test_the_task_page_opens_on_the_same_picture_as_the_card(db_session):
+    lead, helper, alice, root = await _setup(db_session)
+    root.summary = "两个系统对齐接口并联调"
+    first = await _tool(db_session, root, lead, "create_task", _subtask(helper, "对齐接口文档"))
+    second = await _tool(db_session, root, lead, "create_task", _subtask(helper, "仓储侧开发"))
+    await _tool(
+        db_session,
+        root,
+        lead,
+        "update_task",
+        {
+            "detail": "计划",
+            "human_text": "接口文档在对，仓储侧同时开工",
+            "plan": ["两边在测试环境联调", "仓储侧开发"],
+        },
+    )
+    child = await db_session.scalar(select(WorkTask).where(WorkTask.code == first["code"]))
+    other = await db_session.scalar(select(WorkTask).where(WorkTask.code == second["code"]))
+    await _tool(
+        db_session, other, helper, "update_task", {"detail": "细节", "human_text": "表结构已建好"}
+    )
+    await _finish(db_session, child, "接口文档已合并")
+    # 仓储侧开发做到一半要人定一件事：问题挂在子任务下面，上级的页面上也看得到、答得了。
+    asked = await _tool(
+        db_session,
+        other,
+        helper,
+        "ask_human",
+        {"question": "库存字段用哪个口径？", "options": ["可售", "在库"], "context": "背景"},
+    )
+
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    assert (seen["state"], seen["steps_done"], seen["steps_total"]) == ("need_human", 1, 3)
+    (ask,) = seen["asks"]
+    assert (ask["code"], ask["question"]) == (asked["code"], "库存字段用哪个口径？")
+    assert ask["mine"] and ask["can_answer"] and ask["to"]["name"] == "alice"
+    (doing,) = seen["doing"]
+    assert (doing["code"], doing["kind"], doing["note"]) == (
+        second["code"],
+        "waiting_human",
+        "在等alice回答",
+    )
+    assert doing["assignee"]["name"] == "数据助手" and doing["since"] is not None
+    assert seen["plan"] == ["两边在测试环境联调"]  # 已经拆成子任务的那一步不再列
+    (done,) = seen["done"]
+    assert (done["code"], done["kind"], done["note"]) == (first["code"], "done", "接口文档已合并")
+    assert done["closed_at"] is not None
+    assert seen["latest"]["text"] == "接口文档在对，仓储侧同时开工"
+    assert seen["latest"]["actor_name"] == "调度员"
+
+    # 子任务自己的页面：问题在它下面，最近一句进展是它自己的；别人看得到在等谁，但不能代答。
+    bob = await _person(db_session, "bob")
+    inner = (await view.detail(db_session, other, bob))["overview"]
+    assert inner["state"] == "need_human" and inner["doing"] == []
+    assert [a["can_answer"] for a in inner["asks"]] == [False]
+    assert inner["latest"]["text"] == "表结构已建好"
+
+    # 答完以后回到进行中：在做的那一步写最近一次进展和时间，答过的问题不算一步。
+    question = await db_session.scalar(select(WorkTask).where(WorkTask.code == asked["code"]))
+    question.status, question.ask, question.summary = "done", None, "可售"
+    await db_session.commit()
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    assert (seen["state"], seen["asks"], seen["steps_total"]) == ("running", [], 3)
+    (doing,) = seen["doing"]
+    assert (doing["kind"], doing["note"]) == ("running", "表结构已建好")
+    assert doing["note_at"] is not None
+
+    # 办完：只留结果和还要人处理的事，不再有「最新」和「接下来」。
+    other.status, other.summary = "done", "仓储侧已上线测试环境"
+    root.status, root.summary = "done", "两个系统在测试环境联调通过"
+    db_session.add(
+        WorkTaskEvent(
+            work_task_id=root.id,
+            kind="submitted",
+            actor_type="bot",
+            actor_id=str(lead.id),
+            human_text="交付",
+            agent_detail={"followups": ["合并 PR #12"]},
+        )
+    )
+    await db_session.commit()
+    seen = (await view.detail(db_session, root, alice))["overview"]
+    assert (seen["state"], seen["steps_done"], seen["steps_total"]) == ("done", 2, 2)
+    assert seen["followups"] == ["合并 PR #12"]
+    assert seen["latest"] is None and seen["plan"] == [] and seen["doing"] == []
 
 
 async def test_a_buried_card_moves_to_the_bottom_when_something_real_changes(db_session):
