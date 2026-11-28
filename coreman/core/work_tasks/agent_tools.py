@@ -34,7 +34,8 @@ MAX_DEPTH = 3
 MAX_OPEN_CHILDREN = 5
 MAX_ASKS_PER_CHAIN = 3
 # 调度员牵头的任务是分几步推进的目标，要人定的事比一件普通任务多。
-MAX_ASKS_PER_LEAD_CHAIN = 10
+MAX_ASKS_PER_LEAD_CHAIN = 30
+FOLLOWUPS_MAX = 5
 MAX_PENDING_PER_PERSON = 5
 PLAN_MAX = 8
 QUESTION_MAX = 60
@@ -155,6 +156,8 @@ DESCRIPTIONS = {
         "不写运行编号、单号、分支、字段名、状态码这些细节（放进 output）；output 完整输出；"
         "digest 记要（背景、结论、关键数据或产出位置、决定、遗留问题）；"
         "artifacts=[{title,url}]；有子任务时 report（完整汇报）必填。"
+        f"followups 可选：交付后还要人处理的事，每条一句人话、写明要谁做什么（≤{LINE_MAX} 字，"
+        f"最多 {FOLLOWUPS_MAX} 条），会显示在群里这件事的卡上。"
         "只在做完时用；卡住或等确认时不要交付。"
     ),
     "handoff_task": (
@@ -219,6 +222,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "output": _STR,
             "digest": _STR,
             "report": _STR,
+            "followups": {"type": "array", "items": _STR},
             "artifacts": {
                 "type": "array",
                 "items": {
@@ -507,6 +511,14 @@ async def ask_human(
         row, me, title=clip(f"问：{question}", TITLE_MAX), summary="", brief=f"[问题]\n{context}"
     )
     child.assignee_user_id, child.start_mode = person.id, "manual"
+    # 问题是所属那件事上的一个决策点，不是一件新任务：编号挂在那件事下面（T-12-Q1），
+    # 不从任务编号的序列里取号，任务列表里也不单列（见任务列表接口）。
+    number = await session.scalar(
+        select(func.count())
+        .select_from(WorkTask)
+        .where(WorkTask.parent_id == row.id, WorkTask.brief.like("[问题]%"))
+    )
+    child.code = f"{row.code}-Q{int(number or 0) + 1}"
     session.add(child)
     await session.flush()
     child.ask = make_ask(
@@ -597,6 +609,15 @@ async def submit_result(
         url = str(item.get("url") or "").strip()
         if title and url.startswith(("https://", "http://")):
             artifacts.append({"title": title, "url": url[:2000]})
+    raw = args.get("followups") or []
+    if not isinstance(raw, list) or len(raw) > FOLLOWUPS_MAX:
+        raise Invalid(f"followups 是交付后还要人处理的事，最多 {FOLLOWUPS_MAX} 条")
+    followups = []
+    for i, item in enumerate(raw):
+        line = " ".join(str(item).split())
+        if not line or len(line) > LINE_MAX:
+            raise Invalid(f"followups 第 {i + 1} 条要 1～{LINE_MAX} 字")
+        followups.append(line)
     row.digest, row.report, row.artifacts = digest, report, artifacts[:ARTIFACTS_MAX]
     add_event(
         session,
@@ -604,7 +625,13 @@ async def submit_result(
         kind="submitted",
         actor_type="bot",
         actor_id=str(me.id),
-        detail={"result": result, "output": output, "digest": digest, "report": report},
+        detail={
+            "result": result,
+            "output": output,
+            "digest": digest,
+            "report": report,
+            "followups": followups,
+        },
         chat_task_id=chat_task_id,
     )
     return {"ok": True, "next": "交付已记下，这一轮的回复简短说明结果即可"}

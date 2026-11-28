@@ -447,6 +447,7 @@ const en = {
     status: { installed: 'Installed', pending_approval: 'Awaiting approval', installing: 'Installing', failed: 'Installation incomplete', uninstalled: 'Deactivated', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Rejected', withdrawn: 'Withdrawn' },
   },
   workTasks: {
+    insideSteps: '{done} of {n} steps done', insideDecisions: '{n} decisions', insideDecisionsOpen: '{n} decisions, {open} pending',
     title: 'Tasks', hint: 'Tasks between people and AI employees: anyone can create, assign, hand off, or give a task to an AI employee. A task given to an AI employee waits until someone tells it to start or it claims tasks on a schedule; tasks from group dispatchers and the API start on their own.',
     search: 'Search code, title or summary', allStatuses: 'All statuses', code: 'Code', taskTitle: 'Title', status: 'Status',
     assignee: 'Assignee', requester: 'Requester', dispatcher: 'Dispatcher', created: 'Created', updated: 'Updated',

@@ -54,7 +54,6 @@ PLAN_KIND = "plan"
 BURIED_AFTER = 10
 # 进度条的格数。
 BAR_CELLS = 8
-SUMMARY_MAX = 600
 
 
 def _key(root: WorkTask) -> str:
@@ -144,9 +143,10 @@ async def _line(
         return f"{text} · {clock(child.created_at, now)} 问的", "waiting_human"
     head = f"{child.title} — {who}" if who else child.title
     if child.status == "done":
-        text = clip(f"✅ {head}" + (f"：{child.summary}" if child.summary else ""), LINE_MAX)
+        # 做完的一步只写是哪一步、谁做的、用了多久：每条后面再跟一句结果，一张卡就挤满了字，
+        # 结果在任务页上看。
         took = _took(child)
-        return text + (f"（用时 {took}）" if took else ""), "done"
+        return clip(f"✅ {head}", LINE_MAX) + (f"（用时 {took}）" if took else ""), "done"
     if child.status == "cancelled":
         return clip(f"⏹ {head}（已取消）", LINE_MAX), "cancelled"
     waiting = child.waiting_on or {}
@@ -356,12 +356,21 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
         )
         lead = f"{requester[0]} 这件事办完了。" if requester else ""
         elements.append(
-            {"tag": "markdown", "content": f"{lead}**结果：**{root.summary or '已完成'}"}
+            {"tag": "markdown", "content": f"{lead}**结果**：{root.summary or '已完成'}"}
         )
-        if root.report:
-            elements.append({"tag": "markdown", "content": clip(root.report, SUMMARY_MAX)})
+        # 交付时写下的、还要人处理的事。完整汇报是给 Agent 看的那条线，留在任务页，不贴到群里。
+        submitted = await session.scalar(
+            select(WorkTaskEvent)
+            .where(WorkTaskEvent.work_task_id == root.id, WorkTaskEvent.kind == "submitted")
+            .order_by(WorkTaskEvent.id.desc())
+            .limit(1)
+        )
+        left = (submitted.agent_detail or {}).get("followups") if submitted is not None else None
+        if isinstance(left, list) and left:
+            todo = [f"- {clip(str(x), LINE_MAX)}" for x in left]
+            elements.append({"tag": "markdown", "content": "\n".join(["**还要人处理**", *todo])})
     elif root.summary:
-        elements.append({"tag": "markdown", "content": f"**目标：**{root.summary}"})
+        elements.append({"tag": "markdown", "content": f"**目标**：{root.summary}"})
     if need:
         elements.append({"tag": "markdown", "content": "**现在要你定**"})
         elements += need
@@ -374,7 +383,12 @@ async def render(session: AsyncSession, root: WorkTask, base_url: str) -> Render
                 "content": "\n".join(["**接下来**", *(f"☐ {clip(x, LINE_MAX)}" for x in plan)]),
             }
         )
-    if finished:
+    if finished and root.status == "done":
+        # 办完了：结果在上面，明细不再逐条列。
+        elements.append(
+            {"tag": "markdown", "content": f"共 {steps_done} 步，都做完了，明细见任务页"}
+        )
+    elif finished:
         shown = finished[-MAX_DONE:]
         earlier = len(finished) - len(shown)
         title = f"**已完成（{len(finished)}）**" + (
