@@ -38,6 +38,7 @@ from runtime_daemon.agent import (
     atomic_write,
     operation_message,
 )
+from runtime_daemon.antigravity import antigravity_account, antigravity_usage, cli_binary
 from runtime_daemon.assistant_turns import AssistantTurns
 from runtime_daemon.devpreview import DevPreview
 from runtime_daemon.direct_transfer import DirectTransfer
@@ -64,7 +65,7 @@ from runtime_daemon.workspace import MARKER, TRASH_DIR, TRASH_ENTRY_NAME, reserv
 
 LOG = logging.getLogger("coreman-runtime")
 CHUNK_SIZE = 48 * 1024
-PROVIDERS = ("claude", "codex", "opencode")
+PROVIDERS = ("claude", "codex", "opencode", "antigravity")
 # Only the driver's /health may grant these; anything but a literal true is false.
 # The retired feishu_personal_restricted_v1 is never forwarded, so servers that
 # still expect the restricted mode send no personal credentials to this node.
@@ -90,6 +91,16 @@ DRIVER_CAPABILITIES = {
         "session_fork_v1",
     ),
     "opencode": (
+        "feishu_personal_tools_v1",
+        "feishu_group_docs_v1",
+        "wecom_personal_tools_v1",
+        "owner_session_view_v1",
+        "systems_catalog_v1",
+        "resume_fallback_v1",
+        "system_mcp_v1",
+        "session_fork_v1",
+    ),
+    "antigravity": (
         "feishu_personal_tools_v1",
         "feishu_group_docs_v1",
         "wecom_personal_tools_v1",
@@ -163,6 +174,8 @@ BLOCKED_ENV_PREFIXES: tuple[str, ...] = (
     "CLAUDE_",
     "CODEX_",
     "OPENCODE_",
+    "AGY_",
+    "ANTIGRAVITY_",
     "LD_",
     "DYLD_",
     "PYTHON",
@@ -327,6 +340,8 @@ def login_account(provider: str, status: dict, env: dict | None = None) -> str:
     env = os.environ if env is None else env
     if provider == "opencode":
         return ", ".join(sorted(str(k) for k in opencode_auth(env)))[:255]
+    if provider == "antigravity":
+        return antigravity_account(env)
     try:
         if provider == "claude":
             if status.get("email"):
@@ -384,7 +399,7 @@ def probe_error(status_code: int, body: object) -> str:
 
 def cli_status(provider: str, env: dict | None = None) -> dict:
     """CLI 的安装与登录状态；env 给定时按该环境（席位）查登录。"""
-    path = shutil.which(provider)
+    path = shutil.which(cli_binary(provider))
     result = {
         "installed": bool(path),
         "version": "",
@@ -403,6 +418,11 @@ def cli_status(provider: str, env: dict | None = None) -> dict:
         if provider == "opencode":
             # 登录即 auth.json 里有凭据（OpenCode Go 等的 API Key）；没有登录状态命令可问。
             result["login"] = "ready" if opencode_auth(env) else "required"
+            if result["login"] == "ready":
+                result["account"] = login_account(provider, {}, env)
+            return result
+        if provider == "antigravity":
+            result["login"], _ = antigravity_usage(env)
             if result["login"] == "ready":
                 result["account"] = login_account(provider, {}, env)
             return result
@@ -690,6 +710,8 @@ class RuntimeAgent(Agent):
         def read_limits() -> dict | None:
             if self.provider == "codex":
                 return self.codex_limits(env=self.daemon.seats.env(self.provider, seat_id))
+            if self.provider == "antigravity":
+                return self.antigravity_limits()
             return self.claude_limits(socket_path)
 
         cap = self.daemon.capabilities.get(self.provider) or {}
@@ -968,7 +990,7 @@ class Daemon:
                 executable = Path(custom)
                 if not executable.is_file() or not os.access(executable, os.X_OK):
                     raise ValueError(f"{provider} CLI 路径不可执行")
-                link = bin_dir / provider
+                link = bin_dir / cli_binary(provider)
                 if link.is_symlink():
                     link.unlink()
                 link.symlink_to(executable)

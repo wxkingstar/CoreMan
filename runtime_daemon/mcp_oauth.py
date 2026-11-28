@@ -88,6 +88,10 @@ class MCPLogins:
         self.lock = threading.Lock()
 
     def command(self, action: str, name: str, config: dict, *extra: str) -> list[str]:
+        if self.provider == "antigravity":
+            raise OperationError(
+                "Antigravity 的 MCP 授权需要在运行时所在机器上用 agy 的 /mcp 面板完成"
+            )
         if self.provider == "opencode":
             # 服务经 OPENCODE_CONFIG_CONTENT 登记（见 cli_env），与驱动挂载时同名同地址。
             verb = {"login": "auth", "logout": "logout"}[action]

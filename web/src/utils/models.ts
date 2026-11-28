@@ -1,20 +1,21 @@
 import type { Backend } from '@/api/types'
 
 /**
- * 按模型名前缀判断后端：`codex/`、`opencode/` 开头各走自己的后端，其余走 claude。
+ * 按模型名前缀判断后端：`codex/`、`opencode/`、`antigravity/` 开头各走自己的后端，其余走 claude。
  * 与后端 `coreman/core/relay/models.py::backend_of` 同一条规则，改动要同步。
  */
 export function backendOf(model: string): Backend {
   if (model.startsWith('codex/')) return 'codex'
   if (model.startsWith('opencode/')) return 'opencode'
+  if (model.startsWith('antigravity/')) return 'antigravity'
   return 'claude'
 }
 
-/** 节点上的 AI 后端，与后端 `BACKENDS` 同序。 */
-export const BACKENDS: readonly Backend[] = ['claude', 'codex', 'opencode']
+/** 节点上的 AI 后端，按页面上的展示顺序。 */
+export const BACKENDS: readonly Backend[] = ['claude', 'antigravity', 'codex', 'opencode']
 
-const PROVIDER_LABELS: Record<string, string> = { claude: 'Claude Code', codex: 'Codex / GPT', opencode: 'OpenCode' }
-const PROVIDER_ICONS: Record<string, string> = { claude: 'claude', codex: 'openai', opencode: 'opencode' }
+const PROVIDER_LABELS: Record<string, string> = { claude: 'Claude Code', antigravity: 'Antigravity', codex: 'Codex / GPT', opencode: 'OpenCode' }
+const PROVIDER_ICONS: Record<string, string> = { claude: 'claude', antigravity: 'antigravity', codex: 'openai', opencode: 'opencode' }
 
 /** 后端的展示名；未知的原样显示。 */
 export function providerLabel(provider: string): string {

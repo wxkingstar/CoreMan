@@ -420,6 +420,26 @@ async def test_heartbeat_adds_opencode_relay_once_the_cli_is_installed(client, d
     assert rows["opencode"].visibility == rows["claude"].visibility
     node = await db_session.get(RuntimeNode, node_id, populate_existing=True)
     assert node.capabilities["opencode"]["installed"] is True
+    # 没报 Antigravity 的节点按未安装记，不建它的 relay。
+    assert node.capabilities["antigravity"]["installed"] is False
+
+    with_antigravity = {
+        **installed,
+        "antigravity": {
+            "installed": True,
+            "login": "ready",
+            "account": "dev@example.com",
+            "models": ["antigravity/gemini-4-neon"],
+        },
+    }
+    added = await client.post(endpoint, headers=headers, json=with_antigravity)
+    assert added.status_code == 200, added.text
+    rows = await relays()
+    assert set(rows) == {"claude", "codex", "opencode", "antigravity"}
+    assert added.json()["data"]["backends"]["antigravity"]["relay_id"] == str(
+        rows["antigravity"].id
+    )
+    assert rows["antigravity"].supported_models_mode == "inherit"
 
 
 async def test_heartbeat_clears_its_own_login_failure_and_sends_probe_models(client, db_session):

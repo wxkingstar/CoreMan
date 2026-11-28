@@ -32,6 +32,7 @@ Node-reported interruptions (`control_lost`, `connection_lost`, `execution_faile
 | Claude quota | Existing driver cache and conversation responses; fallback reads that cache. |
 | Codex quota | Existing conversation responses and hourly app-server account limits. |
 | OpenCode quota | Unsupported until an integrated source exists. |
+| Antigravity quota | Hourly `agy -p "/usage" --output-format json`; the most used model group per window. Model health follows the Codex/OpenCode slots. |
 
 No independent quota helper, host polling daemon, local automation, process termination, queue or concurrency control is introduced. Existing runtime schedules stay inside the daemon. A 15 minute model freshness cutoff can legitimately show unknown between hourly Codex/OpenCode probes; it does not authorize more probes.
 

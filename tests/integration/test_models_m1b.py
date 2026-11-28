@@ -10,7 +10,7 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     by_provider: dict[str, list[ModelCatalog]] = {}
     for r in rows:
         by_provider.setdefault(r.provider, []).append(r)
-    assert set(by_provider) == {"claude", "codex", "opencode"}
+    assert set(by_provider) == {"claude", "codex", "opencode", "antigravity"}
     assert {r.model for r in by_provider["claude"] if not r.retired} == {
         "claude-fable-5-1",
         "claude-opus-5-5",
@@ -37,6 +37,15 @@ async def test_catalog_seeded(db_session: AsyncSession) -> None:
     assert [r.model for r in by_provider["opencode"] if r.is_default] == [
         "opencode/opencode-go/kimi-k3"
     ]
+    assert [r.model for r in by_provider["antigravity"] if r.is_default] == [
+        "antigravity/gemini-4-neon"
+    ]
+    # xhigh 只有 Neon 与 Hydrogen 有；Antigravity 没有 max。
+    assert {r.model for r in by_provider["antigravity"] if r.supports_xhigh} == {
+        "antigravity/gemini-4-neon",
+        "antigravity/gemini-4-hydrogen",
+    }
+    assert not any(r.supports_max for r in by_provider["antigravity"])
 
 
 async def test_relay_unique_name_defaults_and_version(db_session: AsyncSession) -> None:

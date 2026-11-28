@@ -18,7 +18,13 @@ from typing import Any
 CODEX_ERROR_MARKERS = ("\n\n[codex error] ", "⚠️ [codex] 进程异常退出")
 # opencode 驱动轮内报的错（模型调用失败、额度用尽）同样写在正文里。
 OPENCODE_ERROR_MARKERS = ("\n\n[opencode error] ",)
-ERROR_MARKERS = {"codex": CODEX_ERROR_MARKERS, "opencode": OPENCODE_ERROR_MARKERS}
+# antigravity 驱动同样把轮内的错（未登录、模型不可用、进程中途退出）写在正文里。
+ANTIGRAVITY_ERROR_MARKERS = ("\n\n[antigravity error] ",)
+ERROR_MARKERS = {
+    "codex": CODEX_ERROR_MARKERS,
+    "opencode": OPENCODE_ERROR_MARKERS,
+    "antigravity": ANTIGRAVITY_ERROR_MARKERS,
+}
 
 
 @dataclass(frozen=True)
