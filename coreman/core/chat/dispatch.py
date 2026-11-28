@@ -802,12 +802,15 @@ async def _adopt(
             work_task_id=row.id,
             kind="claimed",
             human_text=(
-                f"{requester_name}在群里叫调度员接手，由它牵头"
+                f"{requester_name}在群里叫{dispatcher.name}接手，由它牵头"
                 if lead
                 else f"{requester_name}在群里叫{name}开工"
             ),
             agent_detail={**detail, "trigger": "dispatch", "note": plan.note},
-            **actor,
+            # 这一笔是人做的事（叫开工），记在叫的人名下，不记在调度员名下。
+            actor_type="human",
+            actor_id=str(speaker.id),
+            chat_task_id=actor.get("chat_task_id"),
         )
     )
     await hand_off(session, row, event_id=event_id, requester_pid=requester_pid, note=plan.note)

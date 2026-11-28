@@ -298,38 +298,40 @@ async def test_starting_an_agent_from_the_task_page(
     bot = await _feishu_bot(db_session)
     alice = await login_as(client, db_session, display_name="alice")
     body = {"title": "查上周退货率", "assignee": {"type": "bot", "id": str(bot.id)}}
-    db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_alice"))
-    await db_session.commit()
 
-    # 选了现在开工，但她还没私聊过这位员工、结果没处回报：任务照样建好，告诉她原因，留着等人叫。
+    # 选了现在开工，但她没有飞书身份、没法以她的身份做：任务照样建好，告诉她原因，留着等人叫。
     made = (await client.post("/api/admin/work-tasks", json={**body, "start": True})).json()["data"]
-    assert "私聊" in made["start_error"] and made["needs_drive"] is True
+    assert "没有飞书身份" in made["start_error"] and made["needs_drive"] is True
     assert made["status"] == "todo" and made["principal"]["id"] == str(alice.id)
     assert [e["human_text"] for e in made["events"] if e["kind"] == "start_failed"] == [
         f"没能直接开工：{made['start_error']}"
     ]
     assert (await db_session.scalar(select(func.count()).select_from(Task))) == 0
     refused = await client.post(f"/api/admin/work-tasks/{made['code']}/start")
-    assert refused.status_code == 409 and "私聊" in refused.text
+    assert refused.status_code == 409 and "没有飞书身份" in refused.text
 
-    # 私聊过以后在任务页点开工：和在飞书里叫它一样，以点的人的身份排一轮。
-    db_session.add(UserReached(bot_id=bot.id, user_id=alice.id, platform_chat_id="oc_dm"))
+    # 有了飞书身份、还没和这位员工私聊过：照样能开工，这一轮不出声，结果记在任务上。
+    db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_alice"))
     await db_session.commit()
     started = (await client.post(f"/api/admin/work-tasks/{made['code']}/start")).json()["data"]
     assert started["status"] == "waiting" and started["now"] == f"排队等{bot.name}开始"
     assert started["needs_drive"] is False and "start_error" not in started
-    assert f"alice在任务页叫{bot.name}开工，以alice的身份做" in [
-        e["human_text"] for e in started["events"]
-    ]
+    claimed = next(e for e in started["events"] if e["kind"] == "claimed")
+    assert claimed["human_text"] == f"alice在任务页叫{bot.name}开工，以alice的身份做"
+    assert claimed["agent_detail"]["reply"] == "task_page"
     queued = await db_session.scalar(select(Task))
     assert queued.session_key == f"work:{made['code']}" and queued.user_id == alice.id
-    assert queued.payload["work_trigger"] == "web"
+    assert queued.payload["work_trigger"] == "web" and queued.payload["work_silent"] is True
     again = await client.post(f"/api/admin/work-tasks/{made['code']}/start")
     assert again.status_code == 409
 
-    # 新建时选现在开工：建好就排上；不选（接口默认）照旧等人叫。
+    # 私聊过以后：回复发到她和它的私聊。新建时选现在开工，建好就排上；不选（接口默认）照旧等人叫。
+    db_session.add(UserReached(bot_id=bot.id, user_id=alice.id, platform_chat_id="oc_dm"))
+    await db_session.commit()
     now = (await client.post("/api/admin/work-tasks", json={**body, "start": True})).json()["data"]
     assert now["status"] == "waiting" and "start_error" not in now
+    loud = await db_session.scalar(select(Task).order_by(Task.id.desc()).limit(1))
+    assert loud.payload["work_silent"] is False
     later = (await client.post("/api/admin/work-tasks", json=body)).json()["data"]
     assert later["status"] == "todo" and later["needs_drive"] is True
 
@@ -344,6 +346,8 @@ async def test_starting_an_agent_from_the_task_page(
         json={"assignee": {"type": "bot", "id": str(bot.id)}, "start": True},
     )
     assert handed.json()["data"]["status"] == "waiting"
+    # 两种转交的写法都写明是谁做的。
+    assert "alice交给" in [e["human_text"] for e in handed.json()["data"]["events"]][1]
     assert (await db_session.scalar(select(func.count()).select_from(Task))) == 3
 
 
