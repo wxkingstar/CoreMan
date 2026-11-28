@@ -15,7 +15,7 @@ const hint = computed(() => {
 
 <template>
   <router-link
-    :to="{ name: 'work-tasks', params: { code } }"
+    :to="{ name: 'work-task', params: { code } }"
     class="task-code"
     :title="hint"
     data-test="task-code"

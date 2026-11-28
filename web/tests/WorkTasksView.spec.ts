@@ -2,8 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h } from 'vue'
-import { createMemoryHistory, createRouter, RouterView, useRoute } from 'vue-router'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 const task = vi.hoisted(() => ({
   id: 7, code: 'T-7', title: '查上周退货率', summary: '算出上周退货率并和前一周比较', status: 'todo', source: 'web', mirror: false,
@@ -40,7 +39,8 @@ vi.mock('@/api/workTasks', () => ({
       ...task,
       related_codes: ['T-5'],
       linked: { 'T-5': { title: '算上上周退货率', status: 'done' }, 'T-9': { title: '拉退货明细', status: 'in_progress' } },
-      watching: false, watchers: [], parent: null, children: [],
+      watching: false, watchers: [], parent: null,
+      children: [{ ...task, code: 'T-9', title: '拉退货明细', status: 'in_progress', now: '数据助手在拉明细' }],
       events: [
         { id: 1, kind: 'created', actor_type: 'human', actor_name: '李雷', human_text: '李雷建了任务', agent_detail: { brief: '口径按退货单数除以签收单数' }, created_at: '2026-11-02T00:00:00Z' },
         { id: 3, kind: 'subtask', actor_type: 'bot', actor_name: '数据助手', human_text: '拆出 T-9：拉退货明细', agent_detail: {}, created_at: '2026-11-02T00:00:00Z' },
@@ -48,6 +48,7 @@ vi.mock('@/api/workTasks', () => ({
       ],
       agent: { brief: '统计上周退货率，口径按退货单数除以签收单数', digest: '', report: '总结论：退货率 4.2%', waiting_on: null, runs: [], decision: null },
     }),
+    markdown: vi.fn().mockResolvedValue('# T-7 查上周退货率\n\n- 状态：待开始\n'),
     answer: vi.fn().mockResolvedValue({ ...asked, ask: null, status: 'in_progress' }),
     stats: vi.fn().mockResolvedValue({
       days: 30, handoffs_per_task: 1.5, agent_first_pass_rate: 0.8, agent_reviewed: 5,
@@ -59,14 +60,15 @@ vi.mock('@/api/workTasks', () => ({
 
 import { workTasks } from '@/api/workTasks'
 import { i18n } from '@/i18n'
+import WorkTaskDetailView from '@/views/WorkTaskDetailView.vue'
 import WorkTasksView from '@/views/WorkTasksView.vue'
-import { viewKey } from '@/router/viewKey'
 
 function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/work-tasks/:code?', name: 'work-tasks', meta: { viewKey: 'work-tasks' }, component: WorkTasksView },
+      { path: '/work-tasks', name: 'work-tasks', component: WorkTasksView },
+      { path: '/work-tasks/:code', name: 'work-task', component: WorkTaskDetailView },
     ],
   })
 }
@@ -111,13 +113,14 @@ describe('WorkTasksView', () => {
     expect(workTasks.answer).toHaveBeenCalledWith('T-8', { ask_id: 'a1', option: 'decline', text: '这周没空' })
   })
 
-  it('opens a task with the now line, the human history and the folded agent layer', async () => {
+  it('opens a task as its own page with the now line, the human history and the folded agent layer', async () => {
     const router = makeRouter()
     await router.push('/work-tasks/T-7')
-    mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
     await flushPromises()
     expect(workTasks.get).toHaveBeenCalledWith('T-7')
-    const drawer = document.body.querySelector('[data-test="work-task-detail"]')?.closest('.el-drawer') ?? document.body
+    const drawer = wrapper.element
+    expect(drawer.querySelector('[data-test="back-to-list"]')).not.toBeNull()
     expect(drawer.querySelector('[data-test="work-task-now"]')?.textContent).toContain('还没开工')
     expect(drawer.querySelector('[data-test="copy-drive"]')).not.toBeNull()
     expect(drawer.textContent).toContain('李雷建了任务')
@@ -126,12 +129,43 @@ describe('WorkTasksView', () => {
     const layer = drawer.querySelector('[data-test="agent-layer"]')
     expect(layer?.querySelector('.el-collapse-item.is-active')).toBeNull()
     expect(layer?.querySelector('[data-test="agent-report"]')?.textContent).toContain(i18n.global.t('workTasks.report'))
+    // 事件里给 AI 的细节不出现在给人看的经过里。
+    expect(drawer.querySelector('.el-timeline')?.textContent).not.toContain('口径按退货单数')
+    // 子任务是表格：编号、标题、状态、执行人、进展。
+    const children = wrapper.find('[data-test="work-task-children"]')
+    expect(children.text()).toContain('拉退货明细')
+    expect(children.text()).toContain('数据助手在拉明细')
+    expect(children.text()).toContain(i18n.global.t('workTasks.statuses.in_progress'))
+    await children.find('.el-table__row').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.params.code).toBe('T-9')
+    wrapper.unmount()
+  })
+
+  it('gives AI a plain-text page with ?format=md', async () => {
+    const router = makeRouter()
+    await router.push('/work-tasks/T-7?format=md')
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(workTasks.markdown).toHaveBeenCalledWith('T-7')
+    expect(wrapper.find('[data-test="work-task-plain"]').text()).toContain('# T-7 查上周退货率')
+    expect(wrapper.find('[data-test="work-task-detail"]').exists()).toBe(false)
+  })
+
+  it('goes back to the list from a task opened by link', async () => {
+    const router = makeRouter()
+    await router.push('/work-tasks/T-7')
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    await wrapper.find('[data-test="back-to-list"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.name).toBe('work-tasks')
   })
 
   it('links task codes in related and in the text, each with its status icon', async () => {
     const router = makeRouter()
     await router.push('/work-tasks/T-7')
-    mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
+    const page = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
     await flushPromises()
     const links = [...document.body.querySelectorAll<HTMLAnchorElement>('[data-test="task-code"]')]
     const related = links.find(a => a.textContent?.includes('T-5'))
@@ -144,6 +178,7 @@ describe('WorkTasksView', () => {
     expect(mentioned?.getAttribute('title')).toContain('拉退货明细')
     // 任务自己的编号不变成链接。
     expect(links.some(a => a.textContent?.trim() === 'T-7')).toBe(false)
+    page.unmount()
   })
 
   it('shows stats: backlog, sources and the first-pass rate', async () => {
@@ -160,47 +195,29 @@ describe('WorkTasksView', () => {
     expect(panel.text()).toContain(i18n.global.t('workTasks.sources.api'))
   })
 
-  it('shows the creation time and opens a task in a dialog without reloading the list', async () => {
+  it('opens a task on its own page and keeps the chosen tab in the address', async () => {
     const router = makeRouter()
     await router.push('/work-tasks')
-    await router.isReady()
-    // 和管理台布局一样给 router-view 加 key（布局用的就是 viewKey）。
-    const wrapper = mount(
-      defineComponent({
-        setup: () => {
-          const route = useRoute()
-          return () => h(RouterView, { key: viewKey(route) })
-        },
-      }),
-      { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body },
-    )
+    const wrapper = mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] } })
     await flushPromises()
     expect(wrapper.text()).toContain(i18n.global.t('workTasks.created'))
-    // 先切到「我发起的」，点开任务后仍停在这一栏。
     const tabs = wrapper.findAll('[data-test="work-task-views"] input')
     await tabs[1].setValue(true)
     await flushPromises()
-    const listed = vi.mocked(workTasks.list).mock.calls.length
     expect(vi.mocked(workTasks.list).mock.lastCall?.[0]).toMatchObject({ view: 'created' })
-    vi.mocked(workTasks.get).mockClear()
+    expect(router.currentRoute.value.query.view).toBe('created')
     await wrapper.find('.tasks-table .el-table__row').trigger('click')
     await flushPromises()
+    expect(router.currentRoute.value.name).toBe('work-task')
     expect(router.currentRoute.value.params.code).toBe('T-7')
-    expect(workTasks.get).toHaveBeenCalledWith('T-7')
-    // 点开详情不重建页面、不重新加载列表，也不跳回「待我处理」。
-    expect(vi.mocked(workTasks.list).mock.calls.length).toBe(listed)
-    expect((wrapper.findAll('[data-test="work-task-views"] input')[1].element as HTMLInputElement).checked).toBe(true)
-    const dialog = document.body.querySelector('.task-dialog')
-    expect(dialog).not.toBeNull()
-    // 关掉弹窗（Esc 与右上角关闭走同一个 close 事件），回到列表，同样不重新加载。
-    // Esc、右上角关闭都会让弹窗发出 close（jsdom 不跑过渡动画，这里直接发）。
-    const detail = wrapper
-      .findAllComponents({ name: 'ElDialog' })
-      .find(d => d.attributes('data-test') === 'work-task-detail' || d.props('modelValue') === true)
-    detail?.vm.$emit('close')
-    await flushPromises()
-    expect(router.currentRoute.value.params.code ?? '').toBe('')
-    expect(vi.mocked(workTasks.list).mock.calls.length).toBe(listed)
     wrapper.unmount()
+  })
+
+  it('reopens on the tab kept in the address', async () => {
+    const router = makeRouter()
+    await router.push('/work-tasks?view=watching')
+    mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(vi.mocked(workTasks.list).mock.lastCall?.[0]).toMatchObject({ view: 'watching' })
   })
 })

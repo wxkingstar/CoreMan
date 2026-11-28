@@ -8,8 +8,6 @@ declare module 'vue-router' {
   interface RouteMeta {
     public?: boolean
     roles?: string[]
-    /** 布局按它决定换地址时要不要重建页面，见 router/viewKey.ts。 */
-    viewKey?: string
   }
 }
 
@@ -17,6 +15,8 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
+    // 单个任务是独立页面，不套管理台布局：飞书里点开快；带 ?format=md 时只给纯文本。
+    { path: '/work-tasks/:code', name: 'work-task', component: () => import('@/views/WorkTaskDetailView.vue') },
     {
       path: '/',
       component: () => import('@/layouts/AdminLayout.vue'),
@@ -44,8 +44,7 @@ export const router = createRouter({
         { path: 'skill-approvals', name: 'skill-approvals', component: () => import('@/views/SkillApprovalsView.vue'), meta: { roles: ['ai_committee', 'platform_admin'] } },
         { path: 'cron', name: 'cron', component: () => import('@/views/CronView.vue') },
         { path: 'chat-logs', name: 'chat-logs', component: () => import('@/views/ChatLogsView.vue') },
-        // 列表和详情同一个路由：打开、关闭详情只换参数，列表不重新挂载、不刷新。
-        { path: 'work-tasks/:code?', name: 'work-tasks', meta: { viewKey: 'work-tasks' }, component: () => import('@/views/WorkTasksView.vue') },
+        { path: 'work-tasks', name: 'work-tasks', component: () => import('@/views/WorkTasksView.vue') },
         {
           path: 'announcements',
           name: 'announcements',
