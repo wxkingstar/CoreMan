@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from coreman.core.bus import tasks
 from coreman.core.db.models import (
+    ApiClient,
     ApiTask,
     OutboxItem,
     PersonalAccessToken,
@@ -84,6 +85,40 @@ async def test_api_tasks_are_mirrored_read_only_and_follow_their_turn(db_session
     await db_session.commit()
     mirrors = list(await db_session.scalars(select(WorkTask).where(WorkTask.source == "api")))
     assert len(mirrors) == 1 and mirrors[0].status == "done"
+
+
+async def test_records_name_the_calling_system_and_keep_markdown_out_of_the_one_liner(db_session):
+    bot, _, _ = await seed_bot(db_session)
+    bot.platform = "feishu"
+    alice = await _alice(db_session)
+    db_session.add(ApiClient(app_key="ops-monitor", name="监控系统", secret_enc="x"))
+    await db_session.flush()
+    api = ApiTask(
+        client_key="ops-monitor",
+        request_id="r1",
+        user_id=alice.id,
+        bot_id=bot.id,
+        prompt="## 排查告警\n看一下磁盘",
+        target="p2p",
+        chat_id="oc_dm",
+    )
+    db_session.add(api)
+    await db_session.commit()
+    await ledger.sync(db_session, datetime.now(UTC))
+    await db_session.commit()
+    mirror = await db_session.scalar(select(WorkTask).where(WorkTask.origin_ref == f"api:{api.id}"))
+    # 写出是哪个业务系统：一排「业务系统发起的私聊任务」分不出谁是谁；私聊的内容仍然不抄。
+    assert mirror.title == "监控系统发起的私聊任务" and mirror.summary == "alice经监控系统发起"
+    assert mirror.brief == ""
+
+    # AI 的回复原文带加粗、标题、列表和链接：给人看的一句话里不留这些记号。
+    assert (
+        service.plain_line(
+            "**结论：**发货回传在 `test` 环境走通了\n- 见 [发布记录](https://example.com/r/1)"
+        )
+        == "结论：发货回传在 test 环境走通了 见 发布记录"
+    )
+    assert ledger._title("# 排查告警\n看一下磁盘", "求助：") == "求助：排查告警"
 
 
 async def test_due_reminders_go_once_and_cards_postpone(db_session):

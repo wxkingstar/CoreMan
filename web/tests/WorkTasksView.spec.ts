@@ -120,6 +120,36 @@ describe('WorkTasksView', () => {
     expect(workTasks.get).not.toHaveBeenCalled()
   })
 
+  it('shows what I started under what needs me, and keeps automatic records out unless asked', async () => {
+    const going = { ...task, id: 12, code: 'T-12', title: '对接仓储系统', status: 'in_progress', needs_drive: false, now: '数据助手处理中' }
+    // 「待我处理」一次、「我发起且还在进行的」一次：后一次里已经在上面列过的不再重复。
+    vi.mocked(workTasks.list).mockImplementation(async (params = {}) => (
+      params.unfinished
+        ? { items: [task, going], counts: {}, needs_me: 2 }
+        : { items: [task, asked], counts: { todo: 2 }, needs_me: 2 }
+    ) as never)
+    const router = makeRouter()
+    await router.push('/work-tasks')
+    const wrapper = mount(WorkTasksView, { global: { plugins: [ElementPlus, i18n, router] } })
+    await flushPromises()
+    expect(workTasks.list).toHaveBeenCalledWith(expect.objectContaining({ view: 'created', unfinished: true }))
+    const mine = wrapper.find('[data-test="tasks-mine"]')
+    expect(mine.find('h4').text()).toBe(i18n.global.t('workTasks.myOpen'))
+    expect(mine.text()).toContain('对接仓储系统')
+    expect(mine.text()).not.toContain('查上周退货率')
+    // 换到「全部」：只剩一张表，默认不带自动记录，勾上才带，并记在地址里。
+    const tabs = wrapper.findAll('[data-test="work-task-views"] input')
+    await tabs[3].setValue(true)
+    await flushPromises()
+    expect(wrapper.find('[data-test="tasks-mine"]').exists()).toBe(false)
+    expect(vi.mocked(workTasks.list).mock.lastCall?.[0]).toMatchObject({ view: 'all', records: undefined })
+    await wrapper.find('[data-test="show-records"] input').setValue(true)
+    await flushPromises()
+    expect(vi.mocked(workTasks.list).mock.lastCall?.[0]).toMatchObject({ view: 'all', records: true })
+    expect(router.currentRoute.value.query.records).toBe('1')
+    vi.mocked(workTasks.list).mockResolvedValue({ items: [task, asked], counts: { todo: 2 }, needs_me: 2 } as never)
+  })
+
   it('asks for a reason before declining', async () => {
     const router = makeRouter()
     await router.push('/work-tasks')

@@ -1259,6 +1259,12 @@ def register_tasks(sub: Any) -> None:
         action="store_true",
         help="把拆出来的步骤和问人的决策点也逐条列出（默认只列顶层的事）",
     )
+    p.add_argument(
+        "--records",
+        action="store_true",
+        help="把自动记下的接口任务、求助记录也列出来（默认不列）",
+    )
+    p.add_argument("--unfinished", action="store_true", help="只看还没结束的")
     p.add_argument("--limit", type=int, default=50, help="最多显示几条（1-200）")
     p.add_argument("--before-id", type=int, metavar="id", help="只看 id 小于它的（翻页用）")
     leaf(ops, "show", "查看任务详情、待回答的问题、事件与运行记录", tasks_show).add_argument(
@@ -1409,6 +1415,8 @@ async def tasks_list(c: AdminClient, args: argparse.Namespace) -> int:
         chat_id=args.chat_id,
         include_shadow=args.include_shadow,
         scope="all" if args.all else None,
+        records=True if args.records else None,
+        unfinished=True if args.unfinished else None,
         q=args.keyword,
         limit=args.limit,
         before_id=args.before_id,

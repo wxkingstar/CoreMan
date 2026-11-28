@@ -85,6 +85,10 @@ export interface WorkTaskDetail extends WorkTask {
 }
 export interface WorkTaskQuery {
   view?: WorkTaskView; status?: string; q?: string; include_shadow?: boolean; before_id?: number; limit?: number
+  /** 把自动记下的接口任务、求助也列出来（默认不列）。 */
+  records?: boolean
+  /** 只看还没结束的。 */
+  unfinished?: boolean
 }
 export interface AssigneeIn { type: 'human' | 'bot'; id: string }
 export interface WorkTaskCreate {

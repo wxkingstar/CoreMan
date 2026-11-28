@@ -685,7 +685,8 @@ coreman chats stats [与 list 相同的筛选]
 ```bash
 # 查看
 coreman tasks list [--view all|needs_me|created|watching] [--status todo] [--assignee 执行人] [--all] \
-  [--chat-id 群] [--keyword 词] [--include-shadow] [--limit 50] [--before-id 100]
+  [--chat-id 群] [--keyword 词] [--include-shadow] [--records] [--unfinished] [--limit 50] [--before-id 100]
+# 默认只列人建的顶层的事；--records 把自动记下的接口任务、求助记录也列出来，--unfinished 只看还没结束的
 coreman tasks show T-12                     # 现在在等什么、待回答的问题、子任务、产出、事件、运行记录、完整汇报
 coreman tasks stats [--days 30]             # 积压、各来源处理时长、交接次数、AI 员工一次验收通过率
 

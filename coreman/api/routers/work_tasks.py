@@ -86,6 +86,8 @@ async def list_work_tasks(
     assignee_user_id: uuid.UUID | None = None,
     include_shadow: bool = True,
     scope: Literal["top", "all"] = "top",
+    records: bool = False,
+    unfinished: bool = False,
     q: str | None = Query(default=None, max_length=100),
     before_id: int | None = None,
     limit: int = Query(default=50, ge=1, le=200),
@@ -96,8 +98,15 @@ async def list_work_tasks(
     conditions: list[Any] = []
     # 默认只列顶层的事：拆出来的步骤和问人的决策点收在所属那件事下面（点开看），不然一件事
     # 会在列表里铺开十几行。「待我处理」要看到派给我的每一件；按人、按关键词找时也不收。
-    if scope == "top" and view != "needs_me" and not (q or assignee_bot_id or assignee_user_id):
+    browsing = view != "needs_me" and not (q or assignee_bot_id or assignee_user_id)
+    if scope == "top" and browsing:
         conditions.append(WorkTask.parent_id.is_(None))
+    # 自动记下的记录（接口任务、求助）默认也不列：它们是机器之间的流水，一多就把人建的事淹没了。
+    # 要看时带 records；「待我处理」、按人和按关键词找时照样列。
+    if not records and browsing:
+        conditions.append(WorkTask.origin_ref.is_(None))
+    if unfinished:
+        conditions.append(WorkTask.status.in_(WORK_TASK_OPEN))
     if view == "needs_me":
         conditions.append(service.needs_me(user.id))
     elif view == "created":
