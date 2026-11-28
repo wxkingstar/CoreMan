@@ -42,6 +42,8 @@ ENTITY_SELECTS = {
     "coreman/core/work_tasks/cards.py": 1,
     # 群里的进展卡：两处都是 session.scalar 取出站项整行（自动还原），任务卡片不属于个人助理
     "coreman/core/work_tasks/progress.py": 2,
+    # 群里没人答的提问卡：session.scalar 取那张卡的出站项整行（自动还原），只读消息编号与所在群
+    "coreman/core/work_tasks/due.py": 1,
     # 业务系统发起的任务里的写操作批次：显式还原后只读状态与业务系统、操作名
     "coreman/core/api_tasks/writes.py": 1,
     # 引用回复载入原任务：原任务会话第一轮和最后一轮的回复，session.scalar（自动还原）

@@ -1,9 +1,11 @@
 """群里的进展卡：从群里发起、拆了子任务的事，在群里留一张卡，原地更新。
 
 子任务不在群里出声（结果由平台交回上级），群里的人只看得到开头那一句，之后很久没有动静，
-不知道事情还在不在做、卡在谁那里。这张卡按任务此刻的状态画：每件子任务一行，谁在做、做完了
-没有、在等谁；状态一变就改这张卡，不另发消息。内容全部取自任务上给人看的那条线（标题、
-一句话结果、在等什么），不经过模型。
+不知道事情还在不在做、卡在谁那里。这张卡是一张待办清单，按任务此刻的状态画：每件子任务一行，
+做完的打勾、写用了多久和一句话结果，在做的写几点开始和最近一次进展，在等人的写等谁、从几点
+起；后面还没开始的步骤（牵头的员工用 `update_task` 的 `plan` 写的）列在最后。状态一变就改
+这张卡，不另发消息。内容全部取自任务上给人看的那条线，不经过模型；时间用飞书的
+`<local_datetime>`，按看的人的时区显示。
 
 只管调度员交接出来的任务（来源 `dispatch`，有来源群）：根任务第一次有子任务时发卡，回复在
 发起人的那条消息下面；之后根任务或它下面任何一件事有变化都重画。卡片由根任务的执行员工发
@@ -12,6 +14,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -19,13 +22,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coreman.core.api_tasks import reply_to
 from coreman.core.bus import outbox
-from coreman.core.db.models import Bot, InboundEvent, OutboxItem, User, WorkTask
+from coreman.core.chat.liveness import clock
+from coreman.core.db.models import Bot, InboundEvent, OutboxItem, User, WorkTask, WorkTaskEvent
 from coreman.core.work_tasks.service import clip, name_of
 
 ASK_PREFIX = "[问题]"
 LINE_MAX = 120
 # 做完的事最多列这么多件（最近的）：再早的只说还有几件，细的去任务页看。
 MAX_DONE = 8
+# 后面还没开始的步骤最多列这么多条。
+MAX_PLAN = 8
+PLAN_KIND = "plan"
 
 
 def _key(root: WorkTask) -> str:
@@ -64,33 +71,91 @@ async def _who(session: AsyncSession, row: WorkTask) -> str:
     return ""
 
 
-async def _line(session: AsyncSession, child: WorkTask, asked: list[str]) -> tuple[str, str]:
-    """一件子任务的那一行，以及它算哪一类（done / waiting_human / running / cancelled）。"""
+def _took(child: WorkTask) -> str:
+    """做完的一件用了多久。"""
+    start = child.claimed_at or child.created_at
+    if child.closed_at is None or start is None:
+        return ""
+    minutes = int((child.closed_at - start).total_seconds() // 60)
+    if minutes < 1:
+        return "不到 1 分钟"
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    return f"{minutes // 60} 小时 {minutes % 60} 分钟" if minutes % 60 else f"{minutes // 60} 小时"
+
+
+async def _latest(session: AsyncSession, child: WorkTask, now: datetime) -> str:
+    """在做的一件最近一次给人看的进展（员工用 `update_task` 写的那一句）和时间。"""
+    event = await session.scalar(
+        select(WorkTaskEvent)
+        .where(
+            WorkTaskEvent.work_task_id == child.id,
+            WorkTaskEvent.kind == "progress",
+            WorkTaskEvent.human_text != "",
+        )
+        .order_by(WorkTaskEvent.id.desc())
+        .limit(1)
+    )
+    if event is None:
+        return ""
+    return f"，{clip(event.human_text, 40)}（{clock(event.created_at, now)}）"
+
+
+async def _line(
+    session: AsyncSession, child: WorkTask, asked: list[str], now: datetime
+) -> tuple[str, str]:
+    """一件子任务的那一行，以及它算哪一类（done / waiting_human / running / cancelled）。
+
+    标题、结果这些人写的字先按长度截断，时间标签接在后面：标签不能被截断。
+    """
     who = await _who(session, child)
+    since = clock(child.claimed_at or child.created_at, now)
     if is_question(child):
         question = child.title.removeprefix("问：")
         if child.status == "done":
             # 回答写在后面：群里的人要知道定了什么，不只是「答过了」。
             answer = f" → {child.summary}" if child.summary else ""
-            return f"✅ {who} 定了：{question}{answer}", "done"
+            return clip(f"✅ {who} 定了：{question}{answer}", LINE_MAX), "done"
         if child.status == "cancelled":
-            return f"⏹ 不用{who}回答了：{question}", "cancelled"
-        return f"🟡 等 **{who}** 回答：{question}", "waiting_human"
+            return clip(f"⏹ 不用{who}回答了：{question}", LINE_MAX), "cancelled"
+        text = clip(f"🟡 等 **{who}** 回答：{question}", LINE_MAX)
+        return f"{text} · {clock(child.created_at, now)} 问的", "waiting_human"
     head = f"{child.title} — {who}" if who else child.title
     if child.status == "done":
-        return f"✅ {head}" + (f"：{child.summary}" if child.summary else ""), "done"
+        text = clip(f"✅ {head}" + (f"：{child.summary}" if child.summary else ""), LINE_MAX)
+        took = _took(child)
+        return text + (f"（用时 {took}）" if took else ""), "done"
     if child.status == "cancelled":
-        return f"⏹ {head}（已取消）", "cancelled"
+        return clip(f"⏹ {head}（已取消）", LINE_MAX), "cancelled"
     waiting = child.waiting_on or {}
     if asked:
-        return f"🟡 {head}，在等 **{'、'.join(asked)}** 回答", "waiting_human"
+        text = clip(f"🟡 {head}，在等 **{'、'.join(asked)}** 回答", LINE_MAX)
+        return f"{text} · {since} 开始", "waiting_human"
     if child.status == "waiting" and waiting.get("kind") == "human":
-        return f"🟡 {head}：{waiting.get('human_text') or '等人处理'}", "waiting_human"
+        text = clip(f"🟡 {head}：{waiting.get('human_text') or '等人处理'}", LINE_MAX)
+        return f"{text} · {since} 开始", "waiting_human"
     if child.status == "review":
-        return f"🟡 {head}，等验收", "waiting_human"
+        return clip(f"🟡 {head}，等验收", LINE_MAX), "waiting_human"
     if child.status == "todo" and child.assignee_user_id:
-        return f"🟡 等 **{who}** 接手：{child.title}", "waiting_human"
-    return f"⏳ {head}", "running"
+        return clip(f"🟡 等 **{who}** 接手：{child.title}", LINE_MAX), "waiting_human"
+    return (
+        f"{clip(f'⏳ {head}', LINE_MAX)} · {since} 开始{await _latest(session, child, now)}",
+        "running",
+    )
+
+
+async def plan_steps(session: AsyncSession, root: WorkTask, taken: set[str]) -> list[str]:
+    """牵头的员工写下的、后面还没开始的步骤；已经拆成子任务的（标题相同）不再列。"""
+    event = await session.scalar(
+        select(WorkTaskEvent)
+        .where(WorkTaskEvent.work_task_id == root.id, WorkTaskEvent.kind == PLAN_KIND)
+        .order_by(WorkTaskEvent.id.desc())
+        .limit(1)
+    )
+    steps = (event.agent_detail or {}).get("steps") if event is not None else None
+    if not isinstance(steps, list):
+        return []
+    return [str(step) for step in steps if isinstance(step, str) and step not in taken][:MAX_PLAN]
 
 
 async def _asked(session: AsyncSession, children: list[WorkTask]) -> dict[int, list[str]]:
@@ -129,11 +194,12 @@ async def card(session: AsyncSession, root: WorkTask, base_url: str) -> dict[str
     if not children:
         return None
     asked = await _asked(session, children)
+    now = datetime.now(UTC)
     lines: list[str] = []
     kinds: list[str] = []
     for child in children:
-        text, kind = await _line(session, child, asked.get(child.id, []))
-        lines.append(clip(text, LINE_MAX))
+        text, kind = await _line(session, child, asked.get(child.id, []), now)
+        lines.append(text)
         kinds.append(kind)
     live = [k for k in kinds if k != "cancelled"]
     done = sum(k == "done" for k in live)
@@ -147,21 +213,17 @@ async def card(session: AsyncSession, root: WorkTask, base_url: str) -> dict[str
         state, template = "等人处理", "orange"
     else:
         state, template = "进行中", "blue"
-    # 先写现在的事（等人的排最前，再是在做的），做完的收在下面：打开卡先看到卡在哪、谁在做。
-    current = [t for t, k in zip(lines, kinds, strict=True) if k == "waiting_human"] + [
-        t for t, k in zip(lines, kinds, strict=True) if k == "running"
-    ]
-    finished = [t for t, k in zip(lines, kinds, strict=True) if k in ("done", "cancelled")]
-    shown = finished[-MAX_DONE:]
-    blocks: list[str] = []
-    if current:
-        blocks.append("\n".join(current))
-    if shown:
-        earlier = len(finished) - len(shown)
-        head = "**已完成**" + (f"（更早的 {earlier} 件见任务页）" if earlier else "")
-        blocks.append("\n".join([head, *shown]) if current or earlier else "\n".join(shown))
-    body = "\n\n".join(blocks)
-    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": body}]
+    # 按先后排成一张清单：做完的打勾在上，在做和等人的接着，后面的步骤在最后。
+    # 做完的太多时只留最近几件，免得正在做的那几行被挤得很远。
+    finished = [n for n, k in enumerate(kinds) if k in ("done", "cancelled")]
+    hidden = set(finished[:-MAX_DONE]) if len(finished) > MAX_DONE else set()
+    shown = [text for n, text in enumerate(lines) if n not in hidden]
+    if hidden:
+        shown.insert(0, f"✅ 更早做完的 {len(hidden)} 件见任务页")
+    if root.status not in ("done", "cancelled"):
+        taken = {child.title for child in children}
+        shown += [f"☐ {clip(step, LINE_MAX)}" for step in await plan_steps(session, root, taken)]
+    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": "\n".join(shown)}]
     if root.status == "done" and root.summary:
         elements.append({"tag": "markdown", "content": f"**结果：**{root.summary}"})
     url = f"{base_url.rstrip('/')}/work-tasks/{root.code}"

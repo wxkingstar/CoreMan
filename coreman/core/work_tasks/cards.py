@@ -285,15 +285,21 @@ async def _close_ask(
 async def _notify(
     session: AsyncSession, row: WorkTask, line: str, actor_id: uuid.UUID | None, base_url: str
 ) -> None:
-    """完成、取消：告诉发起人、代表人和关注人（做这件事的人自己不用再收）。"""
+    """完成、取消：告诉发起人、代表人和关注人（做这件事的人自己不用再收）。
+
+    AI 员工拆出来的子任务和它问的问题，结果交回上级任务，不再逐件私信代表人；从群里发起的事
+    在群里有进展卡。这两类只通知自己点了关注的人。
+    """
     bot = await sender(session, row)
     if bot is None:
         return
-    people = {row.requester_user_id, row.principal_user_id} | set(
+    watchers = set(
         await session.scalars(
             select(WorkTaskWatcher.user_id).where(WorkTaskWatcher.work_task_id == row.id)
         )
     )
+    quiet = row.requester_bot_id is not None or (row.parent_id is None and progress.group_root(row))
+    people = watchers if quiet else {row.requester_user_id, row.principal_user_id} | watchers
     for user_id in people - {None, actor_id}:
         assert user_id is not None
         user = await session.get(User, user_id)

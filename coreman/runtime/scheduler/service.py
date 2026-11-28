@@ -375,6 +375,7 @@ class SchedulerService(Service):
                         await session.commit()
                     async with self._factory() as session:
                         reminded = await due.tick(session, now, get_settings().public_base_url)
+                        reminded += await due.remind_asks(session, now)
                         await session.commit()
                     if mirrored or reminded:
                         self._log.info("work_tasks_tick", mirrored=mirrored, reminded=reminded)
