@@ -691,8 +691,11 @@ coreman tasks stats [--days 30]             # 积压、各来源处理时长、�
 
 # 新建与指派
 coreman tasks create "整理供应商名单" [--summary 一句话] [--brief 文字 | --brief-file brief.md] \
-  [--assignee bob] [--reviewer alice] [--review on|off] [--priority normal|high|urgent] [--due 2026-12-01T18:00]
-coreman tasks assign T-12 sales_bot [--note 交接说明] [--review on|off]
+  [--assignee bob] [--reviewer alice] [--review on|off] [--priority normal|high|urgent] [--due 2026-12-01T18:00] [--start]
+coreman tasks assign T-12 sales_bot [--note 交接说明] [--review on|off] [--start]
+coreman tasks start T-12                            # 叫任务上的 AI 员工开工或接着做，以你的身份做（同任务页的「开工」）
+
+# --start：交给 AI 员工时马上开工。开不了（例如你还没私聊过它，结果没处回报）时任务照样建好、派好，原因写到标准错误。
 
 # 处理
 coreman tasks answer T-12 accept                    # 接受；拒绝要写理由：answer T-12 decline "这周排不开"

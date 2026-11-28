@@ -67,6 +67,8 @@ export interface WorkTaskDetail extends WorkTask {
   watching: boolean; watchers: { id: string; name: string }[]
   parent: { code: string; title: string } | null; children: WorkTask[]
   overview: WorkTaskOverview
+  /** 新建或指派时选了现在开工但没开成的原因（只在那一次的返回里有）。 */
+  start_error?: string
   /** 页面上出现的别的任务编号 → 标题和状态（编号可点、旁边标状态）。 */
   linked: Record<string, { title: string; status: WorkTaskStatus }>
   events: WorkTaskEvent[]
@@ -89,6 +91,8 @@ export interface WorkTaskCreate {
   title: string; summary?: string; brief?: string; assignee?: AssigneeIn | null
   reviewer_user_id?: string | null; review_required?: boolean | null
   priority?: string; due_at?: string | null
+  /** 交给 AI 员工时建好就开工。 */
+  start?: boolean
 }
 export interface WorkTaskPatch {
   title?: string; summary?: string; brief?: string; priority?: string; due_at?: string | null
@@ -113,8 +117,10 @@ export const workTasks = {
     (await http.get<string>(one(code), { params: { format: 'md' }, responseType: 'text' })).data,
   stats: (days = 30) => call<WorkTaskStats>(http.get(`${base}/stats`, { params: { days } })),
   create: (body: WorkTaskCreate) => call<WorkTaskDetail>(http.post(base, body)),
-  assign: (code: string, body: { assignee: AssigneeIn; note?: string; review_required?: boolean | null }) =>
+  assign: (code: string, body: { assignee: AssigneeIn; note?: string; review_required?: boolean | null; start?: boolean }) =>
     call<WorkTaskDetail>(http.post(`${one(code)}/assign`, body)),
+  /** 叫任务上的 AI 员工开工或接着做：以点的人的身份做。 */
+  start: (code: string) => call<WorkTaskDetail>(http.post(`${one(code)}/start`)),
   answer: (code: string, body: { ask_id: string; option: string; text?: string }) =>
     call<WorkTaskDetail>(http.post(`${one(code)}/answer`, body)),
   comment: (code: string, text: string) => call<WorkTaskDetail>(http.post(`${one(code)}/comment`, { text })),

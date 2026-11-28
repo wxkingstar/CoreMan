@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -1264,11 +1265,14 @@ def register_tasks(sub: Any) -> None:
         "code", help="任务编号"
     )
 
-    p = leaf(ops, "create", "新建任务（指派给 AI 员工后要在飞书里叫它开工）", tasks_create)
+    p = leaf(
+        ops, "create", "新建任务（指派给 AI 员工时加 --start 建好就开工，否则等人叫）", tasks_create
+    )
     p.add_argument("title", help="标题")
     p.add_argument("--summary", help="一句话说明")
     add_brief(p)
     p.add_argument("--assignee", metavar="执行人", help=ASSIGNEE_HELP)
+    p.add_argument("--start", action="store_true", help=START_HELP)
     add_task_fields(p)
 
     p = leaf(ops, "assign", "指派或改派（交给成员或 AI 员工）", tasks_assign)
@@ -1276,6 +1280,11 @@ def register_tasks(sub: Any) -> None:
     p.add_argument("assignee", metavar="执行人", help=ASSIGNEE_HELP)
     p.add_argument("--note", default="", help="交接说明")
     p.add_argument("--review", type=on_off, metavar="on|off", help="交付后是否要验收")
+    p.add_argument("--start", action="store_true", help=START_HELP)
+
+    leaf(ops, "start", "叫任务上的 AI 员工开工或接着做（以你的身份做）", tasks_start).add_argument(
+        "code", help="任务编号"
+    )
 
     p = leaf(
         ops, "answer", "回答任务上待回答的问题（接受/拒绝、验收通过/退回、其他）", tasks_answer
@@ -1322,6 +1331,7 @@ def register_tasks(sub: Any) -> None:
 ASSIGNEE_HELP = (
     "AI 员工（标识、名称或 id）或成员（登录名、邮箱或姓名）；两边都匹配时写 bot:标识 或 user:登录名"
 )
+START_HELP = "交给 AI 员工时马上开工，以你的身份做；开不了时任务照样留着，原因写到标准错误"
 
 
 def add_brief(p: argparse.ArgumentParser) -> None:
@@ -1566,18 +1576,34 @@ async def task_fields(c: AdminClient, args: argparse.Namespace) -> dict[str, Any
     return body
 
 
+def started_or_why(result: Any) -> Any:
+    """带 --start 但没开成：把原因写到标准错误，任务本身照样建好、派好了。"""
+    if isinstance(result, dict) and result.get("start_error"):
+        print(f"没能直接开工：{result['start_error']}", file=sys.stderr)
+    return result
+
+
 async def tasks_create(c: AdminClient, args: argparse.Namespace) -> int:
     body = {"title": args.title, **await task_fields(c, args)}
     if args.assignee:
         body["assignee"] = await task_assignee(c, args.assignee)
-    return echo(args, await c.request("POST", TASKS, body=body))
+    if args.start:
+        body["start"] = True
+    return echo(args, started_or_why(await c.request("POST", TASKS, body=body)))
 
 
 async def tasks_assign(c: AdminClient, args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"assignee": await task_assignee(c, args.assignee), "note": args.note}
     if args.review is not None:
         body["review_required"] = args.review
-    return echo(args, await c.request("POST", f"{TASKS}/{args.code}/assign", body=body))
+    if args.start:
+        body["start"] = True
+    result = await c.request("POST", f"{TASKS}/{args.code}/assign", body=body)
+    return echo(args, started_or_why(result))
+
+
+async def tasks_start(c: AdminClient, args: argparse.Namespace) -> int:
+    return echo(args, await c.request("POST", f"{TASKS}/{args.code}/start", body={}))
 
 
 async def tasks_answer(c: AdminClient, args: argparse.Namespace) -> int:

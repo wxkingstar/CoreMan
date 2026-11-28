@@ -67,6 +67,8 @@ vi.mock('@/api/workTasks', () => ({
     }),
     markdown: vi.fn().mockResolvedValue('# T-7 查上周退货率\n\n- 状态：待开始\n'),
     answer: vi.fn().mockResolvedValue({ ...asked, ask: null, status: 'in_progress' }),
+    start: vi.fn(),
+    create: vi.fn(),
     stats: vi.fn().mockResolvedValue({
       days: 30, handoffs_per_task: 1.5, agent_first_pass_rate: 0.8, agent_reviewed: 5,
       by_source: [{ source: 'api', created: 3, done: 2, avg_hours: 1.2 }],
@@ -78,6 +80,7 @@ vi.mock('@/api/workTasks', () => ({
 import { workTasks } from '@/api/workTasks'
 import { installPageMemory } from '@/composables/usePageMemory'
 import { i18n } from '@/i18n'
+import WorkTaskCreateDialog from '@/components/workTasks/WorkTaskCreateDialog.vue'
 import WorkTaskDetailView from '@/views/WorkTaskDetailView.vue'
 import WorkTasksView from '@/views/WorkTasksView.vue'
 
@@ -207,12 +210,48 @@ describe('WorkTasksView', () => {
     })
     const router = makeRouter()
     await router.push('/work-tasks/T-7')
-    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] } })
+    // 挂到文档上：一栏时操作按钮挪到全貌下面的那个位置，要在文档里才找得到。
+    const wrapper = mount(WorkTaskDetailView, { global: { plugins: [ElementPlus, i18n, router] }, attachTo: document.body })
     await flushPromises()
     expect(wrapper.find('[data-test="work-task-now"]').text()).toContain('还没开工')
     expect(wrapper.find('[data-test="copy-drive"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="overview-progress"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="overview-doing"]').exists()).toBe(false)
+    // 页面上直接点「开工」，不用去飞书里说一句。
+    const started = { ...full, children: [], needs_drive: false, status: 'waiting', now: '排队等数据助手开始', overview: { state: 'running', steps_done: 0, steps_total: 0, asks: [], doing: [], plan: [], done: [], followups: [], latest: null } }
+    vi.mocked(workTasks.start).mockResolvedValueOnce(started as never)
+    const button = wrapper.find('[data-test="start-task"]')
+    expect(button.text()).toBe(i18n.global.t('workTasks.start'))
+    await button.trigger('click')
+    await flushPromises()
+    expect(workTasks.start).toHaveBeenCalledWith('T-7')
+    expect(wrapper.find('[data-test="work-task-now"]').text()).toContain('排队等数据助手开始')
+    expect(wrapper.find('[data-test="start-task"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('starts a new task for an AI employee right away unless told to leave it', async () => {
+    const created = await vi.mocked(workTasks.get)('T-7')
+    vi.mocked(workTasks.create).mockResolvedValue({ ...created, start_error: '请他先私聊「数据助手」一次' } as never)
+    const wrapper = mount(WorkTaskCreateDialog, {
+      props: { modelValue: true },
+      global: { plugins: [ElementPlus, i18n], stubs: { AssigneePicker: { template: '<button data-test="pick-bot" @click="$emit(\'update:modelValue\', { type: \'bot\', id: \'b1\' })" />' } } },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    const body = (): Element => document.body
+    ;(body().querySelector('[data-test="create-title"] input, input[data-test="create-title"]') as HTMLInputElement).value = '查上周退货率'
+    body().querySelector('[data-test="create-title"] input, input[data-test="create-title"]')!.dispatchEvent(new Event('input'))
+    ;(body().querySelector('[data-test="pick-bot"]') as HTMLElement).click()
+    await flushPromises()
+    // 交给 AI 员工：默认现在开工，说明写清以谁的身份做、结果发到哪。
+    expect(body().querySelector('.create-hint')?.textContent).toContain(i18n.global.t('workTasks.startNowHint'))
+    ;(body().querySelector('[data-test="create-submit"]') as HTMLElement).click()
+    await flushPromises()
+    expect(vi.mocked(workTasks.create).mock.lastCall?.[0]).toMatchObject({ title: '查上周退货率', start: true })
+    // 没开成：任务照样建好，原因提示给人。
+    expect(document.body.textContent).toContain('请他先私聊「数据助手」一次')
+    wrapper.unmount()
   })
 
   it('gives AI a plain-text page with ?format=md', async () => {

@@ -30,9 +30,10 @@ from coreman.core.wecom.messages import InboundMessage, Sender, TextPart
 from coreman.core.work_tasks import service
 from coreman.core.work_tasks.service import WorkTaskError, add_event, clip, name_of, now, usable_bot
 
-# chat：人在对话里叫它；cron：定时领取；rerun：验收退回；comment：停下后人补了话；
-# subtask：上级 AI 员工派的子任务；resume：等的子任务都有结果了；handoff：别的员工整件转交过来。
-TRIGGERS = ("chat", "cron", "rerun", "comment", "subtask", "resume", "handoff")
+# chat：人在对话里叫它；web：人在任务页上点开工（新建、指派时选了现在开工也算）；cron：定时领取；
+# rerun：验收退回；comment：停下后人补了话；subtask：上级 AI 员工派的子任务；
+# resume：等的子任务都有结果了；handoff：别的员工整件转交过来。
+TRIGGERS = ("chat", "web", "cron", "rerun", "comment", "subtask", "resume", "handoff")
 # 不需要「待领取」状态就能开工的触发方式。
 _RESTART = ("rerun", "resume")
 
@@ -134,6 +135,7 @@ async def start(
     who = str(triggered_by.get("name") or "")
     line = {
         "chat": f"{who}叫{bot.name}开工，以{who}的身份做",
+        "web": f"{who}在任务页叫{bot.name}开工，以{who}的身份做",
         "cron": f"{bot.name}按定时任务领取",
         "rerun": f"交回{bot.name}重做",
         "comment": f"{who}补充后交回{bot.name}接着做",
@@ -173,6 +175,57 @@ async def start(
             },
         ),
     )
+
+
+async def drive_start(session: AsyncSession, row: WorkTask, user: User) -> None:
+    """人在任务页上叫 AI 员工开工或接着做：和在对话里叫它一样，以叫的人的身份做。
+
+    开不了工时抛 `WorkTaskError`（例如他没私聊过这位员工、结果没处回报），任务原样不动。
+    """
+    bot = await session.get(Bot, row.assignee_bot_id) if row.assignee_bot_id else None
+    if bot is None:
+        raise WorkTaskError(409, f"{row.code} 没有派给 AI 员工")
+    refusal = service.start_refusal(row, user, bot)
+    if refusal is not None:
+        raise WorkTaskError(403, refusal)
+    # 改在保存点外面、失败时自己改回：保存点回滚会让改过的行过期，之后再读要重新加载。
+    before = row.principal_user_id
+    service.drive(row, user.id)
+    try:
+        async with session.begin_nested():
+            await start(
+                session,
+                row,
+                bot=bot,
+                trigger="web",
+                triggered_by={"user_id": str(user.id), "name": name_of(user)},
+            )
+    except WorkTaskError:
+        row.principal_user_id = before
+        raise
+
+
+async def start_now(session: AsyncSession, row: WorkTask, user: User) -> str:
+    """新建或指派给 AI 员工时选了「现在开工」：能开就开，开不了任务照样留着等人叫。
+
+    返回没开成的原因（开成了是空字符串），并在「经过」里记一笔，人知道为什么还没动。
+    """
+    if row.assignee_bot_id is None:
+        return ""
+    try:
+        await drive_start(session, row, user)
+    except WorkTaskError as exc:
+        add_event(
+            session,
+            row,
+            kind="start_failed",
+            actor_type="system",
+            actor_id=None,
+            human_text=f"没能直接开工：{exc.message}",
+            detail={"reason": exc.message},
+        )
+        return exc.message
+    return ""
 
 
 async def _announce(

@@ -644,7 +644,10 @@ def needs_drive(row: WorkTask) -> bool:
 
 def drive_hint(row: WorkTask, bot_name: str) -> str:
     """人派给 AI 员工、还没被领取：告诉人怎么叫它开工（spec §5.1）。"""
-    return f"{bot_name}还没开工。在飞书里对它说「做 {row.code}」，或给它配定时领取。"
+    return (
+        f"{bot_name}还没开工。点「开工」让它现在做，"
+        f"或在飞书里对它说「做 {row.code}」，也可以给它配定时领取。"
+    )
 
 
 def current_line(row: WorkTask, names: dict[str, str]) -> str:
@@ -664,7 +667,7 @@ def current_line(row: WorkTask, names: dict[str, str]) -> str:
     if row.status == "waiting":
         text = str((row.waiting_on or {}).get("human_text") or "等待中")
         if restartable(row):
-            text += f"。处理好后在飞书里对{who}说「做 {row.code}」让它接着做"
+            text += f"。处理好后点「接着做」，或在飞书里对{who}说「做 {row.code}」让它接着做"
         return text
     if row.status == "todo":
         if row.assignee_bot_id and row.start_mode == "manual" and row.claimed_at is None:
