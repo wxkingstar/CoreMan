@@ -389,3 +389,23 @@ async def test_messages_queued_during_a_switch_are_not_asked_about_again(
         select(OutboxItem).where(OutboxItem.dedupe_key.startswith(f"task:{head.id}:stale_hold"))
     )
     assert stale.all() == []
+
+
+async def test_migration_notice_on_feishu_quotes_the_message_with_text(
+    db_session: AsyncSession,
+) -> None:
+    from coreman.runtime.gateway_common import inbound
+
+    bot, _, _ = await seed_bot(db_session)
+    snapshot = SimpleNamespace(id=bot.id, bot_key=bot.bot_key, welcome_message=None)
+    message = SimpleNamespace(
+        platform="feishu", chat_id="oc_demo", reply_context={"message_id": "om_demo"}
+    )
+    await inbound._notice_migrating(db_session, snapshot, message, "oc_demo", uuid.uuid4())  # type: ignore[arg-type]
+    await db_session.commit()
+    item = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key.startswith("migrating:"))
+    )
+    assert item is not None
+    assert item.payload == {"text": msg("switch_in_progress"), "_reply": True}
+    assert item.target == {"chat_id": "oc_demo", "message_id": "om_demo"}

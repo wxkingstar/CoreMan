@@ -198,8 +198,9 @@ async def _notice_migrating(
     payload: dict[str, Any] = {"markdown": msg("switch_in_progress")}
     message_id = message.reply_context.get("message_id")
     if message.platform == "feishu" and message_id:
+        # 飞书引用回复读的是 text，不读 markdown。
         target["message_id"] = message_id
-        payload["_reply"] = True
+        payload = {"text": msg("switch_in_progress"), "_reply": True}
     await outbox.add(
         session,
         bot_id=bot.id,
