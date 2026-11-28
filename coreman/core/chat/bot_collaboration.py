@@ -299,9 +299,7 @@ async def send_message(
     if response and (request_item is None or not request_item.payload.get("_feishu_message_id")):
         raise ValueError("request delivery not confirmed")
     reply_mid = (
-        str(request_item.payload["_feishu_message_id"])
-        if request_item
-        else _origin_message(origin)
+        str(request_item.payload["_feishu_message_id"]) if request_item else _origin_message(origin)
     )
     mention = route.source_open_id if response else route.target_open_id
     text = (row.response if response else row.question) or ""
