@@ -192,6 +192,11 @@ MESSAGES: dict[str, dict[str, str]] = {
             "⏹ 后台任务已停止（已跑 {elapsed}）。没做完的：\n{lines}\n\n"
             "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
         ),
+        "background_switched_notice": (
+            "⏹ 这位 AI 员工的运行时或模型刚换过，后台任务随之停止（已跑 {elapsed}）。没做完的：\n"
+            "{lines}\n\n"
+            "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
+        ),
         "background_expired_notice": (
             "⏹ 后台任务到了任务时限，已停止（已跑 {elapsed}）。没做完的：\n{lines}\n\n"
             "需要的话说「接着做」，我会看会话记录从停下的地方继续。"
@@ -605,6 +610,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "background_stopped_notice": (
             "⏹ バックグラウンドタスクを停止しました（実行時間 {elapsed}）。未完了：\n{lines}\n\n"
             "「続けて」と送れば、会話記録から止まったところを続けます。"
+        ),
+        "background_switched_notice": (
+            "⏹ この AI 社員のランタイムまたはモデルが切り替わったため、バックグラウンドタスクを"
+            "停止しました（実行時間 {elapsed}）。未完了：\n{lines}\n\n"
+            "必要であれば「続けて」と伝えてください。会話の記録を見て、止まったところから続けます。"
         ),
         "background_expired_notice": (
             "⏹ タスクの制限時間に達したため停止しました（実行時間 {elapsed}）。"

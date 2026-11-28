@@ -312,8 +312,14 @@ async def close_for_session(
     return run
 
 
-async def close_for_bot(session: AsyncSession, bot_id: uuid.UUID, reason: str = "reset") -> int:
-    """换运行时、换模型、换工作目录前：这个员工所有在后台阶段的会话都关掉。"""
+async def close_for_bot(
+    session: AsyncSession, bot_id: uuid.UUID, reason: str = "reset", *, notice: str | None = None
+) -> int:
+    """换运行时、换模型、换工作目录前：这个员工所有在后台阶段的会话都关掉。
+
+    `notice` 给定时（换运行时）：没做完的项记为停止、刷新卡片，并用这条文案告诉提问人。
+    这里直接写了终态，之后驱动回来的收尾不会再通知，不在这里说就没人知道被停了。
+    """
     rows = list(
         await session.scalars(
             select(BackgroundRun)
@@ -323,7 +329,17 @@ async def close_for_bot(session: AsyncSession, bot_id: uuid.UUID, reason: str = 
     )
     for run in rows:
         await request_close(session, run, reason)
-        await end(session, run, CLOSE_STATES[reason])
+        if notice is None:
+            await end(session, run, CLOSE_STATES[reason])
+            continue
+        # 与 conclude 同一套收尾：还在跑的项记为停止，定终态，刷新卡片，告诉提问人。
+        run.tasks = [
+            {**t, "status": "stopped"} if t.get("status") == "running" else t
+            for t in run.tasks or []
+        ]
+        if await end(session, run, CLOSE_STATES[reason]):
+            await queue_card(session, run, "switch")
+            await queue_notice(session, run, key=notice)
     return len(rows)
 
 
@@ -405,15 +421,22 @@ async def queue_card(session: AsyncSession, run: BackgroundRun, key: str) -> Non
     )
 
 
-async def queue_notice(session: AsyncSession, run: BackgroundRun, locale: str = "zh") -> None:
-    """被停、到期、丢失：主动告诉提问人（回复在原消息下并 @ 他），列出没做完的和已跑时长。"""
+async def queue_notice(
+    session: AsyncSession, run: BackgroundRun, locale: str = "zh", *, key: str | None = None
+) -> None:
+    """被停、到期、丢失：主动告诉提问人（回复在原消息下并 @ 他），列出没做完的和已跑时长。
+
+    `key` 给定时用这条文案（参数同样是 elapsed、lines），如换运行时关掉的那一种。
+    """
     from coreman.core.bus import outbox
     from coreman.core.i18n.messages import msg
 
     now = datetime.now(UTC)
     elapsed = minutes((now - run.created_at).total_seconds())
     lines = "\n".join(unfinished_lines(run, now)) or "（无）"
-    if run.state == "lost":
+    if key is not None:
+        text = msg(key, locale, elapsed=elapsed, lines=lines)
+    elif run.state == "lost":
         text = msg("background_lost_notice", locale, elapsed=elapsed)
     elif run.state == "expired":
         text = msg("background_expired_notice", locale, elapsed=elapsed, lines=lines)

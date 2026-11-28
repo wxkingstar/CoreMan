@@ -775,6 +775,32 @@ async def test_clear_bot_paths_close_every_running_phase(db_session: AsyncSessio
     assert run.state == "stopped"
 
 
+async def test_runtime_switch_tells_the_asker_that_background_work_was_stopped(
+    db_session: AsyncSession,
+) -> None:
+    bot, relay_row = await feishu_bot(db_session)
+    run = await make_run(db_session, bot, relay_row)
+    assert any(t.get("status") == "running" for t in run.tasks or [])
+    closed = await background_runs.close_for_bot(
+        db_session, bot.id, notice="background_switched_notice"
+    )
+    await db_session.commit()
+    await db_session.refresh(run)
+    assert closed == 1 and run.state == "stopped"
+    assert all(t.get("status") != "running" for t in run.tasks or [])
+    notice = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"bg-end:{run.id}")
+    )
+    assert notice is not None
+    prefix = msg("background_switched_notice", elapsed="", lines="").split("（")[0]
+    assert notice.payload["markdown"].startswith(prefix)
+    assert "任务a" in notice.payload["markdown"]
+    card = await db_session.scalar(
+        select(OutboxItem).where(OutboxItem.dedupe_key == f"bg-card:{run.id}:switch")
+    )
+    assert card is not None
+
+
 async def test_tick_expires_due_runs_and_marks_offline_nodes_lost(db_session: AsyncSession) -> None:
     bot, relay_row = await feishu_bot(db_session)
     due = await make_run(

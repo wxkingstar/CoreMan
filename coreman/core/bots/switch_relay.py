@@ -262,7 +262,7 @@ async def switch_relay(
     # 还在后台阶段的会话先关掉：进程在旧运行时上，带着旧模型与旧凭据。
     from coreman.core.chat import background_runs
 
-    await background_runs.close_for_bot(session, bot.id)
+    await background_runs.close_for_bot(session, bot.id, notice="background_switched_notice")
     # 会话键都保留：带过去的原样续用，带不过去的换新会话、首轮补上原会话最近的对话。
     new_backend = backend_of(new_model, target.model_provider)
     rows = await sessions.list_for_bot(session, bot.id)
