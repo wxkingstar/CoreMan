@@ -393,8 +393,8 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
             "要人定的事用 ask_human（卡片会挪到群里最新的位置并 @ 他）；"
             "还有没结果的事就调用 wait_for。"
             "目标全部达成时用 submit_result 交付：result 写一句结论，"
-            "report 写给发起人看的总结（达成了什么、做了哪几件事、还剩什么要人处理），"
-            "它会显示在卡上并 @ 发起人。"
+            "followups 写交付后还要人处理的事（每条一句，写明要谁做什么），"
+            "这两样会显示在卡上并 @ 发起人；report 写完整汇报，留在任务页。"
         )
     elif ctx.task.payload.get("work_silent"):
         reply = (

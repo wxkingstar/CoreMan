@@ -159,6 +159,36 @@ def task_out(row: WorkTask, names: dict[str, str], viewer: User | None = None) -
     }
 
 
+_EMPTY_INSIDE = {"steps": 0, "steps_done": 0, "decisions": 0, "decisions_open": 0}
+
+
+async def _inside(session: AsyncSession, roots: list[int]) -> dict[int, dict[str, int]]:
+    """每件顶层的事下面有几步、做完几步，几个决策点、还有几个没定。"""
+    out: dict[int, dict[str, int]] = {}
+    if not roots:
+        return out
+    question = (WorkTask.brief.like("[问题]%") & WorkTask.assignee_user_id.is_not(None)).label(
+        "question"
+    )
+    grouped = await session.execute(
+        select(WorkTask.root_id, question, WorkTask.status, func.count())
+        .where(
+            WorkTask.root_id.in_(roots),
+            WorkTask.parent_id.is_not(None),
+            WorkTask.status.not_in(("shadow", "cancelled")),
+        )
+        .group_by(WorkTask.root_id, question, WorkTask.status)
+    )
+    for root_id, is_question, status, count in grouped.all():
+        entry = out.setdefault(int(root_id), dict(_EMPTY_INSIDE))
+        entry["decisions" if is_question else "steps"] += int(count)
+        if is_question and status != "done":
+            entry["decisions_open"] += int(count)
+        if not is_question and status == "done":
+            entry["steps_done"] += int(count)
+    return out
+
+
 @router.get("")
 async def list_work_tasks(
     view: Literal["all", "needs_me", "created", "watching"] = "all",
@@ -167,6 +197,7 @@ async def list_work_tasks(
     assignee_bot_id: uuid.UUID | None = None,
     assignee_user_id: uuid.UUID | None = None,
     include_shadow: bool = True,
+    scope: Literal["top", "all"] = "top",
     q: str | None = Query(default=None, max_length=100),
     before_id: int | None = None,
     limit: int = Query(default=50, ge=1, le=200),
@@ -175,6 +206,10 @@ async def list_work_tasks(
 ) -> dict[str, Any]:
     _active(user)
     conditions: list[Any] = []
+    # 默认只列顶层的事：拆出来的步骤和问人的决策点收在所属那件事下面（点开看），不然一件事
+    # 会在列表里铺开十几行。「待我处理」要看到派给我的每一件；按人、按关键词找时也不收。
+    if scope == "top" and view != "needs_me" and not (q or assignee_bot_id or assignee_user_id):
+        conditions.append(WorkTask.parent_id.is_(None))
     if view == "needs_me":
         conditions.append(service.needs_me(user.id))
     elif view == "created":
@@ -210,10 +245,14 @@ async def list_work_tasks(
     needs_me = await session.scalar(
         select(func.count()).select_from(WorkTask).where(service.needs_me(user.id))
     )
+    inside = await _inside(session, [r.id for r in rows if r.parent_id is None])
     return {
         "code": 0,
         "data": {
-            "items": [{**task_out(r, names, user), "id": r.id} for r in rows],
+            "items": [
+                {**task_out(r, names, user), "id": r.id, **inside.get(r.id, _EMPTY_INSIDE)}
+                for r in rows
+            ],
             "counts": counts,
             "needs_me": int(needs_me or 0),
         },

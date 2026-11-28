@@ -121,6 +121,20 @@ function statusType(value: string): 'info' | 'warning' | 'success' | 'danger' | 
   return 'primary'
 }
 /** 开工方式：人一眼看出要不要自己去叫 AI 员工开工。 */
+/** 顶层的事下面收着的步骤和决策点：列表里只写个数，点开才展开。 */
+function insideLine(row: WorkTask): string {
+  const parts: string[] = []
+  if (row.steps) parts.push(t('workTasks.insideSteps', { done: row.steps_done ?? 0, n: row.steps }))
+  if (row.decisions) {
+    parts.push(
+      row.decisions_open
+        ? t('workTasks.insideDecisionsOpen', { n: row.decisions, open: row.decisions_open })
+        : t('workTasks.insideDecisions', { n: row.decisions }),
+    )
+  }
+  return parts.join(' · ')
+}
+
 function startTag(row: WorkTask): { text: string; type: 'warning' | 'info' | 'success' } | null {
   if (row.assignee?.type !== 'bot' || ['done', 'cancelled', 'shadow'].includes(row.status)) return null
   if (row.needs_drive) return { text: t('workTasks.needsDrive'), type: 'warning' }
@@ -391,6 +405,13 @@ const humanEvents = computed(() => (detail.value?.events ?? []).filter(e => e.hu
           </div>
           <div class="muted now-line">
             {{ row.now }}
+          </div>
+          <div
+            v-if="row.steps || row.decisions"
+            class="muted now-line"
+            data-test="work-task-inside"
+          >
+            {{ insideLine(row) }}
           </div>
           <WorkTaskAsk
             v-if="row.ask?.mine"

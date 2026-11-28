@@ -85,6 +85,50 @@ async def test_any_member_sees_tasks_and_the_agent_layer(
     assert (await client.get("/api/admin/work-tasks", params={"status": "x"})).status_code == 400
 
 
+async def test_the_list_shows_goals_only_and_counts_what_is_inside(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """列表默认只列顶层的事；拆出来的步骤和问人的决策点收在它下面，只写个数。"""
+    root = await _seed(db_session)
+    root.status, root.root_id = "in_progress", root.id
+    asker = await _member(db_session, "asked")
+    rows = [
+        WorkTask(title="对齐接口文档", status="done", parent_id=root.id, root_id=root.id, depth=1),
+        WorkTask(
+            title="仓储侧开发", status="in_progress", parent_id=root.id, root_id=root.id, depth=1
+        ),
+        WorkTask(
+            title="问：结算口径按哪种？",
+            status="todo",
+            parent_id=root.id,
+            root_id=root.id,
+            depth=1,
+            code=f"{root.code}-Q1",
+            brief="[问题]\n背景",
+            assignee_user_id=asker.id,
+        ),
+    ]
+    db_session.add_all(rows)
+    await db_session.commit()
+    await login_as(client, db_session, role="member")
+
+    listed = (await client.get("/api/admin/work-tasks")).json()["data"]
+    assert [i["code"] for i in listed["items"]] == [root.code]
+    assert {k: listed["items"][0][k] for k in ("steps", "steps_done", "decisions")} == {
+        "steps": 2,
+        "steps_done": 1,
+        "decisions": 1,
+    }
+    assert listed["items"][0]["decisions_open"] == 1
+    assert listed["counts"] == {"in_progress": 1}
+
+    # 要逐条看、或者按关键词找时，步骤和决策点照样列得出来。
+    everything = (await client.get("/api/admin/work-tasks", params={"scope": "all"})).json()
+    assert len(everything["data"]["items"]) == 4
+    found = (await client.get("/api/admin/work-tasks", params={"q": "仓储侧"})).json()["data"]
+    assert [i["title"] for i in found["items"]] == ["仓储侧开发"]
+
+
 # ---- 任务平台：人在网页上的操作 --------------------------------------------------------------
 
 

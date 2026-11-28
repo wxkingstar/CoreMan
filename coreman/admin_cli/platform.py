@@ -1253,6 +1253,11 @@ def register_tasks(sub: Any) -> None:
     p.add_argument("--chat-id", help="群聊 id")
     p.add_argument("--keyword", help="在编号、标题与摘要里搜索")
     p.add_argument("--include-shadow", action="store_true", help="包含调度试运行（shadow）的记录")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="把拆出来的步骤和问人的决策点也逐条列出（默认只列顶层的事）",
+    )
     p.add_argument("--limit", type=int, default=50, help="最多显示几条（1-200）")
     p.add_argument("--before-id", type=int, metavar="id", help="只看 id 小于它的（翻页用）")
     leaf(ops, "show", "查看任务详情、待回答的问题、事件与运行记录", tasks_show).add_argument(
@@ -1393,6 +1398,7 @@ async def tasks_list(c: AdminClient, args: argparse.Namespace) -> int:
         assignee_user_id=target["id"] if target and target["type"] == "human" else None,
         chat_id=args.chat_id,
         include_shadow=args.include_shadow,
+        scope="all" if args.all else None,
         q=args.keyword,
         limit=args.limit,
         before_id=args.before_id,

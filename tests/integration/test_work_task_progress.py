@@ -185,7 +185,7 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
     assert card.bot_id == lead.id and card.kind == "send"
     assert card.target == {"chat_id": GROUP, "message_id": "om1"} and card.payload["_reply"]
     assert _blocks(card) == [
-        "**目标：**两个系统对齐接口并联调",
+        "**目标**：两个系统对齐接口并联调",
         "**正在做**\n⏳ 对齐接口文档 — 数据助手 · 时:分 开始",
     ]
     assert _subtitle(card) == "进行中 ░░░░░░░░ 0/1"
@@ -213,7 +213,7 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
     )
     (card,) = await _progress_items(db_session, root)
     assert _blocks(card) == [
-        "**目标：**两个系统对齐接口并联调",
+        "**目标**：两个系统对齐接口并联调",
         "**正在做**\n"
         "⏳ 对齐接口文档 — 数据助手 · 时:分 开始，正在等测试环境发布（时:分）\n"
         "⏳ 仓储侧开发 — 数据助手 · 时:分 开始",
@@ -230,7 +230,7 @@ async def test_one_card_shows_the_whole_picture_and_is_updated_in_place(db_sessi
     assert _blocks(update)[1:4] == [
         "**正在做**\n⏳ 仓储侧开发 — 数据助手 · 时:分 开始",
         "**接下来**\n☐ 两边在测试环境联调",
-        "**已完成（1）**\n✅ 对齐接口文档 — 数据助手：接口文档已合并（用时 6 分钟）",
+        "**已完成（1）**\n✅ 对齐接口文档 — 数据助手（用时 6 分钟）",
     ]
     assert _subtitle(update) == "进行中 ▓▓▓░░░░░ 1/3"
 
@@ -334,6 +334,8 @@ async def test_questions_sit_on_the_same_card_and_only_the_asked_person_answers(
         {"question": "退货单作废还是放宽校验？", "options": ["作废", "放宽"], "context": "背景"},
     )
     child = await db_session.scalar(select(WorkTask).where(WorkTask.code == asked["code"]))
+    # 问题是这件事上的一个决策点：编号挂在它下面，不占任务编号。
+    assert child.code == f"{root.code}-Q1"
     # 不另发一张提问卡：问题和按钮画在这件事的卡上。
     separate = await db_session.scalar(
         select(OutboxItem).where(OutboxItem.dedupe_key.like(f"work-task:{child.id}:ask:%"))
@@ -538,15 +540,29 @@ async def test_follow_up_turns_stay_out_of_the_group_and_the_card_closes_the_goa
     note = await work.note(db_session, ctx, intake)
     assert "回复不会发到群里" in note and "显示在卡上「最新」那一行" in note
 
+    # 交付：一句结论、还要人处理的事会显示在卡上；完整汇报留在任务页，不贴到群里。
+    await _tool(
+        db_session,
+        root,
+        lead,
+        "submit_result",
+        {
+            "result": "两边接口已对齐并联调通过",
+            "output": "全文",
+            "digest": "记要",
+            "report": "完整汇报：每件子任务谁做的、结论、是否验收",
+            "followups": ["请发起人同意合并仓储侧的 PR", "结算口径还没定，请业务负责人定"],
+        },
+    )
     root.status, root.waiting_on, root.summary = "done", None, "两边接口已对齐并联调通过"
-    root.report = "达成：接口对齐并联调通过。做了：对齐接口文档。还剩：无。"
     await progress.refresh(db_session, root, base_url=BASE)
     await db_session.commit()
     items = await _progress_items(db_session, root)
     final = next(item for item in reversed(items) if item.kind == "send")
     assert final is not card and final.payload["card"]["header"]["template"] == "green"
-    assert _blocks(final)[:2] == [
-        "<at id=ou_open_alice></at> 这件事办完了。**结果：**两边接口已对齐并联调通过",
-        "达成：接口对齐并联调通过。做了：对齐接口文档。还剩：无。",
+    assert _blocks(final) == [
+        "<at id=ou_open_alice></at> 这件事办完了。**结果**：两边接口已对齐并联调通过",
+        "**还要人处理**\n- 请发起人同意合并仓储侧的 PR\n- 结算口径还没定，请业务负责人定",
+        "共 1 步，都做完了，明细见任务页",
     ]
     assert _subtitle(final) == "已完成 ▓▓▓▓▓▓▓▓ 1/1"

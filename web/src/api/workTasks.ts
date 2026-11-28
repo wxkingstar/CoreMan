@@ -28,6 +28,8 @@ export interface WorkTask {
   /** 产出物（给人看）。 */
   artifacts: { title: string; url: string }[]
   created_at: string; updated_at: string; closed_at: string | null
+  /** 列表里才有：这件事下面拆了几步、做完几步，几个要人定的决策点、还有几个没定。 */
+  steps?: number; steps_done?: number; decisions?: number; decisions_open?: number
 }
 export interface WorkTaskEvent {
   id: number; kind: string; actor_type: 'human' | 'bot' | 'system'; actor_name: string
