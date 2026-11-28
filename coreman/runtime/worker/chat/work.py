@@ -167,7 +167,8 @@ async def continued(
 
     依次看：带了它的任务编号；回复的是它的任务回复（不跟进的事回复里没有编号，靠发送存档认）；
     都没有、也没回复别的消息时，同一个人两小时内在这个群找它办过事，就当是接着问。
-    任务按代表人的权限做，会话里可能有没发到群里的内容，所以只有代表人能续进去。
+    带编号或回复它的任务回复时，谁说都续进去：接着找它也是人工触发，这一轮起以说话的人的身份
+    做（见 `mark_started`）。
     """
     if bot.platform != "feishu" or speaker_id is None:
         return None
@@ -189,7 +190,6 @@ async def continued(
                 WorkTask.code == code,
                 WorkTask.chat_id == chat_id,
                 WorkTask.assignee_bot_id == bot.id,
-                func.coalesce(WorkTask.principal_user_id, WorkTask.requester_user_id) == speaker_id,
                 WorkTask.status != "shadow",
             )
         )
@@ -321,13 +321,24 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     principal = await session.get(User, principal_of(row)) if principal_of(row) else None
     owner = name_of(principal) if principal else (row.requester_name or "")
     label = f"任务 {row.code}" if row.tracked else "一件事"
-    if is_lead(row):
+    if is_lead(row) and row.source == "dispatch":
         lines = [
             f"这一轮在做{label}（{row.title}）：发起人{row.requester_name or ''}在群里提的这件事，"
             "你调度时决定自己牵头。你是在替发起人办事，拆出去的子任务也按发起人的权限做。",
         ]
         if row.brief:
             lines.append(f"你当时写的目标与要求：{row.brief}")
+        lines.append(LEAD_NOTE)
+    elif is_lead(row):
+        lines = [
+            f"这一轮在做{label}（{row.title}）：{row.requester_name or owner}在任务平台上建了这件事"
+            f"并指派给你，{owner}在群里叫你开工，由你牵头。你是在替{owner}办事，"
+            f"拆出去的子任务也按{owner}的权限做。",
+        ]
+        if row.summary:
+            lines.append(f"一句话说明：{row.summary}")
+        if row.brief:
+            lines.append(f"背景与要求（人写的原文）：\n{row.brief}")
         lines.append(LEAD_NOTE)
     elif row.dispatcher_bot_id and row.source == "dispatch":
         dispatcher = await session.get(Bot, row.dispatcher_bot_id)
@@ -443,12 +454,44 @@ async def note(session: AsyncSession, ctx: TaskContext, intake: Intake) -> str |
     return "\n".join(lines)
 
 
+async def drive_follow_up(session: AsyncSession, ctx: TaskContext, intake: Intake) -> None:
+    """有人在群里接着找它（带编号、回复它的任务回复）：人工触发，这一轮起以他的身份做。
+
+    平台交接的那一轮（载荷带 `work_task_id`）在交接时已经换好，这里只管接着找它的消息。
+    """
+    code = code_of(intake.session_key)
+    row = await session.scalar(select(WorkTask).where(WorkTask.code == code)) if code else None
+    speaker = intake.speaker.user_id
+    if (
+        row is None
+        or "work_task_id" in ctx.task.payload
+        or row.assignee_bot_id != intake.bot.id
+        or row.status in ("shadow", "cancelled")
+        or speaker is None
+        or speaker == principal_of(row)
+    ):
+        return
+    row.principal_user_id = speaker
+    name = intake.speaker.display_name or "说话的人"
+    session.add(
+        WorkTaskEvent(
+            work_task_id=row.id,
+            kind="comment",
+            actor_type="human",
+            actor_id=str(speaker),
+            human_text=f"{name}接着找{intake.bot.name}，之后以{name}的身份做",
+            chat_task_id=ctx.task.id,
+        )
+    )
+
+
 async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) -> None:
     code = code_of(intake.session_key)
     row = await session.scalar(select(WorkTask).where(WorkTask.code == code)) if code else None
     # 任务已经转给别人（人或别的员工）：这一轮照常回答，但不动任务。
     if row is None or row.status in ("shadow", "cancelled") or row.assignee_bot_id != intake.bot.id:
         return
+    payload = ctx.task.payload
     before_ask = row.ask
     first = not await session.scalar(
         select(WorkTaskRun.id).where(WorkTaskRun.work_task_id == row.id).limit(1)
@@ -459,7 +502,6 @@ async def mark_started(session: AsyncSession, ctx: TaskContext, intake: Intake) 
         row.status, row.waiting_on, row.ask = "in_progress", None, None
     if row.claimed_at is None:
         row.claimed_at = row.updated_at
-    payload = ctx.task.payload
     trigger = str(
         payload.get("work_trigger") or ("followup" if "work_task_id" not in payload else "")
     )

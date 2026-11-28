@@ -475,11 +475,15 @@ async def comment_work_task(
 ) -> dict[str, Any]:
     async def op(row: WorkTask) -> None:
         await service.comment(session, row, user, body.text)
-        # AI 员工停下来等人（卡住、等确认）时，能管这件事的人补的话直接交回它接着做。
-        if row.assignee_bot_id and service.restartable(row) and service.can_manage(row, user):
+        # AI 员工停下来等人（卡住、等确认）时，补的话直接交回它接着做：补话的人是触发人，
+        # 以他的身份做（谁叫开工就以谁的身份做）。
+        if row.assignee_bot_id and service.restartable(row):
             bot = await session.get(Bot, row.assignee_bot_id)
             if bot is None:
                 return
+            # 改在保存点外面、失败时自己改回：保存点回滚会让改过的行过期，之后再读要重新加载。
+            before = row.principal_user_id
+            service.drive(row, user.id)
             try:
                 async with session.begin_nested():
                     await execute.start(
@@ -492,7 +496,8 @@ async def comment_work_task(
                         silent=row.requester_bot_id is not None,
                     )
             except WorkTaskError:
-                pass  # 交不回去（例如没私聊过）：评论照样记下，页面仍提示怎么叫它开工。
+                # 交不回去（例如没私聊过）：评论照样记下，页面仍提示怎么叫它开工。
+                row.principal_user_id = before
 
     return await _act(request, session, user, code, op)
 

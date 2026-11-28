@@ -134,24 +134,58 @@ async def test_capability_dies_with_the_turn(
     assert response.status_code == 403
 
 
-async def test_only_people_who_can_manage_the_task_can_start_it_and_reads_stay_own(
+async def test_whoever_starts_or_restarts_a_task_drives_it(
     client: httpx.AsyncClient, app, db_session: AsyncSession
 ) -> None:
-    bot, alice, turn, first, _ = await _setup(db_session)
+    bot, alice, turn, first, second = await _setup(db_session)
     carol = User(login_name="carol", display_name="carol", email="carol@example.test")
-    db_session.add(carol)
+    dave = User(login_name="dave", display_name="dave", email="dave@example.test")
+    db_session.add_all([carol, dave])
     db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_a"))
     db_session.add(UserReached(bot_id=bot.id, user_id=alice.id, platform_chat_id="oc_dm"))
     await db_session.commit()
-    token = tools.issue_capability(
-        app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=carol.id, kind="chat"
-    )
-    auth = {"Authorization": f"Bearer {token}"}
-    response = await client.post(
-        URL, json=_call("start_task", {"codes": [first.code]}), headers=auth
-    )
-    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
-    assert result["started"] is False and "代表人" in result["reason"]
+
+    async def start(actor, code):
+        token = tools.issue_capability(
+            app.state.cipher, task_id=turn.id, bot_id=bot.id, actor_id=actor.id, kind="chat"
+        )
+        response = await client.post(
+            URL,
+            json=_call("start_task", {"codes": [code]}),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+
+    async def reload():
+        return await db_session.scalar(
+            select(WorkTask)
+            .where(WorkTask.code == second.code)
+            .execution_options(populate_existing=True)
+        )
+
+    # 指派给这位员工的任务谁都能叫开工，以叫开工的人的身份做：carol 没有飞书身份，开不了工，
+    # 代表人也不变。
+    result = await start(carol, second.code)
+    assert result["started"] is False and "carol没有飞书身份" in result["reason"]
+    row = await reload()
+    assert row.principal_user_id == alice.id and row.claimed_at is None
+
+    # 有了飞书身份、私聊过它：开工，carol 成为代表人。
+    db_session.add(UserIdentity(user_id=carol.id, platform="feishu", platform_user_id="ou_c"))
+    db_session.add(UserReached(bot_id=bot.id, user_id=carol.id, platform_chat_id="oc_dm_c"))
+    await db_session.commit()
+    assert (await start(carol, second.code))["started"] is True
+    row = await reload()
+    assert row.principal_user_id == carol.id and row.chat_id == "oc_dm_c"
+    queued = await db_session.scalar(select(Task).where(Task.session_key == f"work:{second.code}"))
+    assert queued.user_id == carol.id
+
+    # 做到一半停下来的：谁叫它接着做就换成谁的身份；dave 没有飞书身份，开不了工，代表人不变。
+    row.status, row.waiting_on = "waiting", {"kind": "human", "human_text": "卡住了"}
+    await db_session.commit()
+    result = await start(dave, second.code)
+    assert result["started"] is False and "dave没有飞书身份" in result["reason"]
+    assert (await reload()).principal_user_id == carol.id
 
     # 卡住了停下来等代表人：代表人叫它接着做，带上补充的话。
     token = tools.issue_capability(
@@ -224,3 +258,96 @@ async def test_tools_refuse_a_cancelled_task(
         URL, json=_call("wait_for", {}), headers={"Authorization": f"Bearer {token}"}
     )
     assert json.loads(response.json()["result"]["content"][0]["text"])["error"] == "not_in_task"
+
+
+async def test_creator_can_hand_a_task_to_whoever_she_asks_and_cron_starts_as_the_creator(
+    client: httpx.AsyncClient, app, db_session: AsyncSession
+) -> None:
+    from coreman.core.db.models import Bot, WorkTaskEvent
+
+    bot, alice, _, first, second = await _setup(db_session)
+    other = Bot(
+        bot_key="ops_bot",
+        platform="feishu",
+        name="运维助手",
+        created_by=bot.created_by,
+        relay_server_id=bot.relay_server_id,
+        model=bot.model,
+        working_dir="/data/skills/ops_bot",
+        system_prompt="你是运维助手",
+        merged_system_prompt="你是运维助手",
+        credentials_enc=bot.credentials_enc,
+        env_vars_enc=bot.env_vars_enc,
+    )
+    db_session.add(other)
+    db_session.add(UserIdentity(user_id=alice.id, platform="feishu", platform_user_id="ou_a"))
+    await db_session.flush()
+    db_session.add(UserReached(bot_id=other.id, user_id=alice.id, platform_chat_id="oc_dm_o"))
+    own = await tasks.enqueue(
+        db_session,
+        tasks.NewTask(bot_id=other.id, kind="chat", user_id=alice.id, session_key="oc_dm_o"),
+    )
+    own.status = "running"
+    await db_session.commit()
+
+    def call(actor_id, kind="chat"):
+        token = tools.issue_capability(
+            app.state.cipher, task_id=own.id, bot_id=other.id, actor_id=actor_id, kind=kind
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    # 创建人 alice 叫「运维助手」做派给「销售」的任务：运维助手接手，以 alice 的身份做。
+    response = await client.post(
+        URL, json=_call("start_task", {"codes": [first.code]}), headers=call(alice.id)
+    )
+    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+    assert result["started"] is True
+    row = await db_session.scalar(
+        select(WorkTask)
+        .where(WorkTask.code == first.code)
+        .execution_options(populate_existing=True)
+    )
+    assert row.assignee_bot_id == other.id and row.principal_user_id == alice.id
+    texts = list(
+        await db_session.scalars(
+            select(WorkTaskEvent.human_text).where(WorkTaskEvent.work_task_id == row.id)
+        )
+    )
+    assert "alice叫运维助手接手" in texts
+
+    # 别人不行：只能叫任务指派给的那位。
+    carol = User(login_name="carol", display_name="carol", email="carol@example.test")
+    db_session.add(carol)
+    await db_session.commit()
+    response = await client.post(
+        URL, json=_call("start_task", {"codes": [second.code]}), headers=call(carol.id)
+    )
+    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+    assert result["started"] is False and "没有指派给「运维助手」" in result["reason"]
+
+    # 定时领取是自动开工：以创建人 alice 的身份做，不是定时任务的所有者 carol。
+    second.assignee_bot_id, second.principal_user_id = other.id, carol.id
+    await db_session.commit()
+    response = await client.post(
+        URL,
+        json=_call("start_task", {"codes": [second.code]}),
+        headers=call(carol.id, kind="cron"),
+    )
+    result = json.loads(response.json()["result"]["content"][0]["text"])["results"][0]
+    assert result["started"] is True
+    await db_session.refresh(second)
+    assert second.principal_user_id == alice.id
+
+
+async def test_the_creator_reviews_by_default_even_when_someone_else_assigned_it(
+    db_session: AsyncSession,
+) -> None:
+    bot, alice, _, _, _ = await _setup(db_session)
+    bob = User(login_name="bob", display_name="bob", email="bob@example.test")
+    db_session.add(bob)
+    await db_session.flush()
+    row = await service.create(db_session, alice, title="对一下账")
+    row.assignee_user_id = bob.id
+    await service.assign(db_session, row, bob, service.Assignee("bot", bot.id))
+    # 创建人是提需求的人：验收默认归她，不归转交的人。
+    assert row.reviewer_user_id == alice.id and row.principal_user_id == bob.id

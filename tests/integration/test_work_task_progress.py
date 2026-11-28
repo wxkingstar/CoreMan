@@ -81,7 +81,8 @@ async def _setup(db_session, *, source: str = "dispatch"):
         requester_name="alice",
         principal_user_id=alice.id,
         assignee_bot_id=lead.id,
-        dispatcher_bot_id=lead.id,
+        # 任务页上建、在私聊里开工的事没有调度员；在群里叫调度员接手（adopt）的才有。
+        dispatcher_bot_id=lead.id if source == "dispatch" else None,
         tracked=True,
     )
     db_session.add(root)
