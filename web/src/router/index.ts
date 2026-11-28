@@ -2,6 +2,7 @@ import { ElMessage } from 'element-plus'
 import { createRouter, createWebHistory } from 'vue-router'
 import { setUnauthorizedHandler } from '@/api/client'
 import { i18n } from '@/i18n'
+import { installPageMemory, pageScrollBehavior } from '@/composables/usePageMemory'
 import { useAuthStore } from '@/stores/auth'
 
 declare module 'vue-router' {
@@ -13,6 +14,8 @@ declare module 'vue-router' {
 
 export const router = createRouter({
   history: createWebHistory(),
+  // 任务列表与任务页：返回时回到原处（见 usePageMemory）；其余页面不变。
+  scrollBehavior: pageScrollBehavior(['work-tasks', 'work-task']),
   routes: [
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
     // 单个任务是独立页面，不套管理台布局：飞书里点开快；带 ?format=md 时只给纯文本。
@@ -85,6 +88,8 @@ export const router = createRouter({
     },
   ],
 })
+
+installPageMemory(router)
 
 setUnauthorizedHandler(() => {
   const auth = useAuthStore()

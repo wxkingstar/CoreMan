@@ -4,18 +4,20 @@
  * 顶部可以回到任务列表。上面全是给人看的；给 AI 看的细节收在底部、默认折叠。
  * 地址带 `?format=md` 时只输出纯文本（Markdown），给 AI 读。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import LoadState from '@/components/LoadState.vue'
 import AssigneePicker from '@/components/workTasks/AssigneePicker.vue'
+import WorkTaskActor from '@/components/workTasks/WorkTaskActor.vue'
 import WorkTaskAsk from '@/components/workTasks/WorkTaskAsk.vue'
 import WorkTaskCode from '@/components/workTasks/WorkTaskCode.vue'
 import WorkTaskStatusIcon from '@/components/workTasks/WorkTaskStatusIcon.vue'
 import WorkTaskText from '@/components/workTasks/WorkTaskText.vue'
 import { workTasks, type AssigneeIn, type WorkTask, type WorkTaskDetail } from '@/api/workTasks'
+import { usePageMemory } from '@/composables/usePageMemory'
 import { useAuthStore } from '@/stores/auth'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
@@ -35,6 +37,9 @@ const assignee = ref<AssigneeIn | null>(null)
 const assignNote = ref('')
 const commentText = ref('')
 const allEvents = ref(false)
+const agentOpen = ref<string[]>([])
+// 点进别的任务再返回：展开过的「显示全部」和给 AI 看的细节原样恢复，滚回原处、闪一下刚才点的地方。
+const memory = usePageMemory(() => ({ allEvents: allEvents.value, agentOpen: agentOpen.value }))
 // 手机（飞书里点开多半是手机）：信息表一栏、子任务表把进展折进标题下面。
 const narrowQuery = window.matchMedia?.('(max-width: 640px)')
 const narrow = ref(!!narrowQuery?.matches)
@@ -53,12 +58,16 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+  await nextTick()
+  memory.ready()
 }
 watch([code, plain], () => {
   detail.value = null
   text.value = ''
   assigning.value = null
-  allEvents.value = false
+  const saved = memory.recall()
+  allEvents.value = saved?.allEvents ?? false
+  agentOpen.value = saved?.agentOpen ?? []
   void load()
 }, { immediate: true })
 watch([detail, code], () => {
@@ -93,11 +102,10 @@ function startTag(row: WorkTask): { text: string; type: 'warning' | 'info' | 'su
   return { text: t('workTasks.claimed'), type: 'success' }
 }
 function pretty(value: unknown): string { return JSON.stringify(value, null, 2) }
-function actorLabel(actor: { type: string; name: string } | null): string {
-  if (!actor) return t('workTasks.unassigned')
-  return actor.type === 'bot' ? `${actor.name}（AI）` : actor.name
+function openChild(row: WorkTask, _column: unknown, event: Event): void {
+  memory.markOrigin(row.code, event)
+  void router.push({ name: 'work-task', params: { code: row.code } })
 }
-function openChild(row: WorkTask): void { void router.push({ name: 'work-task', params: { code: row.code } }) }
 
 async function act(run: () => Promise<WorkTaskDetail>, done?: string): Promise<void> {
   busy.value = true
@@ -345,7 +353,6 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
       <el-descriptions
         :column="narrow ? 1 : 2"
         border
-        size="small"
       >
         <el-descriptions-item :label="t('workTasks.status')">
           <el-tag :type="statusType(detail.status)">
@@ -362,13 +369,19 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item :label="t('workTasks.assignee')">
-          {{ actorLabel(detail.assignee) }}
+          <WorkTaskActor :actor="detail.assignee" />
         </el-descriptions-item>
         <el-descriptions-item :label="t('workTasks.requester')">
-          {{ detail.requester?.name ?? (detail.requester_name || '—') }}
+          <WorkTaskActor
+            :actor="detail.requester"
+            :empty="detail.requester_name || '—'"
+          />
         </el-descriptions-item>
         <el-descriptions-item :label="t('workTasks.principal')">
-          {{ detail.principal?.name ?? '—' }}
+          <WorkTaskActor
+            :actor="detail.principal"
+            empty="—"
+          />
         </el-descriptions-item>
         <el-descriptions-item :label="t('workTasks.reviewer')">
           {{ detail.review_required ? (detail.reviewer?.name ?? detail.principal?.name ?? '—') : t('workTasks.noReview') }}
@@ -380,7 +393,7 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
           v-if="detail.dispatcher"
           :label="t('workTasks.dispatcher')"
         >
-          {{ detail.dispatcher.name }}
+          <WorkTaskActor :actor="{ type: 'bot', name: detail.dispatcher.name }" />
         </el-descriptions-item>
         <el-descriptions-item :label="t('workTasks.created')">
           {{ formatDateTime(detail.created_at) }}
@@ -440,7 +453,6 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
         <el-table
           :data="detail.children"
           row-key="code"
-          size="small"
           class="children"
           data-test="work-task-children"
           @row-click="openChild"
@@ -488,10 +500,10 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
           <el-table-column
             v-if="!narrow"
             :label="t('workTasks.assignee')"
-            width="130"
+            min-width="150"
           >
             <template #default="{ row }">
-              {{ actorLabel(row.assignee) }}
+              <WorkTaskActor :actor="row.assignee" />
             </template>
           </el-table-column>
           <el-table-column
@@ -529,7 +541,10 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
           :key="event.id"
           :timestamp="formatDateTime(event.created_at)"
         >
-          <strong v-if="event.actor_type === 'bot' && event.actor_name">{{ event.actor_name }}：</strong><WorkTaskText
+          <strong
+            v-if="event.actor_type === 'bot' && event.actor_name"
+            class="event-actor"
+          ><WorkTaskActor :actor="{ type: 'bot', name: event.actor_name }" />：</strong><WorkTaskText
             :text="event.human_text"
             :linked="detail.linked"
           />
@@ -570,7 +585,10 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
         </router-link>
       </p>
       <!-- 给 AI 看的细节：每次打开都收起，AI 员工自己会读。 -->
-      <el-collapse data-test="agent-layer">
+      <el-collapse
+        v-model="agentOpen"
+        data-test="agent-layer"
+      >
         <el-collapse-item
           v-if="detail.agent.report"
           :title="t('workTasks.report')"
@@ -664,15 +682,25 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
 </template>
 
 <style scoped>
-.plain { margin: 0; padding: 16px; white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6; }
-.task-page { max-width: 1280px; margin: 0 auto; padding: 12px 16px 32px; min-height: 100vh; box-sizing: border-box; }
+.plain { margin: 0; padding: 16px; white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.7; }
+/* 正文 15px（原来表格和说明多是 12px，读起来吃力）；够宽就铺开，两边留白随屏宽变化。 */
+.task-page {
+  max-width: 1760px; margin: 0 auto; padding: 16px clamp(12px, 3vw, 48px) 40px;
+  min-height: 100vh; box-sizing: border-box; font-size: 15px; line-height: 1.7;
+}
+.task-page :deep(.el-descriptions), .task-page :deep(.el-table), .task-page :deep(.el-timeline),
+.task-page :deep(.el-collapse-item__content), .task-page :deep(.el-alert__title) { font-size: 15px; }
+.task-page :deep(.el-descriptions__label) { width: 7em; }
+.task-page :deep(.el-timeline-item__timestamp) { font-size: 13px; }
 .task-head { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 12px; }
-.task-head h1 { margin: 0; font-size: 20px; line-height: 1.4; }
+.task-head h1 { margin: 0; font-size: 22px; line-height: 1.4; }
+.task-head .code-cell { gap: 6px; }
 .task-loading { height: 240px; }
 .task-detail { display: flex; flex-direction: column; gap: 12px; }
-.task-detail h4 { margin: 8px 0 0; }
+.task-detail h4 { margin: 8px 0 0; font-size: 17px; }
 .timeline-head { display: flex; align-items: baseline; gap: 12px; }
-.task-detail pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
+.task-detail pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 13px; }
+.event-actor { display: inline-flex; align-items: center; }
 .now :deep(.el-alert__content) { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .task-actions .el-button + .el-button { margin-left: 0; }
@@ -682,14 +710,13 @@ const hiddenEvents = computed(() => humanEvents.value.length - humanEvents.value
 .children :deep(.el-table__row) { cursor: pointer; }
 .child-now { display: block; margin-top: 2px; }
 @media (max-width: 640px) {
-  .task-page { padding: 8px 8px 24px; }
   .task-detail.cm-panel { padding: 12px; }
-  .task-head h1 { font-size: 17px; }
+  .task-head h1 { font-size: 19px; }
 }
 .task-messages, .runs { padding-left: 20px; margin: 4px 0; }
 .raw-event { padding: 6px 0; border-bottom: 1px dashed var(--el-border-color-lighter); }
 .related { margin-right: 8px; }
 .code-cell { display: inline-flex; align-items: center; gap: 4px; }
 .inline-tag { margin-left: 6px; }
-.muted { color: var(--el-text-color-secondary); font-size: 12px; }
+.muted { color: var(--el-text-color-secondary); font-size: 14px; }
 </style>

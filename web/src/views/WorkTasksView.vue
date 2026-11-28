@@ -3,14 +3,16 @@
  * 任务平台：「我的任务」四栏 + 统计。点开一个任务进它的独立页面（WorkTaskDetailView）；
  * 当前那一栏和状态筛选记在地址里，从详情页返回时还停在原处。
  */
-import { onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import LoadState from '@/components/LoadState.vue'
+import WorkTaskActor from '@/components/workTasks/WorkTaskActor.vue'
 import WorkTaskAsk from '@/components/workTasks/WorkTaskAsk.vue'
 import WorkTaskCreateDialog from '@/components/workTasks/WorkTaskCreateDialog.vue'
 import WorkTaskStatusIcon from '@/components/workTasks/WorkTaskStatusIcon.vue'
 import { workTasks, type WorkTask, type WorkTaskDetail, type WorkTaskStats, type WorkTaskView } from '@/api/workTasks'
+import { usePageMemory } from '@/composables/usePageMemory'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime } from '@/utils/format'
 
@@ -30,9 +32,18 @@ const loading = ref(false)
 const loadError = ref('')
 const more = ref(false)
 const creating = ref(false)
+// 返回列表时回到原处：已经加载的行（含「加载更多」）、搜索词和统计都原样放回，再悄悄刷新。
+interface ListMemory {
+  rows: (WorkTask & { id: number })[]; counts: Record<string, number>; needsMe: number
+  more: boolean; query: string; stats: WorkTaskStats | null
+}
+const memory = usePageMemory<ListMemory>(() => ({
+  rows: rows.value, counts: counts.value, needsMe: needsMe.value,
+  more: more.value, query: query.value, stats: stats.value,
+}))
 
-async function load(append = false): Promise<void> {
-  loading.value = true
+async function load(append = false, quiet = false): Promise<void> {
+  loading.value = !quiet
   loadError.value = ''
   try {
     if (view.value === 'stats') {
@@ -45,12 +56,13 @@ async function load(append = false): Promise<void> {
       q: query.value.trim() || undefined,
       include_shadow: status.value === 'shadow',
       before_id: append ? rows.value[rows.value.length - 1]?.id : undefined,
-      limit: PAGE,
+      // 悄悄刷新时按已经加载的行数取，页面不会突然变短。
+      limit: quiet ? Math.min(200, Math.max(PAGE, rows.value.length)) : PAGE,
     })
     rows.value = append ? [...rows.value, ...data.items] : data.items
     counts.value = data.counts
     needsMe.value = data.needs_me
-    more.value = data.items.length === PAGE
+    if (!quiet) more.value = data.items.length === PAGE
   } catch (e) {
     loadError.value = errorMessage(e)
   } finally {
@@ -58,7 +70,23 @@ async function load(append = false): Promise<void> {
   }
 }
 
-onMounted(() => { void load() })
+onMounted(async () => {
+  const saved = memory.recall()
+  if (!saved) {
+    await load()
+    memory.ready()
+    return
+  }
+  stats.value = saved.stats
+  rows.value = saved.rows
+  counts.value = saved.counts
+  needsMe.value = saved.needsMe
+  more.value = saved.more
+  query.value = saved.query
+  await nextTick()
+  memory.ready()
+  void load(false, true)
+})
 watch([view, status], () => {
   // 记在地址里：从详情页返回时还停在这一栏。
   const q = { ...(view.value === 'needs_me' ? {} : { view: view.value }), ...(status.value ? { status: status.value } : {}) }
@@ -97,10 +125,9 @@ function startTag(row: WorkTask): { text: string; type: 'warning' | 'info' | 'su
   if (row.start_mode === 'auto') return { text: t('workTasks.autoStart'), type: 'info' }
   return { text: t('workTasks.claimed'), type: 'success' }
 }
-function show(row: WorkTask): void { void router.push({ name: 'work-task', params: { code: row.code } }) }
-function actorLabel(actor: { type: string; name: string } | null): string {
-  if (!actor) return t('workTasks.unassigned')
-  return actor.type === 'bot' ? `${actor.name}（AI）` : actor.name
+function show(row: WorkTask, _column?: unknown, event?: Event): void {
+  memory.markOrigin(row.code, event)
+  void router.push({ name: 'work-task', params: { code: row.code } })
 }
 
 </script>
@@ -209,7 +236,7 @@ function actorLabel(actor: { type: string; name: string } | null): string {
         <el-table :data="stats.backlog">
           <el-table-column :label="t('workTasks.assignee')">
             <template #default="{ row }">
-              {{ actorLabel(row.assignee) }}
+              <WorkTaskActor :actor="row.assignee" />
             </template>
           </el-table-column>
           <el-table-column
@@ -237,7 +264,10 @@ function actorLabel(actor: { type: string; name: string } | null): string {
         width="100"
       >
         <template #default="{ row }">
-          <span class="code-cell">
+          <span
+            class="code-cell"
+            :data-back-key="row.code"
+          >
             <WorkTaskStatusIcon :status="row.status" />{{ row.code }}
           </span>
         </template>
@@ -308,7 +338,7 @@ function actorLabel(actor: { type: string; name: string } | null): string {
         width="140"
       >
         <template #default="{ row }">
-          {{ actorLabel(row.assignee) }}
+          <WorkTaskActor :actor="row.assignee" />
         </template>
       </el-table-column>
       <el-table-column

@@ -88,6 +88,10 @@ h1,h2,h3,p { margin-top: 0; } h2 { font-size: 23px; letter-spacing: -.4px; line-
 .cm-section-nav a { padding: 7px 12px; background: var(--cm-brand-soft); border-radius: 6px; }
 .cm-form-section { scroll-margin-top: 24px; }
 .cm-state { margin-bottom: 16px; }
+/* 返回时闪一下刚才点出去的地方（usePageMemory）。 */
+@keyframes cm-flash { 0%, 30% { background-color: var(--el-color-primary-light-8); } 100% { background-color: transparent; } }
+.cm-flash, tr.cm-flash > td.el-table__cell { animation: cm-flash 1.8s ease-out; }
+@media (prefers-reduced-motion: reduce) { .cm-flash, tr.cm-flash > td.el-table__cell { animation-duration: .01s; } }
 @media (max-width: 1024px) { .el-main { padding: 20px; } }
 @media (max-width: 767px) {
  .el-main { padding: 16px; } h2 { font-size: 21px; }

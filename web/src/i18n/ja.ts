@@ -494,7 +494,7 @@ export default {
     summary: 'ひとこと', related: '関連タスク', timeline: '経過', noEvents: 'まだ記録がありません',
     agentLayer: 'AI 向けの詳細', agentLayerHint: '既定で折りたたまれています。AI 社員が自分で読みます。誰でも展開できます。',
     plainText: 'プレーンテキスト版（AI 向け）', backToList: 'タスク一覧', progress: '進捗',
-    allEvents: 'すべて表示（ほか AI の記録 {n} 件）', milestonesOnly: 'マイルストーンのみ',
+    allEvents: 'すべて表示（ほか AI の記録 {n} 件）', milestonesOnly: 'マイルストーンのみ', aiHint: 'AI 社員です',
     report: '完全な報告', artifacts: '成果物',
     brief: '背景と要件', digest: 'タスク記録', decision: '振り分けの根拠',
     probability: '判断確率', dispatchRaw: 'ディスパッチャーの出力', recentMessages: '当時のグループメッセージ', detail: '詳細',
